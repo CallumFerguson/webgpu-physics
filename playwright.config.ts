@@ -5,11 +5,16 @@ const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  globalSetup: "./tests/e2e/global-setup.ts",
   fullyParallel: false,
   workers: 1,
   retries: 0,
+  timeout: 60_000,
   reporter: "list",
   preserveOutput: "always",
+  expect: {
+    timeout: 10_000,
+  },
   use: {
     baseURL,
     viewport: { width: 800, height: 600 },
@@ -17,6 +22,10 @@ export default defineConfig({
     colorScheme: "dark",
     locale: "en-US",
     timezoneId: "UTC",
+    contextOptions: {
+      reducedMotion: "reduce",
+    },
+    navigationTimeout: 15_000,
     trace: "retain-on-failure",
   },
   projects: [
@@ -33,10 +42,4 @@ export default defineConfig({
       },
     },
   ],
-  webServer: {
-    command: `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
-    url: baseURL,
-    reuseExistingServer: false,
-    timeout: 30_000,
-  },
 });
