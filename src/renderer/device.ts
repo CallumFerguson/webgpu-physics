@@ -11,6 +11,29 @@ export class WebGPUUnavailableError extends Error {
   }
 }
 
+function describeAdapter(info: GPUAdapterInfo): string {
+  const details = [
+    info.description,
+    info.vendor,
+    info.architecture,
+    info.device,
+  ].filter((detail, index, all) => detail && all.indexOf(detail) === index);
+
+  return details.join(" / ") || "unknown adapter";
+}
+
+export function assertHardwareWebGPUAdapter(info: GPUAdapterInfo): void {
+  const description = describeAdapter(info);
+  const isSwiftShader = /swiftshader/i.test(description);
+
+  if (info.isFallbackAdapter || isSwiftShader) {
+    throw new WebGPUUnavailableError(
+      `A hardware WebGPU adapter is required, but Chrome selected a software ` +
+        `adapter (${description}). SwiftShader and other fallback adapters are disabled.`,
+    );
+  }
+}
+
 export async function requestWebGPUDevice(): Promise<WebGPUDeviceContext> {
   const gpu = navigator.gpu;
 
@@ -20,13 +43,19 @@ export async function requestWebGPUDevice(): Promise<WebGPUDeviceContext> {
     );
   }
 
-  const adapter = await gpu.requestAdapter({ powerPreference: "low-power" });
+  const adapter = await gpu.requestAdapter({
+    powerPreference: "high-performance",
+    forceFallbackAdapter: false,
+  });
 
   if (!adapter) {
     throw new WebGPUUnavailableError(
-      "WebGPU is present, but no compatible GPU adapter could be created.",
+      "WebGPU is present, but no hardware GPU adapter could be created. " +
+        "Software fallback adapters such as SwiftShader are disabled.",
     );
   }
+
+  assertHardwareWebGPUAdapter(adapter.info);
 
   const device = await adapter.requestDevice();
 

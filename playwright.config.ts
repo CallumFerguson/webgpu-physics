@@ -21,19 +21,14 @@ export default defineConfig({
   },
   projects: [
     {
-      name: "chromium",
+      name: "chrome-hardware",
       use: {
         ...devices["Desktop Chrome"],
         browserName: "chromium",
-        channel: "chromium",
+        channel: "chrome",
         headless: true,
         launchOptions: {
-          args: [
-            "--enable-unsafe-webgpu",
-            "--use-webgpu-adapter=swiftshader",
-            "--use-gpu-in-tests",
-            "--disable-dawn-features=use_dxc",
-          ],
+          args: ["--enable-gpu", "--disable-software-rasterizer"],
         },
       },
     },

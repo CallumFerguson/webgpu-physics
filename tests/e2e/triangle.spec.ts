@@ -21,10 +21,60 @@ test("renders a WebGPU image without errors", async ({ page }, testInfo) => {
 
   if (!support.available) {
     throw new Error(
-      `WebGPU is unavailable in headless Chromium (secure context: ${support.secureContext}). ` +
-        "Install Playwright Chromium and keep the configured WebGPU SwiftShader flags enabled.",
+      `WebGPU is unavailable in headless Google Chrome (secure context: ${support.secureContext}). ` +
+        "A working hardware GPU, compatible driver, and normal Chrome WebGPU support are required; " +
+        "software fallback is intentionally disabled.",
     );
   }
+
+  const adapterInfo = await page.evaluate(async () => {
+    const adapter = await navigator.gpu.requestAdapter({
+      powerPreference: "high-performance",
+      forceFallbackAdapter: false,
+    });
+
+    if (!adapter) {
+      return null;
+    }
+
+    return {
+      vendor: adapter.info.vendor,
+      architecture: adapter.info.architecture,
+      device: adapter.info.device,
+      description: adapter.info.description,
+      isFallbackAdapter: adapter.info.isFallbackAdapter,
+    };
+  });
+
+  if (!adapterInfo) {
+    throw new Error(
+      "Google Chrome could not create a hardware WebGPU adapter. " +
+        "SwiftShader and other software fallbacks are intentionally disabled.",
+    );
+  }
+
+  const adapterDescription = [
+    adapterInfo.description,
+    adapterInfo.vendor,
+    adapterInfo.architecture,
+    adapterInfo.device,
+  ]
+    .filter((detail, index, all) => detail && all.indexOf(detail) === index)
+    .join(" / ");
+
+  if (
+    adapterInfo.isFallbackAdapter ||
+    /swiftshader/i.test(adapterDescription)
+  ) {
+    throw new Error(
+      `Chrome selected a software WebGPU adapter (${adapterDescription || "unknown adapter"}). ` +
+        "This test requires a hardware GPU and will never use SwiftShader.",
+    );
+  }
+
+  console.log(
+    `Hardware WebGPU adapter: ${adapterDescription || "hardware adapter (details unavailable)"}`,
+  );
 
   await page.waitForFunction(() => "__webgpuRenderDone" in window);
 
@@ -43,7 +93,7 @@ test("renders a WebGPU image without errors", async ({ page }, testInfo) => {
 
   if (!renderResult.ok) {
     throw new Error(
-      `WebGPU rendering failed in headless Chromium: ${renderResult.error}`,
+      `Hardware WebGPU rendering failed in headless Google Chrome: ${renderResult.error}`,
     );
   }
 

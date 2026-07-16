@@ -9,7 +9,6 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:unit": "vitest run",
-    "playwright:install": "playwright install chromium",
     "test:screenshot": "playwright test"
   },
   "dependencies": {
