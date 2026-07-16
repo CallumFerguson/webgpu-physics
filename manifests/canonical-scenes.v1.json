@@ -1,0 +1,351 @@
+{
+  "schema": "org.jgs2.canonical-scenes",
+  "schemaVersion": 1,
+  "corpusVersion": "phase0-v1",
+  "fixtures": [
+    {
+      "id": "baseline.minimal",
+      "phase": 0,
+      "kind": "baseline-scene",
+      "purpose": "Frozen minimal cantilever regression and deterministic frame stepping.",
+      "runtimeSceneId": "minimal",
+      "generator": {
+        "id": "regular-cuboid-tetrahedra",
+        "version": "1",
+        "seed": 0,
+        "parameters": {
+          "cells": [1, 1, 1],
+          "origin": [-1, 1.35, -0.4],
+          "size": [2, 0.8, 0.8],
+          "fixedGridPredicate": "x == 0",
+          "materialId": 0,
+          "bodyId": 0
+        }
+      },
+      "materials": [
+        {
+          "id": "soft-rubber",
+          "density": 850,
+          "youngModulus": 35000,
+          "poissonRatio": 0.35,
+          "color": [0.13, 0.82, 0.7, 1]
+        }
+      ],
+      "simulation": {
+        "timestep": 0.03333333333333333,
+        "gravity": [0, -9.81, 0],
+        "floorY": 0,
+        "parityMode": false
+      },
+      "solver": {
+        "iterations": 7,
+        "schedule": "jacobi",
+        "cubature": { "mode": "selected", "samplesPerSubproblem": 4 }
+      },
+      "initialState": {
+        "position": "generator-rest-pose",
+        "linearVelocity": [0, 0, 0]
+      },
+      "sampledFrames": [
+        {
+          "id": "start",
+          "frame": 0,
+          "simulatedSeconds": 0,
+          "artifacts": ["diagnostics", "screenshot"]
+        },
+        {
+          "id": "visual-end",
+          "frame": 45,
+          "simulatedSeconds": 1.5,
+          "artifacts": ["diagnostics", "screenshot"]
+        }
+      ],
+      "camera": {
+        "eye": [4.8, 3.2, 6.2],
+        "target": [0, 1.35, 0],
+        "up": [0, 1, 0],
+        "fovYRadians": 0.7853981633974483
+      },
+      "expectedMetrics": [
+        { "id": "finite-state", "operator": "equals", "value": true, "normalization": "boolean" },
+        { "id": "pinned-max-error", "operator": "<=", "value": 0.0001, "normalization": "world units" },
+        { "id": "downward-landmark-motion", "operator": ">", "value": 0.003, "normalization": "initial bounds diagonal" }
+      ]
+    },
+    {
+      "id": "baseline.stiffness",
+      "phase": 0,
+      "kind": "baseline-scene",
+      "purpose": "Frozen soft-versus-stiff material response regression.",
+      "runtimeSceneId": "stiffness",
+      "generator": {
+        "id": "composed-regular-cuboids",
+        "version": "1",
+        "seed": 0,
+        "parameters": {
+          "instances": [
+            { "cells": [1, 1, 1], "origin": [-1, 1.35, -1.05], "size": [2, 0.7, 0.7], "fixedGridPredicate": "x == 0", "materialId": 0, "bodyId": 0 },
+            { "cells": [1, 1, 1], "origin": [-1, 1.35, 0.35], "size": [2, 0.7, 0.7], "fixedGridPredicate": "x == 0", "materialId": 1, "bodyId": 1 }
+          ]
+        }
+      },
+      "materials": [
+        { "id": "soft-rubber", "density": 850, "youngModulus": 35000, "poissonRatio": 0.35, "color": [0.13, 0.82, 0.7, 1] },
+        { "id": "stiff-rubber", "density": 950, "youngModulus": 280000, "poissonRatio": 0.32, "color": [0.98, 0.38, 0.25, 1] }
+      ],
+      "simulation": {
+        "timestep": 0.03333333333333333,
+        "gravity": [0, -9.81, 0],
+        "floorY": 0,
+        "parityMode": false
+      },
+      "solver": {
+        "iterations": 9,
+        "schedule": "jacobi",
+        "cubature": { "mode": "selected", "samplesPerSubproblem": 6 }
+      },
+      "initialState": { "position": "generator-rest-pose", "linearVelocity": [0, 0, 0] },
+      "sampledFrames": [
+        { "id": "start", "frame": 0, "simulatedSeconds": 0, "artifacts": ["diagnostics", "screenshot"] },
+        { "id": "visual-end", "frame": 60, "simulatedSeconds": 2, "artifacts": ["diagnostics", "screenshot"] }
+      ],
+      "camera": {
+        "eye": [5.2, 3.5, 7.6],
+        "target": [0, 1.3, 0],
+        "up": [0, 1, 0],
+        "fovYRadians": 0.7853981633974483
+      },
+      "expectedMetrics": [
+        { "id": "finite-state", "operator": "equals", "value": true, "normalization": "boolean" },
+        { "id": "soft-to-stiff-deflection", "operator": ">=", "value": 1.5, "normalization": "tip-deflection ratio" },
+        { "id": "deflection-separation", "operator": ">", "value": 0.03, "normalization": "initial bounds diagonal" }
+      ]
+    },
+    {
+      "id": "baseline.drop",
+      "phase": 0,
+      "kind": "baseline-scene",
+      "purpose": "Frozen floor-impact, deformation, and long-run settling regression.",
+      "runtimeSceneId": "drop",
+      "generator": {
+        "id": "transformed-regular-cuboid",
+        "version": "1",
+        "seed": 0,
+        "parameters": {
+          "cells": [2, 1, 1],
+          "origin": [-0.75, -0.5, -0.45],
+          "size": [1.5, 1, 0.9],
+          "materialId": 0,
+          "bodyId": 0,
+          "translation": [0, 2.45, 0],
+          "rotationEuler": [0.18, 0.12, 0.32]
+        }
+      },
+      "materials": [
+        { "id": "drop-block", "density": 900, "youngModulus": 70000, "poissonRatio": 0.36, "color": [0.26, 0.63, 0.96, 1] }
+      ],
+      "simulation": {
+        "timestep": 0.016666666666666666,
+        "gravity": [0, -9.81, 0],
+        "floorY": 0,
+        "parityMode": false
+      },
+      "solver": {
+        "iterations": 11,
+        "schedule": "jacobi",
+        "cubature": { "mode": "selected", "samplesPerSubproblem": 6 }
+      },
+      "initialState": { "position": "generator-rest-pose", "linearVelocity": [0, 0, 0] },
+      "sampledFrames": [
+        { "id": "start", "frame": 0, "simulatedSeconds": 0, "artifacts": ["diagnostics", "screenshot"] },
+        { "id": "impact", "frame": 60, "simulatedSeconds": 1, "artifacts": ["diagnostics"] },
+        { "id": "visual-end", "frame": 90, "simulatedSeconds": 1.5, "artifacts": ["diagnostics", "screenshot"] },
+        { "id": "settled", "frame": 240, "simulatedSeconds": 4, "artifacts": ["diagnostics"] },
+        { "id": "long-run", "frame": 1200, "simulatedSeconds": 20, "artifacts": ["diagnostics", "screenshot"] }
+      ],
+      "camera": {
+        "eye": [4.2, 3.4, 6.5],
+        "target": [0, 1.2, 0],
+        "up": [0, 1, 0],
+        "fovYRadians": 0.7853981633974483
+      },
+      "expectedMetrics": [
+        { "id": "finite-state", "operator": "equals", "value": true, "normalization": "boolean" },
+        { "id": "minimum-determinant-ratio", "operator": ">", "value": 0.01, "normalization": "frame-zero minimum determinant" },
+        { "id": "settled-to-final-horizontal-drift", "operator": "<=", "value": 0.05, "normalization": "world units" }
+      ]
+    },
+    {
+      "id": "baseline.stress",
+      "phase": 0,
+      "kind": "baseline-scene",
+      "purpose": "Frozen six-body GPU workload and long-run lane stability regression.",
+      "runtimeSceneId": "stress",
+      "generator": {
+        "id": "stress-block-array",
+        "version": "1",
+        "seed": 0,
+        "parameters": {
+          "base": { "cells": [2, 1, 1], "origin": [-0.6, -0.32, -0.32], "size": [1.2, 0.64, 0.64] },
+          "instances": [
+            { "bodyId": 0, "materialId": 0, "translation": [-1.45, 1.25, -0.625], "rotationEuler": [0, -0.16, 0] },
+            { "bodyId": 1, "materialId": 1, "translation": [0, 1.33, -0.625], "rotationEuler": [0.04, -0.08, 0.1] },
+            { "bodyId": 2, "materialId": 0, "translation": [1.45, 1.25, -0.625], "rotationEuler": [0.08, 0, 0] },
+            { "bodyId": 3, "materialId": 1, "translation": [-1.45, 1.33, 0.625], "rotationEuler": [0.12, 0.08, 0.1] },
+            { "bodyId": 4, "materialId": 0, "translation": [0, 1.25, 0.625], "rotationEuler": [0.16, 0.16, 0] },
+            { "bodyId": 5, "materialId": 1, "translation": [1.45, 1.33, 0.625], "rotationEuler": [0.2, 0.24, 0.1] }
+          ]
+        }
+      },
+      "materials": [
+        { "id": "soft-rubber", "density": 850, "youngModulus": 35000, "poissonRatio": 0.35, "color": [0.13, 0.82, 0.7, 1] },
+        { "id": "stiff-rubber", "density": 950, "youngModulus": 280000, "poissonRatio": 0.32, "color": [0.98, 0.38, 0.25, 1] }
+      ],
+      "simulation": {
+        "timestep": 0.008333333333333333,
+        "gravity": [0, -9.81, 0],
+        "floorY": 0,
+        "parityMode": false
+      },
+      "solver": {
+        "iterations": 17,
+        "schedule": "jacobi",
+        "cubature": { "mode": "selected", "samplesPerSubproblem": 6 }
+      },
+      "initialState": { "position": "generator-rest-pose", "linearVelocity": [0, 0, 0] },
+      "sampledFrames": [
+        { "id": "start", "frame": 0, "simulatedSeconds": 0, "artifacts": ["diagnostics", "screenshot"] },
+        { "id": "visual-end", "frame": 60, "simulatedSeconds": 0.5, "artifacts": ["diagnostics", "screenshot"] },
+        { "id": "impact", "frame": 120, "simulatedSeconds": 1, "artifacts": ["diagnostics"] },
+        { "id": "settled", "frame": 480, "simulatedSeconds": 4, "artifacts": ["diagnostics"] },
+        { "id": "long-run", "frame": 2400, "simulatedSeconds": 20, "artifacts": ["diagnostics", "screenshot"] }
+      ],
+      "camera": {
+        "eye": [5.6, 4.1, 8.2],
+        "target": [0, 1.15, 0],
+        "up": [0, 1, 0],
+        "fovYRadians": 0.7853981633974483
+      },
+      "expectedMetrics": [
+        { "id": "finite-state", "operator": "equals", "value": true, "normalization": "boolean" },
+        { "id": "body-count", "operator": "equals", "value": 6, "normalization": "bodies" },
+        { "id": "settled-to-final-horizontal-drift", "operator": "<=", "value": 0.05, "normalization": "world units per body" },
+        { "id": "final-horizontal-speed", "operator": "<=", "value": 0.01, "normalization": "world units per second per body" }
+      ]
+    },
+    {
+      "id": "phase0.force-free-cuboid",
+      "phase": 0,
+      "kind": "force-free",
+      "purpose": "Parity-mode linear and angular momentum conservation over ten simulated seconds.",
+      "runtimeSceneId": null,
+      "generator": {
+        "id": "regular-cuboid-tetrahedra",
+        "version": "1",
+        "seed": 104729,
+        "parameters": { "cells": [2, 2, 2], "origin": [-0.5, -0.5, -0.5], "size": [1, 1, 1], "fixedGridPredicate": "false", "materialId": 0, "bodyId": 0 }
+      },
+      "materials": [
+        { "id": "phase0-reference-solid", "density": 1000, "youngModulus": 80000, "poissonRatio": 0.3, "color": [0.35, 0.7, 0.95, 1] }
+      ],
+      "simulation": {
+        "timestep": 0.008333333333333333,
+        "gravity": [0, 0, 0],
+        "floorY": null,
+        "parityMode": true
+      },
+      "solver": {
+        "iterations": 12,
+        "schedule": "jacobi",
+        "cubature": { "mode": "exact-all-elements", "samplesPerSubproblem": null }
+      },
+      "initialState": {
+        "position": "generator-rest-pose rotated by [0.17, -0.23, 0.31] radians",
+        "linearVelocity": [0.37, -0.11, 0.23],
+        "angularVelocity": [0.41, 0.29, -0.19]
+      },
+      "sampledFrames": [
+        { "id": "start", "frame": 0, "simulatedSeconds": 0, "artifacts": ["diagnostics", "screenshot"] },
+        { "id": "conservation-end", "frame": 1200, "simulatedSeconds": 10, "artifacts": ["diagnostics", "screenshot"] }
+      ],
+      "camera": {
+        "eye": [3.2, 2.4, 4.5],
+        "target": [0, 0, 0],
+        "up": [0, 1, 0],
+        "fovYRadians": 0.7853981633974483
+      },
+      "expectedMetrics": [
+        { "id": "finite-state", "operator": "equals", "value": true, "normalization": "boolean" },
+        { "id": "linear-momentum-error", "operator": "<=", "value": 0.005, "normalization": "roadmap linear-momentum definition" },
+        { "id": "angular-momentum-error", "operator": "<=", "value": 0.005, "normalization": "roadmap angular-momentum definition" }
+      ]
+    },
+    {
+      "id": "phase0.oracle-single-tetrahedron",
+      "phase": 0,
+      "kind": "oracle",
+      "purpose": "Float64 energy derivatives, full Newton block, and exact equilibrium-basis oracle fixture.",
+      "runtimeSceneId": null,
+      "generator": {
+        "id": "explicit-positive-tetrahedron",
+        "version": "1",
+        "seed": 65537,
+        "parameters": { "positions": [[0, 0, 0], [1, 0, 0], [0.15, 0.9, 0], [0.1, 0.2, 0.85]], "tetrahedra": [[0, 1, 2, 3]], "fixedVertices": [0], "materialId": 0, "bodyId": 0 }
+      },
+      "materials": [
+        { "id": "phase0-reference-solid", "density": 1000, "youngModulus": 80000, "poissonRatio": 0.3, "color": [0.35, 0.7, 0.95, 1] }
+      ],
+      "simulation": {
+        "timestep": 0.016666666666666666,
+        "gravity": [0, 0, 0],
+        "floorY": null,
+        "parityMode": true
+      },
+      "solver": {
+        "iterations": 1,
+        "schedule": "jacobi",
+        "cubature": { "mode": "exact-all-elements", "samplesPerSubproblem": null }
+      },
+      "initialState": { "position": "pose supplied by phase0.oracle-poses corpus", "linearVelocity": [0, 0, 0] },
+      "sampledFrames": [
+        { "id": "oracle-evaluation", "frame": 0, "simulatedSeconds": 0, "artifacts": ["diagnostics"] }
+      ],
+      "camera": {
+        "eye": [2.5, 2, 3.5],
+        "target": [0.3, 0.3, 0.25],
+        "up": [0, 1, 0],
+        "fovYRadians": 0.7853981633974483
+      },
+      "expectedMetrics": [
+        { "id": "gradient-relative-error", "operator": "<=", "value": 0.00001, "normalization": "roadmap relative-error definition" },
+        { "id": "hessian-relative-error", "operator": "<=", "value": 0.0001, "normalization": "roadmap relative-error definition" },
+        { "id": "newton-block-relative-error", "operator": "<=", "value": 1e-8, "normalization": "roadmap relative-error definition" },
+        { "id": "equilibrium-basis-relative-error", "operator": "<=", "value": 1e-8, "normalization": "roadmap relative-error definition" }
+      ]
+    }
+  ],
+  "corpora": [
+    {
+      "id": "phase0.force-free-initial-states",
+      "fixtureId": "phase0.force-free-cuboid",
+      "generator": {
+        "id": "seeded-rigid-velocity-corpus",
+        "version": "1",
+        "seed": 104729,
+        "caseCount": 32,
+        "parameters": { "linearSpeedRange": [0.1, 1], "angularSpeedRange": [0.1, 1], "rejectNearZeroAngularMomentum": true }
+      }
+    },
+    {
+      "id": "phase0.oracle-poses",
+      "fixtureId": "phase0.oracle-single-tetrahedron",
+      "generator": {
+        "id": "seeded-positive-determinant-tetrahedron-poses",
+        "version": "1",
+        "seed": 65537,
+        "caseCount": 64,
+        "parameters": { "displacementScale": 0.15, "minimumDeterminant": 0.25, "includeRestPose": true, "includeRigidRotations": true }
+      }
+    }
+  ]
+}

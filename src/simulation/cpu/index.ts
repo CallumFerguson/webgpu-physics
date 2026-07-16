@@ -11,6 +11,13 @@ export {
   type TetrahedronStiffnessResult,
 } from "./fem";
 export {
+  centralDifferenceGradient,
+  centralDifferenceHessian,
+  relativeError,
+  type ScalarFunction,
+  type VectorFunction,
+} from "./finite-difference";
+export {
   choleskyFactor,
   determinant3,
   dot,
@@ -34,6 +41,25 @@ export {
   computeExactVertexBasis,
   exactBasisToActiveMatrix,
 } from "./precompute";
+export {
+  activeCoordinatesFromFullPositions,
+  computeCorotatedLinearRotations,
+  computeDirectComplementaryEquilibriumBasis,
+  createCorotatedLinearImplicitEulerOracle,
+  evaluateCorotatedLinearTetrahedron,
+  fullPositionsFromActiveCoordinates,
+  polarRotation3,
+  solveEquilibriumBasisNewtonStep,
+  solveFullNewtonStep,
+  type ComplementaryEquilibriumBasis,
+  type CorotatedLinearElementEvaluation,
+  type CorotatedLinearImplicitEulerOptions,
+  type CorotatedLinearImplicitEulerOracle,
+  type EnergyEvaluation,
+  type ImplicitEulerEnergyComponents,
+  type ImplicitEulerEvaluation,
+  type QuadraticFloorContact,
+} from "./oracle";
 export type {
   ColorRgba,
   CubatureSample,

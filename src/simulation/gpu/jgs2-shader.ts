@@ -504,6 +504,16 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
+fn copyPosition(@builtin(global_invocation_id) globalId: vec3u) {
+  let vertex = globalId.x;
+  if (vertex >= params.counts.x) {
+    return;
+  }
+  dynamicData[params.offsets2.x + vertex] =
+    vec4f(loadPosition(params.offsets1.w, vertex), 1.0);
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE)
 fn bodyHorizontalCorrection(@builtin(global_invocation_id) globalId: vec3u) {
   let body = globalId.x;
   if (body >= params.counts.w) {

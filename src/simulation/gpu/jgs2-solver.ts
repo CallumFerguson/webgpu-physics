@@ -29,6 +29,10 @@ export interface JGS2StepSettings {
   readonly contactTangentialDamping: number;
   /** Distance above the floor at which tangential damping becomes active. */
   readonly contactMargin: number;
+  /** Project-specific correction that restores each free body's predicted x/z COM. */
+  readonly horizontalBodyCorrection: boolean;
+  /** Disable project-specific damping and momentum-altering corrections. */
+  readonly parityMode: boolean;
 }
 
 export interface JGS2PositionBufferView {
@@ -50,6 +54,8 @@ export const DEFAULT_JGS2_STEP_SETTINGS: JGS2StepSettings = {
   maxStep: 0.1,
   contactTangentialDamping: 8,
   contactMargin: 0.01,
+  horizontalBodyCorrection: true,
+  parityMode: false,
 };
 
 interface JGS2GpuBuffers {
@@ -66,6 +72,7 @@ interface JGS2Pipelines {
   readonly tetPolarRotation: GPUComputePipeline;
   readonly vertexPolarRotation: GPUComputePipeline;
   readonly solve: GPUComputePipeline;
+  readonly copyPosition: GPUComputePipeline;
   readonly bodyHorizontalCorrection: GPUComputePipeline;
   readonly applyBodyHorizontalCorrection: GPUComputePipeline;
   readonly finalize: GPUComputePipeline;
@@ -165,19 +172,41 @@ function validateStepSettings(settings: JGS2StepSettings): void {
     settings.contactTangentialDamping,
     settings.contactMargin,
   );
+  if (typeof settings.horizontalBodyCorrection !== "boolean") {
+    throw new TypeError("horizontalBodyCorrection must be a boolean.");
+  }
+  if (typeof settings.parityMode !== "boolean") {
+    throw new TypeError("parityMode must be a boolean.");
+  }
 }
 
-function mergeStepSettings(
+export function resolveJGS2StepSettings(
   defaults: JGS2StepSettings,
   overrides: Partial<JGS2StepSettings>,
 ): JGS2StepSettings {
-  const merged: JGS2StepSettings = {
+  let merged: JGS2StepSettings = {
     ...defaults,
     ...overrides,
     gravity: overrides.gravity ?? defaults.gravity,
   };
+  if (merged.parityMode) {
+    merged = {
+      ...merged,
+      velocityDamping: 1,
+      contactTangentialDamping: 0,
+      horizontalBodyCorrection: false,
+    };
+  }
   validateStepSettings(merged);
   return merged;
+}
+
+function validateExactIterationCount(iterations: number): void {
+  if (!Number.isSafeInteger(iterations) || iterations < 1) {
+    throw new RangeError(
+      `iterations must be a positive safe integer; got ${iterations}.`,
+    );
+  }
 }
 
 function packUniforms(
@@ -309,6 +338,7 @@ export class JGS2GpuSolver {
 
   private destroyed = false;
   private submittedIterations = 0;
+  private submittedSettings: JGS2StepSettings;
 
   private constructor(
     private readonly device: GPUDevice,
@@ -328,6 +358,7 @@ export class JGS2GpuSolver {
     this.cubatureK = inputShape.cubatureK;
     this.bodyCount = inputShape.bodyCount;
     this.dynamicOffsets = offsets;
+    this.submittedSettings = defaultSettings;
   }
 
   static async create(
@@ -343,7 +374,10 @@ export class JGS2GpuSolver {
       );
     }
 
-    const resolvedSettings = mergeStepSettings(DEFAULT_JGS2_STEP_SETTINGS, settings);
+    const resolvedSettings = resolveJGS2StepSettings(
+      DEFAULT_JGS2_STEP_SETTINGS,
+      settings,
+    );
     const bodyCount = inferJGS2BodyCount(input.vertexInfo, input.vertexCount);
     const offsets = computeJGS2DynamicOffsets(
       input.vertexCount,
@@ -457,6 +491,7 @@ export class JGS2GpuSolver {
       tetPolarRotation,
       vertexPolarRotation,
       solve,
+      copyPosition,
       bodyHorizontalCorrection,
       applyBodyHorizontalCorrection,
       finalize,
@@ -466,6 +501,7 @@ export class JGS2GpuSolver {
         createPipeline("tetPolarRotation", "jgs2-tet-polar-pipeline"),
         createPipeline("vertexPolarRotation", "jgs2-vertex-polar-pipeline"),
         createPipeline("jgs2Solve", "jgs2-solve-pipeline"),
+        createPipeline("copyPosition", "jgs2-copy-position-pipeline"),
         createPipeline(
           "bodyHorizontalCorrection",
           "jgs2-body-horizontal-correction-pipeline",
@@ -481,6 +517,7 @@ export class JGS2GpuSolver {
       tetPolarRotation,
       vertexPolarRotation,
       solve,
+      copyPosition,
       bodyHorizontalCorrection,
       applyBodyHorizontalCorrection,
       finalize,
@@ -555,16 +592,31 @@ export class JGS2GpuSolver {
   }
 
   get currentPositionView(): JGS2PositionBufferView {
-    return {
-      buffer: this.currentPositionBuffer,
-      offset: this.currentPositionByteOffset,
-      size: this.currentPositionByteLength,
-      stride: 16,
-    };
+    return this.positionView(this.dynamicOffsets.posA);
+  }
+
+  /** Predicted inertial position for the most recently submitted frame. */
+  get predictedPositionView(): JGS2PositionBufferView {
+    this.assertUsable();
+    return this.positionView(this.dynamicOffsets.predicted);
+  }
+
+  /** Position at the start of the most recently submitted frame. */
+  get oldPositionView(): JGS2PositionBufferView {
+    this.assertUsable();
+    return this.positionView(this.dynamicOffsets.old);
   }
 
   get lastSubmittedIterationCount(): number {
     return this.submittedIterations;
+  }
+
+  get defaultStepSettings(): JGS2StepSettings {
+    return this.defaultSettings;
+  }
+
+  get lastSubmittedSettings(): JGS2StepSettings {
+    return this.submittedSettings;
   }
 
   step(overrides: Partial<JGS2StepSettings> = {}): void {
@@ -579,9 +631,38 @@ export class JGS2GpuSolver {
           "precomputation before changing timestep.",
       );
     }
-    const settings = mergeStepSettings(this.defaultSettings, overrides);
+    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
     const iterations = normalizeOddIterationCount(settings.iterations);
+    this.submitFrame(settings, iterations);
+  }
+
+  /**
+   * Advance one complete simulation frame using exactly the requested number
+   * of nonlinear Jacobi iterations. Unlike step(), even counts are retained.
+   */
+  stepExactIterations(
+    iterations: number,
+    overrides: Partial<JGS2StepSettings> = {},
+  ): void {
+    this.assertUsable();
+    validateExactIterationCount(iterations);
+    if (
+      overrides.timestep !== undefined &&
+      !jgs2TimestepsMatch(this.preprocessingTimestep, overrides.timestep)
+    ) {
+      throw new RangeError(
+        `JGS2 was precomputed for timestep ${this.preprocessingTimestep}, ` +
+          `but stepExactIterations() requested ${overrides.timestep}. ` +
+          "Regenerate the precomputation before changing timestep.",
+      );
+    }
+    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    this.submitFrame(settings, iterations);
+  }
+
+  private submitFrame(settings: JGS2StepSettings, iterations: number): void {
     this.submittedIterations = iterations;
+    this.submittedSettings = settings;
 
     this.device.queue.writeBuffer(
       this.uniforms.base,
@@ -656,20 +737,32 @@ export class JGS2GpuSolver {
       );
     }
 
-    encodeDispatch(
-      encoder,
-      this.pipelines.bodyHorizontalCorrection,
-      this.uniforms.baseBindGroup,
-      this.bodyCount,
-      "jgs2-body-horizontal-correction-pass",
-    );
-    encodeDispatch(
-      encoder,
-      this.pipelines.applyBodyHorizontalCorrection,
-      this.uniforms.baseBindGroup,
-      this.vertexCount,
-      "jgs2-apply-body-horizontal-correction-pass",
-    );
+    if (iterations % 2 === 0) {
+      encodeDispatch(
+        encoder,
+        this.pipelines.copyPosition,
+        this.uniforms.fromBToABindGroup,
+        this.vertexCount,
+        "jgs2-copy-even-result-to-canonical-position-pass",
+      );
+    }
+
+    if (settings.horizontalBodyCorrection) {
+      encodeDispatch(
+        encoder,
+        this.pipelines.bodyHorizontalCorrection,
+        this.uniforms.baseBindGroup,
+        this.bodyCount,
+        "jgs2-body-horizontal-correction-pass",
+      );
+      encodeDispatch(
+        encoder,
+        this.pipelines.applyBodyHorizontalCorrection,
+        this.uniforms.baseBindGroup,
+        this.vertexCount,
+        "jgs2-apply-body-horizontal-correction-pass",
+      );
+    }
 
     encodeDispatch(
       encoder,
@@ -702,6 +795,15 @@ export class JGS2GpuSolver {
       this.velocityByteLength,
       "jgs2-velocity-readback",
     );
+  }
+
+  private positionView(vec4Offset: number): JGS2PositionBufferView {
+    return {
+      buffer: this.currentPositionBuffer,
+      offset: vec4Offset * 16,
+      size: this.currentPositionByteLength,
+      stride: 16,
+    };
   }
 
   private async readVec4Region(

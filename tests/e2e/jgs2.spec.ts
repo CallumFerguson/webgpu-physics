@@ -11,16 +11,42 @@ type Vec3 = readonly [number, number, number];
 
 interface JGS2BodyDiagnostics {
   readonly bodyId: number;
+  readonly mass: number;
   readonly centerOfMass: Vec3;
   readonly linearVelocity: Vec3;
+  readonly linearMomentum: Vec3;
+  readonly angularMomentum: Vec3;
   readonly minY: number;
 }
 
 interface JGS2Diagnostics {
   readonly frame: number;
   readonly finite: boolean;
+  readonly source: "cpu-readback";
+  readonly lastStepIterations: number;
+  readonly runtime: {
+    readonly parityMode: boolean;
+    readonly velocityDamping: number;
+    readonly contactTangentialDamping: number;
+    readonly horizontalBodyCorrection: boolean;
+  };
   readonly pinnedMaxError: number;
   readonly minTetDeterminant: number;
+  readonly minTetDeterminantValid: boolean;
+  readonly minimumContactDistance: number;
+  readonly minimumContactDistanceValid: boolean;
+  readonly activeContactCount: number;
+  readonly activeContactCountValid: boolean;
+  readonly candidateBufferOverflow: boolean;
+  readonly candidateBufferOverflowValid: boolean;
+  readonly relativeResidual: number;
+  readonly relativeResidualValid: boolean;
+  readonly maximumUpdate: number;
+  readonly maximumUpdateValid: boolean;
+  readonly totalLinearMomentum: Vec3;
+  readonly totalLinearMomentumValid: boolean;
+  readonly totalAngularMomentum: Vec3;
+  readonly totalAngularMomentumValid: boolean;
   readonly floorHeight: number;
   readonly timestep: number;
   readonly bounds: {
@@ -35,6 +61,8 @@ interface JGS2Diagnostics {
 interface JGS2TestHarness {
   readonly ready: Promise<void>;
   stepFrames(frameCount: number): Promise<void>;
+  stepIterations(iterationCount: number): Promise<void>;
+  waitForGpu(): Promise<void>;
   diagnostics(): Promise<JGS2Diagnostics>;
 }
 
@@ -134,6 +162,46 @@ test("renders a useful DOM error when WebGPU is unavailable", async ({ page }) =
   await expect(root).toContainText(
     /unavailable|not supported|requires|required|error|failed/i,
   );
+});
+
+test("parity mode disables project stabilizers and accepts an even exact iteration count", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/?scene=minimal&test=1&parity=1", {
+    waitUntil: "domcontentloaded",
+  });
+  await requireHardwareWebGPU(page, testInfo);
+  await waitForTestHarness(page);
+
+  const initial = await readDiagnostics(page);
+  assertDiagnostics(initial, 0, "minimal-parity");
+  expect(initial.source).toBe("cpu-readback");
+  expect(initial.runtime).toEqual({
+    parityMode: true,
+    velocityDamping: 1,
+    contactTangentialDamping: 0,
+    horizontalBodyCorrection: false,
+  });
+  expect(initial.minimumContactDistance).toBe(0);
+  expect(initial.minimumContactDistanceValid).toBe(false);
+  expect(initial.activeContactCount).toBe(0);
+  expect(initial.activeContactCountValid).toBe(false);
+  expect(initial.candidateBufferOverflow).toBe(false);
+  expect(initial.candidateBufferOverflowValid).toBe(false);
+  expect(initial.relativeResidual).toBe(0);
+  expect(initial.relativeResidualValid).toBe(false);
+  expect(initial.maximumUpdate).toBe(0);
+  expect(initial.maximumUpdateValid).toBe(false);
+
+  await page.evaluate(async () => {
+    await window.__jgs2Test!.stepIterations(2);
+    await window.__jgs2Test!.waitForGpu();
+  });
+  const after = await readDiagnostics(page);
+  assertDiagnostics(after, 1, "minimal-parity");
+  expect(after.lastStepIterations).toBe(2);
+  expect(after.runtime.parityMode).toBe(true);
+  expect(after.finite).toBe(true);
 });
 
 test.describe("deterministic JGS2 scenes", () => {

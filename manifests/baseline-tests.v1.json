@@ -1,0 +1,227 @@
+{
+  "schema": "org.jgs2.baseline-tests",
+  "schemaVersion": 1,
+  "frozenOn": "2026-07-16",
+  "baselineDescription": "The pre-roadmap regression suite: 26 CPU/unit tests and 7 hardware-browser E2E tests. Phase 0 infrastructure tests are intentionally part of the growing current suite, not this frozen baseline.",
+  "suites": [
+    {
+      "id": "unit",
+      "command": "npm.cmd run test:unit",
+      "expectedTestCount": 26,
+      "zeroUnexpectedSkips": true
+    },
+    {
+      "id": "e2e",
+      "command": "npm.cmd run test:screenshot",
+      "expectedTestCount": 7,
+      "zeroUnexpectedSkips": true
+    }
+  ],
+  "requiredCommands": [
+    {
+      "id": "build",
+      "command": "npm.cmd run build"
+    }
+  ],
+  "expectedTests": [
+    {
+      "id": "baseline.unit.adapter.hardware",
+      "suite": "unit",
+      "source": "src/renderer/device.test.ts",
+      "selector": "assertHardwareWebGPUAdapter > accepts a hardware adapter"
+    },
+    {
+      "id": "baseline.unit.adapter.fallback",
+      "suite": "unit",
+      "source": "src/renderer/device.test.ts",
+      "selector": "assertHardwareWebGPUAdapter > rejects an adapter marked as a fallback"
+    },
+    {
+      "id": "baseline.unit.adapter.swiftshader",
+      "suite": "unit",
+      "source": "src/renderer/device.test.ts",
+      "selector": "assertHardwareWebGPUAdapter > rejects SwiftShader even when it is not marked as a fallback"
+    },
+    {
+      "id": "baseline.unit.triangle.submit",
+      "suite": "unit",
+      "source": "src/renderer/triangle-renderer.test.ts",
+      "selector": "TriangleRenderer > encodes one triangle and submits it"
+    },
+    {
+      "id": "baseline.unit.triangle.completion",
+      "suite": "unit",
+      "source": "src/renderer/triangle-renderer.test.ts",
+      "selector": "TriangleRenderer > does not finish rendering before submitted GPU work is complete"
+    },
+    {
+      "id": "baseline.unit.triangle.format",
+      "suite": "unit",
+      "source": "src/renderer/triangle-renderer.test.ts",
+      "selector": "TriangleRenderer > rejects a target with a format that does not match the pipeline"
+    },
+    {
+      "id": "baseline.unit.scene.ids",
+      "suite": "unit",
+      "source": "src/scenes/scenes.test.ts",
+      "selector": "procedural demo scenes > uses the UI scene IDs and defaults to the minimal cantilever"
+    },
+    {
+      "id": "baseline.unit.scene.budget",
+      "suite": "unit",
+      "source": "src/scenes/scenes.test.ts",
+      "selector": "procedural demo scenes > builds every scene within the browser preprocessing budget"
+    },
+    {
+      "id": "baseline.unit.scene.determinism",
+      "suite": "unit",
+      "source": "src/scenes/scenes.test.ts",
+      "selector": "procedural demo scenes > is byte-for-byte deterministic"
+    },
+    {
+      "id": "baseline.unit.scene.body-metadata",
+      "suite": "unit",
+      "source": "src/scenes/scenes.test.ts",
+      "selector": "procedural demo scenes > packs dense body metadata and valid mass inputs for COM correction"
+    },
+    {
+      "id": "baseline.unit.mesh.surface",
+      "suite": "unit",
+      "source": "src/simulation/cpu/precompute.test.ts",
+      "selector": "tetrahedral CPU preprocessing > extracts the deterministic triangulated cuboid boundary"
+    },
+    {
+      "id": "baseline.unit.mesh.transform",
+      "suite": "unit",
+      "source": "src/simulation/cpu/precompute.test.ts",
+      "selector": "tetrahedral CPU preprocessing > transforms and appends meshes while preserving topology metadata"
+    },
+    {
+      "id": "baseline.unit.mesh.elasticity",
+      "suite": "unit",
+      "source": "src/simulation/cpu/precompute.test.ts",
+      "selector": "tetrahedral CPU preprocessing > assembles symmetric linear elasticity and conservative lumped mass"
+    },
+    {
+      "id": "baseline.unit.basis.equilibrium",
+      "suite": "unit",
+      "source": "src/simulation/cpu/precompute.test.ts",
+      "selector": "exact JGS2 rest perturbation basis > satisfies S_i Ubar_i = I and complementary equilibrium"
+    },
+    {
+      "id": "baseline.unit.basis.modes",
+      "suite": "unit",
+      "source": "src/simulation/cpu/precompute.test.ts",
+      "selector": "exact JGS2 rest perturbation basis > builds ordered orthonormal low-frequency rest-Hessian modes"
+    },
+    {
+      "id": "baseline.unit.basis.newton-block",
+      "suite": "unit",
+      "source": "src/simulation/cpu/precompute.test.ts",
+      "selector": "exact JGS2 rest perturbation basis > matches the selected block of a full Newton solve (Eq. 7-13 oracle)"
+    },
+    {
+      "id": "baseline.unit.basis.global-blocks",
+      "suite": "unit",
+      "source": "src/simulation/cpu/precompute.test.ts",
+      "selector": "exact JGS2 rest perturbation basis > matches every global Newton block with local plus all candidate remainders"
+    },
+    {
+      "id": "baseline.unit.cubature.update-error",
+      "suite": "unit",
+      "source": "src/simulation/cpu/precompute.test.ts",
+      "selector": "exact JGS2 rest perturbation basis > keeps every scene's selected-Cubature low-mode solves within 2%"
+    },
+    {
+      "id": "baseline.unit.cubature.nonnegative",
+      "suite": "unit",
+      "source": "src/simulation/cpu/precompute.test.ts",
+      "selector": "exact JGS2 rest perturbation basis > produces bounded, nonnegative complementary cubature"
+    },
+    {
+      "id": "baseline.unit.timestep.accept",
+      "suite": "unit",
+      "source": "src/simulation/gpu/layout.test.ts",
+      "selector": "JGS2 timestep compatibility > accepts values represented by the same GPU f32"
+    },
+    {
+      "id": "baseline.unit.timestep.reject",
+      "suite": "unit",
+      "source": "src/simulation/gpu/layout.test.ts",
+      "selector": "JGS2 timestep compatibility > rejects a changed or invalid timestep"
+    },
+    {
+      "id": "baseline.unit.body-layout.offsets",
+      "suite": "unit",
+      "source": "src/simulation/gpu/layout.test.ts",
+      "selector": "JGS2 per-body bookkeeping > allocates body corrections after all per-tetrahedron rotations"
+    },
+    {
+      "id": "baseline.unit.body-layout.count",
+      "suite": "unit",
+      "source": "src/simulation/gpu/layout.test.ts",
+      "selector": "JGS2 per-body bookkeeping > infers body count from packed vertexInfo body ids"
+    },
+    {
+      "id": "baseline.unit.body-layout.reject",
+      "suite": "unit",
+      "source": "src/simulation/gpu/layout.test.ts",
+      "selector": "JGS2 per-body bookkeeping > rejects body ids that would allocate more bodies than vertices"
+    },
+    {
+      "id": "baseline.unit.contact.accept",
+      "suite": "unit",
+      "source": "src/simulation/gpu/layout.test.ts",
+      "selector": "JGS2 contact parameters > accepts a nonnegative damping rate and contact margin"
+    },
+    {
+      "id": "baseline.unit.contact.reject",
+      "suite": "unit",
+      "source": "src/simulation/gpu/layout.test.ts",
+      "selector": "JGS2 contact parameters > rejects invalid damping rates or margins"
+    },
+    {
+      "id": "baseline.e2e.webgpu-error",
+      "suite": "e2e",
+      "source": "tests/e2e/jgs2.spec.ts",
+      "selector": "renders a useful DOM error when WebGPU is unavailable"
+    },
+    {
+      "id": "baseline.e2e.minimal.frames",
+      "suite": "e2e",
+      "source": "tests/e2e/jgs2.spec.ts",
+      "selector": "deterministic JGS2 scenes > minimal: frame 0 to frame 45"
+    },
+    {
+      "id": "baseline.e2e.stiffness.frames",
+      "suite": "e2e",
+      "source": "tests/e2e/jgs2.spec.ts",
+      "selector": "deterministic JGS2 scenes > stiffness: frame 0 to frame 60"
+    },
+    {
+      "id": "baseline.e2e.drop.frames",
+      "suite": "e2e",
+      "source": "tests/e2e/jgs2.spec.ts",
+      "selector": "deterministic JGS2 scenes > drop: frame 0 to frame 90"
+    },
+    {
+      "id": "baseline.e2e.stress.frames",
+      "suite": "e2e",
+      "source": "tests/e2e/jgs2.spec.ts",
+      "selector": "deterministic JGS2 scenes > stress: frame 0 to frame 60"
+    },
+    {
+      "id": "baseline.e2e.drop.long-run",
+      "suite": "e2e",
+      "source": "tests/e2e/jgs2.spec.ts",
+      "selector": "long-run settled body stability > drop: remains in its lane for 20 simulated seconds"
+    },
+    {
+      "id": "baseline.e2e.stress.long-run",
+      "suite": "e2e",
+      "source": "tests/e2e/jgs2.spec.ts",
+      "selector": "long-run settled body stability > stress: remains in its lane for 20 simulated seconds"
+    }
+  ],
+  "allowedSkips": []
+}

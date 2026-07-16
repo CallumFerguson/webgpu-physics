@@ -8,39 +8,20 @@ import {
   buildScene,
   buildSceneDefinition,
   toJGS2GpuInput,
-  type PrecomputedScene,
   type SceneId,
 } from "./scenes";
 import { JGS2GpuSolver } from "./simulation/gpu";
-
-type Vec3 = readonly [number, number, number];
-
-interface JGS2BodyDiagnostics {
-  readonly bodyId: number;
-  readonly centerOfMass: Vec3;
-  readonly linearVelocity: Vec3;
-  readonly minY: number;
-}
-
-interface JGS2Diagnostics {
-  readonly frame: number;
-  readonly timestep: number;
-  readonly finite: boolean;
-  readonly pinnedMaxError: number;
-  readonly minTetDeterminant: number;
-  readonly floorHeight: number;
-  readonly bounds: {
-    readonly min: Vec3;
-    readonly max: Vec3;
-  };
-  readonly landmark: Vec3;
-  readonly comparisonLandmark?: Vec3;
-  readonly bodies: readonly JGS2BodyDiagnostics[];
-}
+import {
+  diagnosticsFromState,
+  type JGS2Diagnostics,
+} from "./simulation/diagnostics";
 
 interface JGS2TestHarness {
   readonly ready: Promise<void>;
   stepFrames(frameCount: number): Promise<void>;
+  /** Advance one complete frame with exactly iterationCount nonlinear solves. */
+  stepIterations(iterationCount: number): Promise<void>;
+  waitForGpu(): Promise<void>;
   diagnostics(): Promise<JGS2Diagnostics>;
 }
 
@@ -81,139 +62,6 @@ function adapterDescription(info: GPUAdapterInfo): string {
     .join(" / ") || "Hardware WebGPU adapter";
 }
 
-function determinant(
-  positions: Float32Array,
-  a: number,
-  b: number,
-  c: number,
-  d: number,
-): number {
-  const ax = positions[a * 4] ?? 0;
-  const ay = positions[a * 4 + 1] ?? 0;
-  const az = positions[a * 4 + 2] ?? 0;
-  const bx = (positions[b * 4] ?? 0) - ax;
-  const by = (positions[b * 4 + 1] ?? 0) - ay;
-  const bz = (positions[b * 4 + 2] ?? 0) - az;
-  const cx = (positions[c * 4] ?? 0) - ax;
-  const cy = (positions[c * 4 + 1] ?? 0) - ay;
-  const cz = (positions[c * 4 + 2] ?? 0) - az;
-  const dx = (positions[d * 4] ?? 0) - ax;
-  const dy = (positions[d * 4 + 1] ?? 0) - ay;
-  const dz = (positions[d * 4 + 2] ?? 0) - az;
-  return (
-    bx * (cy * dz - cz * dy) -
-    cx * (by * dz - bz * dy) +
-    dx * (by * cz - bz * cy)
-  );
-}
-
-function diagnosticsFromState(
-  scene: PrecomputedScene,
-  positions: Float32Array,
-  velocities: Float32Array,
-  frame: number,
-): JGS2Diagnostics {
-  const vertexCount = positions.length / 4;
-  const minimum: [number, number, number] = [Infinity, Infinity, Infinity];
-  const maximum: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-  let finite = true;
-  let pinnedMaxError = 0;
-  const bodyCount = Math.max(...scene.mesh.bodyIds) + 1;
-  const bodyMasses = new Float64Array(bodyCount);
-  const bodyPositionMoments = new Float64Array(bodyCount * 3);
-  const bodyVelocityMoments = new Float64Array(bodyCount * 3);
-  const bodyMinimumY = new Float64Array(bodyCount);
-  bodyMinimumY.fill(Infinity);
-
-  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
-    const body = scene.mesh.bodyIds[vertex] ?? 0;
-    const mass = scene.lumpedMasses[vertex] ?? 0;
-    bodyMasses[body] += mass;
-    for (let axis = 0; axis < 3; axis += 1) {
-      const value = positions[vertex * 4 + axis] ?? Number.NaN;
-      const velocity = velocities[vertex * 4 + axis] ?? Number.NaN;
-      finite &&= Number.isFinite(value) && Number.isFinite(velocity);
-      minimum[axis] = Math.min(minimum[axis], value);
-      maximum[axis] = Math.max(maximum[axis], value);
-      bodyPositionMoments[body * 3 + axis] += mass * value;
-      bodyVelocityMoments[body * 3 + axis] += mass * velocity;
-      if (scene.mesh.fixed[vertex] !== 0) {
-        pinnedMaxError = Math.max(
-          pinnedMaxError,
-          Math.abs(value - (scene.mesh.positions[vertex * 3 + axis] ?? 0)),
-        );
-      }
-    }
-    bodyMinimumY[body] = Math.min(
-      bodyMinimumY[body] ?? Infinity,
-      positions[vertex * 4 + 1] ?? Number.NaN,
-    );
-  }
-
-  let minTetDeterminant = Infinity;
-  for (let offset = 0; offset < scene.mesh.tetrahedra.length; offset += 4) {
-    minTetDeterminant = Math.min(
-      minTetDeterminant,
-      determinant(
-        positions,
-        scene.mesh.tetrahedra[offset] ?? 0,
-        scene.mesh.tetrahedra[offset + 1] ?? 0,
-        scene.mesh.tetrahedra[offset + 2] ?? 0,
-        scene.mesh.tetrahedra[offset + 3] ?? 0,
-      ),
-    );
-  }
-
-  const landmarkVertex = scene.landmark.vertex;
-  const landmark: Vec3 = [
-    positions[landmarkVertex * 4] ?? Number.NaN,
-    positions[landmarkVertex * 4 + 1] ?? Number.NaN,
-    positions[landmarkVertex * 4 + 2] ?? Number.NaN,
-  ];
-  const comparisonVertex =
-    scene.id === "stiffness" ? landmarkVertex + vertexCount / 2 : -1;
-  const comparisonLandmark: Vec3 | undefined = comparisonVertex >= 0
-    ? [
-        positions[comparisonVertex * 4] ?? Number.NaN,
-        positions[comparisonVertex * 4 + 1] ?? Number.NaN,
-        positions[comparisonVertex * 4 + 2] ?? Number.NaN,
-      ]
-    : undefined;
-  const bodies: JGS2BodyDiagnostics[] = [];
-  for (let bodyId = 0; bodyId < bodyCount; bodyId += 1) {
-    const mass = bodyMasses[bodyId] ?? 0;
-    if (!(mass > 0)) {
-      continue;
-    }
-    bodies.push({
-      bodyId,
-      centerOfMass: [
-        (bodyPositionMoments[bodyId * 3] ?? 0) / mass,
-        (bodyPositionMoments[bodyId * 3 + 1] ?? 0) / mass,
-        (bodyPositionMoments[bodyId * 3 + 2] ?? 0) / mass,
-      ],
-      linearVelocity: [
-        (bodyVelocityMoments[bodyId * 3] ?? 0) / mass,
-        (bodyVelocityMoments[bodyId * 3 + 1] ?? 0) / mass,
-        (bodyVelocityMoments[bodyId * 3 + 2] ?? 0) / mass,
-      ],
-      minY: bodyMinimumY[bodyId] ?? Number.NaN,
-    });
-  }
-  return {
-    frame,
-    timestep: scene.settings.timestep,
-    finite,
-    pinnedMaxError,
-    minTetDeterminant,
-    floorHeight: scene.settings.floorY,
-    bounds: { min: minimum, max: maximum },
-    landmark,
-    ...(comparisonLandmark ? { comparisonLandmark } : {}),
-    bodies,
-  };
-}
-
 function phaseLabel(phase: AppPhase): string {
   switch (phase) {
     case "preparing":
@@ -233,6 +81,10 @@ export function App() {
   const sceneDefinition = useMemo(() => buildSceneDefinition(sceneId), [sceneId]);
   const testMode = useMemo(
     () => new URLSearchParams(window.location.search).get("test") === "1",
+    [],
+  );
+  const parityMode = useMemo(
+    () => new URLSearchParams(window.location.search).get("parity") === "1",
     [],
   );
   const [phase, setPhase] = useState<AppPhase>("preparing");
@@ -281,6 +133,8 @@ export function App() {
         velocityDamping: 0.997,
         contactTangentialDamping: 12,
         contactMargin: 0.01,
+        horizontalBodyCorrection: true,
+        parityMode,
         regularization: 1e-6,
         rotationEpsilon: 1e-7,
         maxStep: 0.075,
@@ -332,11 +186,23 @@ export function App() {
           solver!.readPositions(),
           solver!.readVelocities(),
         ]);
+        const submittedSettings = solver!.lastSubmittedSettings;
         return diagnosticsFromState(
           scene,
           positions,
           velocities,
-          simulationFrame,
+          {
+            frame: simulationFrame,
+            lastStepIterations: solver!.lastSubmittedIterationCount,
+            runtime: {
+              parityMode: submittedSettings.parityMode,
+              velocityDamping: submittedSettings.velocityDamping,
+              contactTangentialDamping:
+                submittedSettings.contactTangentialDamping,
+              horizontalBodyCorrection:
+                submittedSettings.horizontalBodyCorrection,
+            },
+          },
         );
       };
 
@@ -356,6 +222,21 @@ export function App() {
             }
             await renderer!.renderAndWait(simulationFrame);
             setFrame(simulationFrame);
+          },
+          stepIterations: async (iterationCount: number) => {
+            if (!submissionsEnabled) {
+              throw new Error("The WebGPU device is no longer available.");
+            }
+            solver!.stepExactIterations(iterationCount);
+            simulationFrame += 1;
+            await renderer!.renderAndWait(simulationFrame);
+            setFrame(simulationFrame);
+          },
+          waitForGpu: async () => {
+            if (!submissionsEnabled) {
+              throw new Error("The WebGPU device is no longer available.");
+            }
+            await solver!.awaitIdle();
           },
           diagnostics: readDiagnostics,
         };

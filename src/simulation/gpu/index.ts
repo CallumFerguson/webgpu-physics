@@ -1,6 +1,7 @@
 export {
   DEFAULT_JGS2_STEP_SETTINGS,
   JGS2GpuSolver,
+  resolveJGS2StepSettings,
   type JGS2PositionBufferView,
   type JGS2StepSettings,
 } from "./jgs2-solver";
