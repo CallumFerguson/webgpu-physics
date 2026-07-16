@@ -5,6 +5,8 @@ export const JGS2_CUBATURE_BASIS_FLOATS = 4 * 3 * 3;
 export const JGS2_CUBATURE_RECORD_WORDS =
   2 + JGS2_CUBATURE_BASIS_FLOATS;
 export const JGS2_UNIFORM_BYTES = 8 * 16;
+export const JGS2_MATERIAL_COROTATED_LINEAR = 0;
+export const JGS2_MATERIAL_STABLE_NEO_HOOKEAN = 1;
 
 export interface JGS2GpuInput {
   readonly vertexCount: number;
@@ -27,7 +29,11 @@ export interface JGS2GpuInput {
   readonly tetIndices: Uint32Array;
   /** Three padded vec4 columns of inverse Dm per tetrahedron. */
   readonly tetInverseDm: Float32Array;
-  /** vec4 per tetrahedron. x is rest volume used for rotation averaging. */
+  /**
+   * vec4 per tetrahedron: rest volume, material lambda, material mu, and
+   * JGS2_MATERIAL_* model tag. Stable Neo-Hookean uses the paper's adjusted
+   * lambda/mu; co-rotated regression scenes retain conventional Lamé values.
+   */
   readonly tetMeta: Float32Array;
   /**
    * Row-major 12x12 corotated rest stiffness per tetrahedron. Cubature
@@ -136,6 +142,43 @@ export function validateJGS2GpuInput(input: JGS2GpuInput): void {
       throw new RangeError(
         `tetIndices[${tet}] references vertex ${input.tetIndices[tet]}, ` +
           `but vertexCount is ${vertexCount}.`,
+      );
+    }
+  }
+
+  for (let tet = 0; tet < tetCount; tet += 1) {
+    const base = tet * 4;
+    const volume = input.tetMeta[base]!;
+    const lambda = input.tetMeta[base + 1]!;
+    const mu = input.tetMeta[base + 2]!;
+    const model = input.tetMeta[base + 3]!;
+    if (!(volume > 0) || !(mu > 0)) {
+      throw new RangeError(
+        `tetMeta for tetrahedron ${tet} requires positive volume and mu.`,
+      );
+    }
+    if (
+      model !== JGS2_MATERIAL_COROTATED_LINEAR &&
+      model !== JGS2_MATERIAL_STABLE_NEO_HOOKEAN
+    ) {
+      throw new RangeError(
+        `tetMeta for tetrahedron ${tet} has unknown material model ${model}.`,
+      );
+    }
+    if (
+      model === JGS2_MATERIAL_STABLE_NEO_HOOKEAN &&
+      !(lambda > 0)
+    ) {
+      throw new RangeError(
+        `Stable Neo-Hookean tetMeta for tetrahedron ${tet} requires positive lambda.`,
+      );
+    }
+    if (
+      model === JGS2_MATERIAL_COROTATED_LINEAR &&
+      !(3 * lambda + 2 * mu > 0)
+    ) {
+      throw new RangeError(
+        `Co-rotated tetMeta for tetrahedron ${tet} requires positive bulk modulus.`,
       );
     }
   }

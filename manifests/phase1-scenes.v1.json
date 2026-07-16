@@ -1,0 +1,111 @@
+{
+  "schema": "org.jgs2.phase1-scenes",
+  "schemaVersion": 1,
+  "corpusVersion": "phase1-v1",
+  "fixtures": [
+    {
+      "id": "phase1.stable-neo-hookean-single-tetrahedron",
+      "phase": 1,
+      "kind": "stable-neo-hookean-oracle",
+      "purpose": "Frozen single-tetrahedron stable Neo-Hookean CPU/GPU material parity oracle.",
+      "runtimeSceneId": null,
+      "generator": {
+        "id": "explicit-unit-tetrahedron",
+        "version": "1",
+        "seed": 0,
+        "parameters": {
+          "positions": [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]],
+          "tetrahedra": [[0, 1, 2, 3]],
+          "fixedVertices": [0],
+          "materialId": 0,
+          "bodyId": 0
+        }
+      },
+      "material": {
+        "id": "phase1-stable-neo-hookean-reference",
+        "model": "stable-neo-hookean",
+        "density": 1000,
+        "youngModulus": 80000,
+        "poissonRatio": 0.3,
+        "color": [0.55, 0.38, 0.95, 1]
+      },
+      "simulation": {
+        "timestep": 0.016666666666666666,
+        "gravity": [0, 0, 0],
+        "floorY": 0,
+        "floorStiffness": 0,
+        "parityMode": true
+      },
+      "solver": {
+        "iterations": 1,
+        "schedule": "jacobi",
+        "cubature": { "mode": "exact-all-elements", "packedSamplesPerSubproblem": 4 }
+      },
+      "expectedTolerances": {
+        "cpu": {
+          "restEnergyAndForce": 1e-10,
+          "rigidEnergyAndForce": 1e-8,
+          "gradientRelativeError": 1e-5,
+          "hessianRelativeError": 1e-4
+        },
+        "gpu": {
+          "restEnergyAndForce": 1e-5,
+          "rigidEnergyAndForce": 1e-4,
+          "cpuParityRelativeError": 1e-3
+        },
+        "acceptedPoseMinimumDeterminant": 1e-4
+      }
+    }
+  ],
+  "corpora": [
+    {
+      "id": "phase1.stable-neo-hookean-poses",
+      "fixtureId": "phase1.stable-neo-hookean-single-tetrahedron",
+      "generator": {
+        "id": "seeded-affine-positive-determinant-poses",
+        "version": "1",
+        "seed": 1048583,
+        "caseCount": 64,
+        "parameters": {
+          "rigidEulerRadians": [[1.5707963267948966, 0, 0], [0, 1.5707963267948966, 0], [0, 0, 1.5707963267948966]],
+          "compressionDeterminants": [0.5, 0.1, 0.01],
+          "shearGradient": [1, 0.55, -0.15, 0, 1, 0.25, 0, 0, 1],
+          "stretchGradient": [1.65, 0, 0, 0, 0.72, 0, 0, 0, 0.95],
+          "seededStartIndex": 9,
+          "seededEntryScale": 0.35,
+          "minimumSeededDeterminant": 0.05,
+          "maximumSeededDeterminant": 2.5
+        }
+      },
+      "requiredCaseLayout": [
+        { "index": 0, "kind": "rest", "determinant": 1 },
+        { "index": 1, "kind": "rigid", "determinant": 1 },
+        { "index": 2, "kind": "rigid", "determinant": 1 },
+        { "index": 3, "kind": "rigid", "determinant": 1 },
+        { "index": 4, "kind": "compression", "determinant": 0.5 },
+        { "index": 5, "kind": "compression", "determinant": 0.1 },
+        { "index": 6, "kind": "compression", "determinant": 0.01 },
+        { "index": 7, "kind": "shear", "determinant": 1 },
+        { "index": 8, "kind": "stretch", "determinant": 1.1285999999999998 }
+      ],
+      "anchors": {
+        "first": {
+          "id": "phase1.stable-neo-hookean-poses/00",
+          "index": 0,
+          "kind": "rest",
+          "determinant": 1,
+          "deformationGradient": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+          "positions": [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
+        },
+        "last": {
+          "id": "phase1.stable-neo-hookean-poses/63",
+          "index": 63,
+          "kind": "seeded",
+          "determinant": 0.6018352424730624,
+          "deformationGradient": [0.8066612354246899, 0.03844690027181059, -0.3128762312233448, 0.07791542841587215, 0.9624354205094278, -0.2383895465871319, 0.05601250708568841, 0.008020716812461614, 0.7553174151107669],
+          "positions": [0, 0, 0, 0.8066612354246899, 0.07791542841587215, 0.05601250708568841, 0.03844690027181059, 0.9624354205094278, 0.008020716812461614, -0.3128762312233448, -0.2383895465871319, 0.7553174151107669]
+        }
+      }
+    }
+  ]
+}

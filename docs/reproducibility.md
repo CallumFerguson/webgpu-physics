@@ -17,6 +17,15 @@ New tests are required to pass as part of the complete current suite, but they
 are not added retroactively to the frozen baseline. This distinction lets a
 later gate require both the unchanged regression baseline and all newer tests.
 
+Phase 1 adds a separate
+[`manifests/phase1-scenes.v1.json`](../manifests/phase1-scenes.v1.json). It does
+not broaden or rewrite either frozen Phase 0 schema. The manifest records the
+stable Neo-Hookean single-tetrahedron fixture, corrected material parameters,
+timestep, deterministic seed and generator version, 64-pose count, CPU/GPU
+tolerances, and exact first/last corpus anchors. The executable corpus contains
+rest, three rigid rotations, determinants `0.5`, `0.1`, and `0.01`, shear,
+stretch, and 55 seeded positive-determinant states.
+
 ## Validation
 
 `src/reproducibility/manifests.test.ts` parses both JSON files through the
@@ -26,6 +35,13 @@ missing generator metadata, non-finite physical values, incompatible Cubature
 settings, unsorted checkpoints, and sampled times that do not equal
 `frame * timestep`. They also compare every baseline fixture's material,
 timestep, solver, and camera values directly with the current scene builders.
+
+`src/reproducibility/phase1-manifest.test.ts` independently validates the
+Phase 1 schema and binds its executable mesh, material, timestep, gravity,
+floor, packed Cubature width, and corpus anchors to `src/scenes/phase1.ts`.
+Diagnostic-only settings such as exact-all evaluation, zero floor stiffness,
+and parity mode are asserted directly. Material ABI tests also require the
+stable material tag and converted Lamé constants to survive CPU-to-GPU packing.
 
 `scripts/verify-baseline-tests.mjs` independently asks Vitest and Playwright to
 list the tests they actually collect, then matches every frozen source and
@@ -74,6 +90,18 @@ frames plus a 1.376256 ms explicit GPU simulation timestamp. These numbers are
 Phase 0 instrumentation evidence, not a performance target for later material
 and contact capabilities. The completion gate passed 74 unit and 14 hardware
 E2E tests with zero skips.
+
+The Phase 1 GPU material oracle evaluates all 64 stable Neo-Hookean poses
+against the Float64 nonlinear CPU oracle. Material-only energy, gradient, and
+local tangent blocks are compared without inertia masking; total implicit
+objective parity is checked separately. Exact quarter turns use the roadmap's
+default zero-reference metric. A second hardware test compares non-affine
+CPU/GPU vertex polar frames on a `0.01`-scale mesh, checks a production stable
+step for finite positive-determinant output, and requires explicit test-only
+readbacks. These additive tests do not alter the frozen Phase 0 counts.
+The completed GPU material/frame milestone gate passed 106 unit tests, the
+production build, frozen selector verification at 26/106 unit and 7/16 E2E,
+and all 16 hardware E2E tests with zero skips.
 
 ## Precomputation artifacts
 

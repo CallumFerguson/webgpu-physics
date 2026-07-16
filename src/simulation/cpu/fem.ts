@@ -12,6 +12,13 @@ import type {
 } from "./types";
 
 function validateMaterial(material: LinearMaterial): void {
+  if (
+    material.model !== undefined &&
+    material.model !== "corotated-linear" &&
+    material.model !== "stable-neo-hookean"
+  ) {
+    throw new RangeError(`Material ${material.name} has invalid model.`);
+  }
   if (!(material.density > 0) || !Number.isFinite(material.density)) {
     throw new RangeError(`Material ${material.name} has invalid density.`);
   }

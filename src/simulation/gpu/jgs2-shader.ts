@@ -1,4 +1,5 @@
 import { JGS2_CUBATURE_RECORD_WORDS } from "./layout";
+import { stableNeoHookeanWgsl } from "./stable-neo-hookean-wgsl";
 
 export const JGS2_WORKGROUP_SIZE = 128;
 
@@ -60,6 +61,8 @@ var<storage, read> cubatureWords: array<u32>;
 
 @group(0) @binding(6)
 var<uniform> params: SimParams;
+
+${stableNeoHookeanWgsl}
 
 fn zeroMat3() -> mat3x3f {
   return mat3x3f(vec3f(0.0), vec3f(0.0), vec3f(0.0));
@@ -123,7 +126,7 @@ fn inverseTranspose(matrix: mat3x3f, determinantValue: f32) -> mat3x3f {
 
 fn polarRotation(matrix: mat3x3f) -> mat3x3f {
   var rotation = matrix;
-  for (var iteration = 0u; iteration < 5u; iteration += 1u) {
+  for (var iteration = 0u; iteration < 7u; iteration += 1u) {
     let determinantValue = matrixDeterminant(rotation);
     let magnitude = abs(determinantValue);
     if (!(magnitude > params.solver.z) || magnitude > 1.0e20) {
@@ -185,7 +188,106 @@ fn localTetSlot(indices: vec4u, vertex: u32) -> u32 {
   return 4u;
 }
 
+fn usesStableNeoHookean(tet: u32) -> bool {
+  return tetData[tet].attributes.w >= 0.5;
+}
+
+fn tetrahedronInverseDm(tet: u32) -> mat3x3f {
+  let item = tetData[tet];
+  return mat3x3f(item.invDm0.xyz, item.invDm1.xyz, item.invDm2.xyz);
+}
+
+fn tetrahedronDeformationGradient(tet: u32) -> mat3x3f {
+  let item = tetData[tet];
+  let position0 = loadPosition(params.offsets1.w, item.indices.x);
+  let deformedShape = mat3x3f(
+    loadPosition(params.offsets1.w, item.indices.y) - position0,
+    loadPosition(params.offsets1.w, item.indices.z) - position0,
+    loadPosition(params.offsets1.w, item.indices.w) - position0,
+  );
+  return deformedShape * tetrahedronInverseDm(tet);
+}
+
+fn tetrahedronShapeGradients(tet: u32) -> array<vec3f, 4> {
+  let inverseDmRows = transpose(tetrahedronInverseDm(tet));
+  var gradients: array<vec3f, 4>;
+  gradients[1] = inverseDmRows[0];
+  gradients[2] = inverseDmRows[1];
+  gradients[3] = inverseDmRows[2];
+  gradients[0] = -gradients[1] - gradients[2] - gradients[3];
+  return gradients;
+}
+
+fn stableTetrahedronGradient(tet: u32) -> array<vec3f, 4> {
+  let item = tetData[tet];
+  let firstPiola = snh_first_piola(
+    tetrahedronDeformationGradient(tet),
+    item.attributes.y,
+    item.attributes.z,
+  );
+  let gradients = tetrahedronShapeGradients(tet);
+  var result: array<vec3f, 4>;
+  for (var local = 0u; local < 4u; local += 1u) {
+    result[local] = item.attributes.x * firstPiola * gradients[local];
+  }
+  return result;
+}
+
+fn stableTetrahedronHessianProduct(
+  tet: u32,
+  directions: array<vec3f, 4>,
+) -> array<vec3f, 4> {
+  let item = tetData[tet];
+  let gradients = tetrahedronShapeGradients(tet);
+  var deformationDirection = zeroMat3();
+  for (var local = 0u; local < 4u; local += 1u) {
+    deformationDirection += mat3x3f(
+      directions[local] * gradients[local].x,
+      directions[local] * gradients[local].y,
+      directions[local] * gradients[local].z,
+    );
+  }
+  let stressDirection = snh_tangent_product(
+    tetrahedronDeformationGradient(tet),
+    deformationDirection,
+    item.attributes.y,
+    item.attributes.z,
+  );
+  var result: array<vec3f, 4>;
+  for (var local = 0u; local < 4u; local += 1u) {
+    result[local] = item.attributes.x * stressDirection * gradients[local];
+  }
+  return result;
+}
+
+fn stableTetrahedronLocalHessian(tet: u32, localVertex: u32) -> mat3x3f {
+  let item = tetData[tet];
+  let gradients = tetrahedronShapeGradients(tet);
+  let gradient = gradients[localVertex];
+  let deformationGradient = tetrahedronDeformationGradient(tet);
+  var columns: array<vec3f, 3>;
+  for (var coordinate = 0u; coordinate < 3u; coordinate += 1u) {
+    var axis = vec3f(0.0);
+    axis[coordinate] = 1.0;
+    let direction = mat3x3f(
+      axis * gradient.x,
+      axis * gradient.y,
+      axis * gradient.z,
+    );
+    columns[coordinate] = item.attributes.x * snh_tangent_product(
+      deformationGradient,
+      direction,
+      item.attributes.y,
+      item.attributes.z,
+    ) * gradient;
+  }
+  return mat3x3f(columns[0], columns[1], columns[2]);
+}
+
 fn tetGradient(tet: u32) -> array<vec3f, 4> {
+  if (usesStableNeoHookean(tet)) {
+    return stableTetrahedronGradient(tet);
+  }
   let indices = tetData[tet].indices;
   var current: array<vec3f, 4>;
   var rest: array<vec3f, 4>;
@@ -237,9 +339,34 @@ fn cubatureHessian(
   tet: u32,
   basis: array<mat3x3f, 4>,
 ) -> mat3x3f {
+  var reducedColumns: array<vec3f, 3>;
+
+  if (usesStableNeoHookean(tet)) {
+    for (var column = 0u; column < 3u; column += 1u) {
+      var direction: array<vec3f, 4>;
+      for (var local = 0u; local < 4u; local += 1u) {
+        direction[local] = basis[local][column];
+      }
+      let product = stableTetrahedronHessianProduct(tet, direction);
+      var reducedColumn = vec3f(0.0);
+      for (var row = 0u; row < 3u; row += 1u) {
+        var entry = 0.0;
+        for (var local = 0u; local < 4u; local += 1u) {
+          entry += dot(basis[local][row], product[local]);
+        }
+        reducedColumn[row] = entry;
+      }
+      reducedColumns[column] = reducedColumn;
+    }
+    return mat3x3f(
+      reducedColumns[0],
+      reducedColumns[1],
+      reducedColumns[2],
+    );
+  }
+
   let rotation = loadRotation(params.offsets1.z, tet);
   let inverseRotation = transpose(rotation);
-  var reducedColumns: array<vec3f, 3>;
 
   // Apply the rotated 12x12 stiffness to each of the three basis columns.
   for (var column = 0u; column < 3u; column += 1u) {
@@ -367,6 +494,10 @@ fn tetPolarRotation(@builtin(global_invocation_id) globalId: vec3u) {
   if (tet >= params.counts.y) {
     return;
   }
+  if (usesStableNeoHookean(tet)) {
+    storeRotation(params.offsets1.z, tet, identityMat3());
+    return;
+  }
 
   let item = tetData[tet];
   let position0 = loadPosition(params.offsets1.w, item.indices.x);
@@ -396,10 +527,17 @@ fn vertexPolarRotation(@builtin(global_invocation_id) globalId: vec3u) {
   }
 
   var average = zeroMat3();
+  var totalVolume = 0.0;
   for (var adjacent = 0u; adjacent < info.y; adjacent += 1u) {
     let tet = adjacency[info.x + adjacent];
-    let volumeWeight = max(abs(tetData[tet].attributes.x), params.solver.z);
-    average += volumeWeight * loadRotation(params.offsets1.z, tet);
+    let volumeWeight = tetData[tet].attributes.x;
+    average += volumeWeight * tetrahedronDeformationGradient(tet);
+    totalVolume += volumeWeight;
+  }
+  if (totalVolume > 0.0) {
+    average = (1.0 / totalVolume) * average;
+  } else {
+    average = identityMat3();
   }
   storeRotation(params.offsets1.y, vertex, polarRotation(average));
 }
@@ -432,7 +570,12 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
       let tetGradients = tetGradient(tet);
       let rotation = loadRotation(params.offsets1.z, tet);
       gradient += tetGradients[slot];
-      hessian += rotation * stiffnessBlock(tet, slot, slot) * transpose(rotation);
+      if (usesStableNeoHookean(tet)) {
+        hessian += stableTetrahedronLocalHessian(tet, slot);
+      } else {
+        hessian += rotation * stiffnessBlock(tet, slot, slot) *
+          transpose(rotation);
+      }
     }
   }
 
@@ -487,10 +630,16 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
       let elementRotation = loadRotation(params.offsets1.z, tet);
       projectedGradient -= tetGradients[sourceSlot] +
         distributedInertiaGradient(vertex);
-      projectedHessian -=
-        elementRotation * stiffnessBlock(tet, sourceSlot, sourceSlot) *
-          transpose(elementRotation) +
-        distributedInertiaWeight(vertex) * identityMat3();
+      if (usesStableNeoHookean(tet)) {
+        projectedHessian -=
+          stableTetrahedronLocalHessian(tet, sourceSlot) +
+          distributedInertiaWeight(vertex) * identityMat3();
+      } else {
+        projectedHessian -=
+          elementRotation * stiffnessBlock(tet, sourceSlot, sourceSlot) *
+            transpose(elementRotation) +
+          distributedInertiaWeight(vertex) * identityMat3();
+      }
     }
 
     gradient += weight * projectedGradient;

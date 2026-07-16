@@ -82,6 +82,15 @@ export {
   type QuadraticFloorContact,
 } from "./oracle";
 export {
+  createStableNeoHookeanImplicitEulerOracle,
+  type NonlinearQuadraticCoordinateTarget,
+  type QuadraticTargetEnergy,
+  type StableNeoHookeanImplicitEulerComponents,
+  type StableNeoHookeanImplicitEulerEvaluation,
+  type StableNeoHookeanImplicitEulerOptions,
+  type StableNeoHookeanImplicitEulerOracle,
+} from "./nonlinear-oracle";
+export {
   PHASE0_ORACLE_CORPUS_CASE_COUNT,
   PHASE0_ORACLE_CORPUS_GENERATOR_VERSION,
   PHASE0_ORACLE_CORPUS_ID,
@@ -122,6 +131,7 @@ export {
 export type {
   ColorRgba,
   CubatureSample,
+  ElasticMaterialModel,
   LinearMaterial,
   MeshTransform,
   PrecomputedScene,

@@ -30,6 +30,8 @@ export {
 export {
   JGS2_CUBATURE_BASIS_FLOATS,
   JGS2_CUBATURE_RECORD_WORDS,
+  JGS2_MATERIAL_COROTATED_LINEAR,
+  JGS2_MATERIAL_STABLE_NEO_HOOKEAN,
   JGS2_REST_STIFFNESS_FLOATS,
   computeJGS2DynamicOffsets,
   inferJGS2BodyCount,
@@ -44,3 +46,4 @@ export {
   type JGS2DynamicOffsets,
   type JGS2GpuInput,
 } from "./layout";
+export { stableNeoHookeanWgsl } from "./stable-neo-hookean-wgsl";

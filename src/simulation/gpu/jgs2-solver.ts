@@ -965,6 +965,19 @@ export class JGS2GpuSolver {
   }
 
   /**
+   * Explicit test-only readback of the three padded columns of every
+   * vertex-local polar frame. Production rendering/stepping never calls this.
+   */
+  async readVertexRotations(): Promise<Float32Array> {
+    this.assertUsable();
+    return this.readVec4Region(
+      this.dynamicOffsets.vertexRotation * 16,
+      this.vertexCount * 3 * 16,
+      "jgs2-vertex-rotation-readback",
+    );
+  }
+
+  /**
    * Explicitly evaluate the exact, all-element frozen-frame implicit-Euler
    * oracle on the GPU. The production frame loop never creates, dispatches, or
    * reads this diagnostic path unless this method is called.

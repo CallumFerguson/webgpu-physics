@@ -1,7 +1,9 @@
 # Phase 1 nonlinear-solid design record
 
 This record freezes the Phase 1 material, feasibility, local-solve, convergence,
-performance, and CPU/GPU/WASM decisions before they enter the WebGPU runtime.
+performance, and CPU/GPU/WASM decisions. The exact CPU and WGSL material path,
+material dispatch, and deformation frames are implemented; the globalization
+and nonlinear Cubature sections remain implementation contracts.
 
 ## Primary sources
 
@@ -115,6 +117,14 @@ This sparse stencil satisfies `sum_q c_iq = 0` and
 edge, face, and interior vertices. A deterministic non-affine test also proves
 that this construction is distinguishable from the old average-rotation
 shortcut.
+
+The GPU computes the same weighted average directly from current tetrahedron
+deformation gradients, divides by total incident rest volume, then uses seven
+fixed `f32` polar iterations. The frozen non-affine fixture is scaled to `0.01`
+of its nominal dimensions to enforce scale invariance; hardware matches the
+Float64 CPU frames with maximum relative error `8.702e-8`. Its production
+stable solve remains finite with minimum `J = 0.9394`; both observations use
+explicit test-only readbacks.
 
 ## Local positive-definite treatment
 

@@ -1,8 +1,13 @@
 export type Vec3 = readonly [number, number, number];
 export type ColorRgba = readonly [number, number, number, number];
+export type ElasticMaterialModel =
+  | "corotated-linear"
+  | "stable-neo-hookean";
 
 export interface LinearMaterial {
   readonly name: string;
+  /** Defaults to the Phase 0 co-rotated regression material. */
+  readonly model?: ElasticMaterialModel;
   readonly density: number;
   readonly youngModulus: number;
   readonly poissonRatio: number;

@@ -6,8 +6,10 @@ Elastodynamics*](https://arxiv.org/abs/2506.06494) by Lan et al. (2025).
 
 The app builds a tetrahedral implicit-Euler problem, precomputes the paper's
 globally aware local perturbation bases and nonnegative Cubature weights, then
-runs co-rotated vertex solves entirely in WebGPU compute shaders. The same GPU
-position buffer is rendered directly with no per-frame readback.
+runs vertex solves entirely in WebGPU compute shaders. The runtime includes
+co-rotated linear regression material and a CPU/GPU-validated stable
+Neo-Hookean current material path. The same GPU position buffer is rendered
+directly with no per-frame readback.
 
 ## Run it
 
@@ -67,8 +69,9 @@ Each runtime Jacobi invocation owns one vertex and solves equation 15:
 ```
 
 WGSL gathers exact incident-element terms, co-rotates each selected basis,
-evaluates complementary gradient and Hessian-vector products, performs a
-regularized `3 x 3` Cholesky solve, and writes to the opposite ping-pong region.
+evaluates either co-rotated linear or stable Neo-Hookean current gradients and
+Hessian-vector products, performs a regularized `3 x 3` Cholesky solve, and
+writes to the opposite ping-pong region.
 No floating-point atomics or materialized `12 x 12` runtime Hessians are needed.
 Incident samples retain their neighbor/cross response while subtracting the
 source block already included by the exact local gather. Non-parity demos may
@@ -98,10 +101,10 @@ error across the eight training modes.
 - CPU once per scene: mesh/topology construction, f64 rest FEM and lumped mass,
   one dense Cholesky for these small demos, low modes, three-right-hand-side
   equilibrium solves, NNLS Cubature, and GPU buffer packing.
-- GPU every frame: implicit prediction, polar frames, co-rotated elasticity,
-  Cubature projection, local solves, optional non-parity demo stabilization,
-  floor penalty, optional non-parity grounded damping, velocity update, and
-  rendering.
+- GPU every frame: implicit prediction, polar frames, co-rotated linear or
+  stable Neo-Hookean current elasticity, Cubature projection, local solves,
+  optional non-parity demo stabilization, floor penalty, optional non-parity
+  grounded damping, velocity update, and rendering.
 - CPU in tests only: explicitly requested synchronized diagnostic checkpoints
   for numeric invariants; normal production and benchmark stepping performs no
   synchronous per-frame readback.
@@ -145,9 +148,14 @@ commands, frozen manifests, criteria, and results.
 ## Scope
 
 This repository implements the JGS2 basis, co-rotation, Cubature, and parallel
-local-solve design for co-rotated linear tetrahedral elasticity. The paper's
-largest examples use stable Neo-Hookean elasticity; this implementation does
-not claim that material model.
+local-solve design. Its corrected stable Neo-Hookean CPU reference and WGSL
+energy, stress, exact current tangent, material dispatch, and deformation-frame
+construction pass the Phase 1 CPU/GPU oracle corpus. The four visible demos
+still use the legacy co-rotated-linear path. Explicit in-app material labels,
+nonlinear Cubature,
+globalization, convergence controls, forces/handles, and stable-material demo
+gates remain before the project claims the paper's complete nonlinear solid
+capability.
 
 Contact here is an implicit quadratic ground penalty with simple viscous
 tangential damping for grounded vertices. It is not a Coulomb friction model.

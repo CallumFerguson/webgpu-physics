@@ -1,6 +1,7 @@
 import {
   appendTetrahedralMeshes,
   buildPrecomputedScene,
+  computeStableNeoHookeanParameters,
   generateRegularCuboidMesh,
   getTetrahedronCount,
   getVertexCount,
@@ -11,6 +12,8 @@ import {
   type TetrahedralMesh,
 } from "../simulation/cpu";
 import {
+  JGS2_MATERIAL_COROTATED_LINEAR,
+  JGS2_MATERIAL_STABLE_NEO_HOOKEAN,
   validateJGS2GpuInput,
   type JGS2GpuInput,
 } from "../simulation/gpu/layout";
@@ -43,6 +46,21 @@ export {
   generatePhase0ForceFreeInitialStateCorpus,
   type Phase0RigidInitialState,
 } from "./canonical-phase0";
+
+export {
+  PHASE1_STABLE_NEO_HOOKEAN_COMPRESSION_DETERMINANTS,
+  PHASE1_STABLE_NEO_HOOKEAN_CORPUS_CASE_COUNT,
+  PHASE1_STABLE_NEO_HOOKEAN_CORPUS_ID,
+  PHASE1_STABLE_NEO_HOOKEAN_CORPUS_SEED,
+  PHASE1_STABLE_NEO_HOOKEAN_FIXTURE_ID,
+  PHASE1_STABLE_NEO_HOOKEAN_GPU_TOLERANCES,
+  PHASE1_STABLE_NEO_HOOKEAN_MATERIAL,
+  PHASE1_STABLE_NEO_HOOKEAN_REST_POSITIONS,
+  PHASE1_STABLE_NEO_HOOKEAN_TIMESTEP,
+  buildPhase1StableNeoHookeanOracleDefinition,
+  generatePhase1StableNeoHookeanPoseCorpus,
+  type Phase1StableNeoHookeanPose,
+} from "./phase1";
 
 export const SCENE_IDS = ["minimal", "stiffness", "drop", "stress"] as const;
 export type SceneId = (typeof SCENE_IDS)[number];
@@ -377,12 +395,24 @@ function packJGS2GpuInput(
       }
     }
     const material = scene.materials[scene.mesh.materialIds[tetrahedron]!]!;
-    const lambda =
+    const materialModel = material.model ?? "corotated-linear";
+    let lambda =
       (material.youngModulus * material.poissonRatio) /
       ((1 + material.poissonRatio) * (1 - 2 * material.poissonRatio));
-    const mu = material.youngModulus / (2 * (1 + material.poissonRatio));
+    let mu = material.youngModulus / (2 * (1 + material.poissonRatio));
+    let materialTag = JGS2_MATERIAL_COROTATED_LINEAR;
+    if (materialModel === "stable-neo-hookean") {
+      const parameters = computeStableNeoHookeanParameters(material);
+      lambda = parameters.lambda;
+      mu = parameters.mu;
+      materialTag = JGS2_MATERIAL_STABLE_NEO_HOOKEAN;
+    } else if (materialModel !== "corotated-linear") {
+      throw new RangeError(
+        `Material ${material.name} has unknown model ${String(materialModel)}.`,
+      );
+    }
     tetMeta.set(
-      [scene.restTetraData.volumes[tetrahedron]!, lambda, mu, material.density],
+      [scene.restTetraData.volumes[tetrahedron]!, lambda, mu, materialTag],
       tetrahedron * 4,
     );
   }

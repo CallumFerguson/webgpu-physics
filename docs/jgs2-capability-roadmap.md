@@ -251,21 +251,21 @@ nonlinear energy gradient and Hessian.
 | Reviewer | TBD |
 | Start date | 2026-07-16 |
 | Completion date | TBD |
-| Branch or PR | main; Phase 0 gate ce478e6 |
-| Design records | docs/phase1-stable-neo-hookean.md |
+| Branch or PR | main; Phase 0 gate ce478e6; Phase 1 CPU material ebb1017 |
+| Design records | docs/phase1-stable-neo-hookean.md; docs/jgs2-implementation.md; manifests/phase1-scenes.v1.json |
 | Primary test command | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:screenshot |
 | Performance result | TBD |
-| Known limitations | CPU material, exact tangent, feasibility guard, and affine-exact vertex-frame reference are implemented. WGSL parity, nonlinear Cubature, globalization, forces/handles, scenes, and performance evidence remain. |
+| Known limitations | CPU and WGSL material derivatives, exact diagnostics, material dispatch, and affine-exact CPU/GPU vertex frames are implemented. The shared ABI still carries legacy rest stiffness for stable-only meshes. Nonlinear Cubature, globalization and assembled-pose feasibility, explicit public-scene material labels, forces/handles, scenes, and performance evidence remain. |
 | Exit sign-off | TBD |
 
 ### Required implementation
 
 - [x] Implement stable Neo-Hookean energy, gradient, and tangent Hessian in the
       CPU reference.
-- [ ] Implement the same current-pose calculations in WGSL.
-- [ ] Generalize material data so the runtime does not depend on a constant
-      rest 12-by-12 stiffness matrix.
-- [ ] Compute documented vertex-local deformation gradients and polar frames
+- [x] Implement the same current-pose calculations in WGSL.
+- [x] Generalize material dispatch so stable constitutive evaluation uses the
+      current-pose tangent rather than the constant rest 12-by-12 stiffness.
+- [x] Compute documented vertex-local deformation gradients and polar frames
       for the co-rotated equilibrium bases.
 - [ ] Evaluate current complementary gradients and Hessians in the Cubature
       projection.
@@ -276,8 +276,8 @@ nonlinear energy gradient and Hessian.
 - [ ] Add monotone local line-search infrastructure for nonlinear updates.
 - [ ] Document positive-definite projection or regularization for each local
       Hessian and expose its applied shift as a diagnostic.
-- [ ] Preserve co-rotated linear elasticity only as a labeled regression or
-      debugging material.
+- [ ] Preserve co-rotated linear elasticity only as an explicitly labeled
+      regression or debugging material in public scene metadata.
 
 ### Required scenes
 
@@ -288,13 +288,13 @@ nonlinear energy gradient and Hessian.
 
 ### Mandatory exit criteria
 
-- [ ] P1-EC-01: Rest-pose energy and force are zero within CPU relative tolerance 1e-10
+- [x] P1-EC-01: Rest-pose energy and force are zero within CPU relative tolerance 1e-10
       and GPU relative tolerance 1e-5.
-- [ ] P1-EC-02: Rigid rotation changes energy by <= 1e-8 on CPU and <= 1e-4 on GPU and
+- [x] P1-EC-02: Rigid rotation changes energy by <= 1e-8 on CPU and <= 1e-4 on GPU and
       produces no material force above the same normalized tolerances.
 - [x] P1-EC-03: Neo-Hookean CPU gradients and Hessians meet the Phase 0 finite-difference
       tolerances.
-- [ ] P1-EC-04: GPU Neo-Hookean energy, gradients, and Hessian blocks match CPU with
+- [x] P1-EC-04: GPU Neo-Hookean energy, gradients, and Hessian blocks match CPU with
       relative error <= 1e-3.
 - [ ] P1-EC-05: Tests at deformation determinants 0.5, 0.1, and 0.01 remain finite;
       non-positive determinants are rejected or made infeasible before
@@ -332,8 +332,8 @@ nonlinear energy gradient and Hessian.
 | Evidence | Location or result | Complete |
 | --- | --- | --- |
 | Neo-Hookean derivative report | CPU 60-pose corpus: worst gradient 8.975e-10; worst Hessian 1.957e-11; exact tangent symmetry and rest-stiffness parity pass | [x] |
-| Objectivity and rest-state report | CPU density, stress, tangent action, translated tetrahedron, internal force/torque, and translational null-mode tests pass; GPU evidence pending | [ ] |
-| CPU-versus-GPU report | TBD | [ ] |
+| Objectivity and rest-state report | CPU density, stress, tangent action, translated tetrahedron, internal force/torque, and translational null-mode tests pass; f32-exact GPU quarter turns have rest and rigid energy/force errors 0/0 under the roadmap default zero-reference metric | [x] |
+| CPU-versus-GPU report | Frozen 64-pose material-only hardware corpus: worst relative energy 2.234e-6, gradient 1.161e-6, local Hessian 1.089e-6; total implicit parity also <=1e-3; scaled non-affine vertex-frame error 8.702e-8 | [x] |
 | Convergence history | TBD | [ ] |
 | Cubature residual report | TBD | [ ] |
 | Scene screenshots and diagnostics | TBD | [ ] |
@@ -971,6 +971,12 @@ later passing run so the history remains visible.
 | P1-EC-02 | 2026-07-16 | 1 | Phase 1 CPU material milestone | npm.cmd run test:unit -- src/simulation/cpu/stable-neo-hookean.test.ts | i7-13700K | Partial pass: CPU energy, stress, tangent action, and tetrahedral response are objective; GPU pending | src/simulation/cpu/stable-neo-hookean.test.ts | Automated CPU oracle; reviewer pending |
 | P1-EC-03 | 2026-07-16 | 1 | Phase 1 CPU material milestone | .\\node_modules\\.bin\\vitest.cmd run src/simulation/cpu/stable-neo-hookean.test.ts --disableConsoleIntercept --reporter=verbose | i7-13700K | Pass: 60 deformed poses; worst gradient 8.975e-10 and Hessian 1.957e-11 | src/simulation/cpu/stable-neo-hookean.test.ts | Automated derivative oracle; reviewer pending |
 | P1-EC-05 | 2026-07-16 | 1 | Phase 1 CPU material milestone | npm.cmd run test:unit -- src/simulation/cpu/stable-neo-hookean.test.ts | i7-13700K | Partial pass: J=0.5, 0.1, and 0.01 finite; raw J=0/-0.1/-1 finite; separate accepted-step guard rejects J<=floor; GPU pending | src/simulation/cpu/stable-neo-hookean.test.ts; docs/phase1-stable-neo-hookean.md | Automated material/feasibility tests; reviewer pending |
+| P1-EC-01 | 2026-07-16 | 1 | Phase 1 GPU material/frame milestone | npm.cmd run test:screenshot -- tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | RTX 5090 / Chrome 150 | Pass: CPU rest energy/force below 1e-10; GPU zero-reference energy/force errors 0/0 | tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | Automated CPU/GPU oracle; independent gate audit |
+| P1-EC-02 | 2026-07-16 | 1 | Phase 1 GPU material/frame milestone | npm.cmd run test:screenshot -- tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | RTX 5090 / Chrome 150 | Pass: CPU objectivity below 1e-8; f32-exact GPU quarter-turn energy/force errors 0/0 using the roadmap default zero-reference metric | tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | Automated CPU/GPU oracle; independent gate audit findings resolved |
+| P1-EC-04 | 2026-07-16 | 1 | Phase 1 GPU material/frame milestone | npm.cmd run test:screenshot -- tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | RTX 5090 / Chrome 150 | Pass: all 64 frozen poses; material-only worst relative energy 2.234e-6, gradient 1.161e-6, local Hessian 1.089e-6; separate total implicit parity <=1e-3 | tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | Automated CPU/GPU oracle; independent gate audit findings resolved |
+| P1-EC-05 | 2026-07-16 | 1 | Phase 1 GPU material/frame milestone | npm.cmd run test:screenshot -- tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | RTX 5090 / Chrome 150 | Partial pass: GPU material and derivatives remain finite at J=0.5, 0.1, and 0.01; accepted assembled-step enforcement remains pending | tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | Automated positive-J corpus; independent gate audit; criterion intentionally unchecked |
+| P1-FRAME-01 | 2026-07-16 | 1 | Phase 1 GPU material/frame milestone | npm.cmd run test:screenshot -- tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | RTX 5090 / Chrome 150 | Pass: 0.01-scale non-affine polar(volume-weighted average F) CPU/GPU error 8.702e-8; production stable step finite with min J 0.9394; two explicit test-only readbacks | tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | Automated scale/frame/production smoke oracle; independent code-audit finding resolved |
+| P1-GATE-02 | 2026-07-16 | 1 | Phase 1 GPU material/frame milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:screenshot | i7-13700K / RTX 5090 / Chrome 150 | Pass: 106 unit, build, frozen 26/106 unit and 7/16 E2E selectors, 16/16 hardware E2E; zero skips/errors; stress p95 5.000 ms | docs/reproducibility.md | Complete exact-current-code regression; independent code and gate audits |
 
 ## Decision log
 

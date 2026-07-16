@@ -1,3 +1,5 @@
+import { stableNeoHookeanWgsl } from "./stable-neo-hookean-wgsl";
+
 export const JGS2_DIAGNOSTICS_WORKGROUP_SIZE = 128;
 export const JGS2_DIAGNOSTIC_TET_ROTATION_VEC4S = 3;
 export const JGS2_DIAGNOSTIC_TET_METRIC_VEC4S = 1;
@@ -349,6 +351,8 @@ var<storage, read_write> diagnosticData: array<vec4f>;
 @group(0) @binding(6)
 var<uniform> params: DiagnosticParams;
 
+${stableNeoHookeanWgsl}
+
 fn finiteScalar(value: f32) -> bool {
   return value == value && abs(value) <= 3.0e38;
 }
@@ -426,10 +430,10 @@ fn inverseTranspose(matrix: mat3x3f, determinantValue: f32) -> mat3x3f {
   );
 }
 
-// This intentionally matches the runtime solver's five f32 Newton-polar steps.
+// This intentionally matches the runtime solver's seven f32 Newton-polar steps.
 fn polarRotation(matrix: mat3x3f) -> mat3x3f {
   var rotation = matrix;
-  for (var iteration = 0u; iteration < 5u; iteration += 1u) {
+  for (var iteration = 0u; iteration < 7u; iteration += 1u) {
     let determinantValue = matrixDeterminant(rotation);
     let magnitude = abs(determinantValue);
     if (!(magnitude > params.physics.w) || !finiteScalar(magnitude)) {
@@ -488,7 +492,83 @@ fn localTetSlot(indices: vec4u, vertex: u32) -> u32 {
   return 4u;
 }
 
+fn usesStableNeoHookean(tetrahedron: u32) -> bool {
+  return tetData[tetrahedron].attributes.w >= 0.5;
+}
+
+fn tetrahedronInverseDm(tetrahedron: u32) -> mat3x3f {
+  let item = tetData[tetrahedron];
+  return mat3x3f(item.invDm0.xyz, item.invDm1.xyz, item.invDm2.xyz);
+}
+
+fn tetrahedronDeformationGradient(tetrahedron: u32) -> mat3x3f {
+  let item = tetData[tetrahedron];
+  let position0 = loadPosition(params.offsets.x, item.indices.x);
+  let deformedShape = mat3x3f(
+    loadPosition(params.offsets.x, item.indices.y) - position0,
+    loadPosition(params.offsets.x, item.indices.z) - position0,
+    loadPosition(params.offsets.x, item.indices.w) - position0,
+  );
+  return deformedShape * tetrahedronInverseDm(tetrahedron);
+}
+
+fn tetrahedronShapeGradients(tetrahedron: u32) -> array<vec3f, 4> {
+  let inverseDmRows = transpose(tetrahedronInverseDm(tetrahedron));
+  var gradients: array<vec3f, 4>;
+  gradients[1] = inverseDmRows[0];
+  gradients[2] = inverseDmRows[1];
+  gradients[3] = inverseDmRows[2];
+  gradients[0] = -gradients[1] - gradients[2] - gradients[3];
+  return gradients;
+}
+
+fn stableTetrahedronGradient(tetrahedron: u32) -> array<vec3f, 4> {
+  let item = tetData[tetrahedron];
+  let deformationGradient = tetrahedronDeformationGradient(tetrahedron);
+  let firstPiola = snh_first_piola(
+    deformationGradient,
+    item.attributes.y,
+    item.attributes.z,
+  );
+  let gradients = tetrahedronShapeGradients(tetrahedron);
+  var result: array<vec3f, 4>;
+  for (var local = 0u; local < 4u; local += 1u) {
+    result[local] = item.attributes.x * firstPiola * gradients[local];
+  }
+  return result;
+}
+
+fn stableTetrahedronLocalHessian(
+  tetrahedron: u32,
+  localVertex: u32,
+) -> mat3x3f {
+  let item = tetData[tetrahedron];
+  let deformationGradient = tetrahedronDeformationGradient(tetrahedron);
+  let gradient = tetrahedronShapeGradients(tetrahedron)[localVertex];
+  var columns: array<vec3f, 3>;
+  for (var coordinate = 0u; coordinate < 3u; coordinate += 1u) {
+    var axis = vec3f(0.0);
+    axis[coordinate] = 1.0;
+    let direction = mat3x3f(
+      axis * gradient.x,
+      axis * gradient.y,
+      axis * gradient.z,
+    );
+    let stressDirection = snh_tangent_product(
+      deformationGradient,
+      direction,
+      item.attributes.y,
+      item.attributes.z,
+    );
+    columns[coordinate] = item.attributes.x * stressDirection * gradient;
+  }
+  return mat3x3f(columns[0], columns[1], columns[2]);
+}
+
 fn tetrahedronGradient(tetrahedron: u32) -> array<vec3f, 4> {
+  if (usesStableNeoHookean(tetrahedron)) {
+    return stableTetrahedronGradient(tetrahedron);
+  }
   let indices = tetData[tetrahedron].indices;
   let rotation = loadDiagnosticRotation(tetrahedron);
   let inverseRotation = transpose(rotation);
@@ -571,6 +651,18 @@ fn evaluateDiagnosticTetrahedra(
   for (var local = 0u; local < 4u; local += 1u) {
     elasticityEnergy += 0.5 * dot(displacement[local], localGradient[local]);
   }
+  if (usesStableNeoHookean(tetrahedron)) {
+    elasticityEnergy = item.attributes.x * snh_energy_density(
+      deformationGradient,
+      item.attributes.y,
+      item.attributes.z,
+    );
+    allFinite = allFinite && finiteMat3(snh_first_piola(
+      deformationGradient,
+      item.attributes.y,
+      item.attributes.z,
+    ));
+  }
   allFinite = allFinite && finiteScalar(elasticityEnergy);
 
   let rotationBase = params.offsets.z + tetrahedron * 3u;
@@ -641,8 +733,12 @@ fn evaluateDiagnosticVertices(
       let rotation = loadDiagnosticRotation(tetrahedron);
       let elementGradient = tetrahedronGradient(tetrahedron);
       elasticityGradient += elementGradient[slot];
-      hessian += rotation * stiffnessBlock(tetrahedron, slot, slot) *
-        transpose(rotation);
+      if (usesStableNeoHookean(tetrahedron)) {
+        hessian += stableTetrahedronLocalHessian(tetrahedron, slot);
+      } else {
+        hessian += rotation * stiffnessBlock(tetrahedron, slot, slot) *
+          transpose(rotation);
+      }
     }
     gradient += elasticityGradient;
 

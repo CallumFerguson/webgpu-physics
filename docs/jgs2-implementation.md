@@ -2,9 +2,11 @@
 
 This project implements the central algorithm from *JGS2: Near Second-order
 Converging Jacobi/Gauss-Seidel for GPU Elastodynamics* (Lan et al., 2025) for
-small procedural tetrahedral scenes. It uses implicit Euler, isotropic linear
-tetrahedral FEM in a co-rotated frame, a vertex-sized Jacobi subproblem, and the
-paper's precomputed perturbation bases and Cubature projection.
+small procedural tetrahedral scenes. It uses implicit Euler, a vertex-sized
+Jacobi subproblem, and the paper's precomputed perturbation bases and Cubature
+projection. The runtime can evaluate either the original co-rotated linear
+regression material or the paper's stable Neo-Hookean energy and exact current
+tangent. Nonlinear Cubature training and globalization remain Phase 1 work.
 
 ## Algorithm mapping
 
@@ -22,8 +24,9 @@ rest Hessian once, solve `Y_i = H^-1 S_i^T`, and normalize with
 `U_i = Y_i (S_i Y_i)^-1`. Unit tests verify `S_i U_i = I`, the complementary
 equilibrium residual, and the exact quadratic Newton-block identity.
 
-At runtime, the basis is co-rotated using the current per-vertex frames. Each
-GPU invocation owns one vertex, gathers its incident tetrahedra, projects the
+At runtime, the basis is co-rotated using current per-vertex deformation
+frames. Each GPU invocation owns one vertex, gathers its incident tetrahedra,
+evaluates the selected material's current energy derivatives, projects the
 selected remainder elements into the three-dimensional basis, and solves
 
 ```text
@@ -54,7 +57,7 @@ against a dense CPU oracle on tiny systems.
 | Location | Work | Reason |
 | --- | --- | --- |
 | CPU, once per scene | Procedural mesh construction, rest tetrahedral data, lumped masses, dense rest-Hessian Cholesky, equilibrium bases, Cubature training, and buffer packing | These tasks are irregular, use double precision, and are amortized over the scene. This mirrors the paper's CPU preprocessing. |
-| GPU, every frame | Implicit prediction, polar frames, co-rotated element gradients and Hessian products, Cubature projection, regularized `3 x 3` vertex solves, per-body horizontal COM correction, floor contact and tangential damping, velocity update, and surface rendering | These are uniform data-parallel kernels. State stays GPU-resident, with no per-frame position readback. |
+| GPU, every frame | Implicit prediction, polar frames, co-rotated linear or stable Neo-Hookean current gradients and tangent products, Cubature projection, regularized `3 x 3` vertex solves, per-body horizontal COM correction, floor contact and tangential damping, velocity update, and surface rendering | These are uniform data-parallel kernels. State stays GPU-resident, with no per-frame position readback. |
 | CPU, tests only | Requested checkpoint readback and invariant calculation | A deliberate synchronization is useful for correctness but would distort real-time performance. |
 
 WebAssembly is intentionally absent. It cannot improve the GPU-resident frame
@@ -71,10 +74,11 @@ threads. Fixed demo assets would be better precomputed offline.
   numbers and `Float64Array`.
 - The rest Hessian includes the timestep inertia term, so a basis is specific
   to its mesh, mass, material, timestep, and fixed boundary conditions.
-- Tet polar decomposition is followed by explicit orthonormalization with a
-  degenerate-matrix fallback. A vertex frame is the polar rotation of a
-  volume-weighted average of its incident tet rotations; the paper does not
-  provide its exact vertex-frame construction.
+- A vertex deformation gradient is the incident-rest-volume-weighted average
+  of current tetrahedron deformation gradients. Its frame is computed with
+  seven fixed `f32` polar iterations followed by explicit orthonormalization
+  and a degenerate-matrix fallback. This construction is affine-exact at both
+  interior and boundary vertices and is shared with the Float64 CPU oracle.
 - Local matrices are symmetrized and solved by shifted Cholesky. A scale-aware
   diagonal shift and maximum update length keep malformed `f32` systems finite.
 - Vertex subproblems gather incident elements through CSR. This avoids relying
@@ -98,9 +102,14 @@ threads. Fixed demo assets would be better precomputed offline.
 ## Scope and limitations
 
 The implementation exercises the paper's JGS2 basis, co-rotation, Cubature,
-and parallel local solve. The material is co-rotated linear elasticity rather
-than the stable Neo-Hookean model used in the paper's largest examples. Contact
-is an implicit quadratic ground penalty with simple grounded viscous damping.
+and parallel local solve. The Phase 1 material path now contains the corrected
+stable Neo-Hookean energy, stress, and exact current tangent on both CPU and
+GPU, plus CPU/GPU checks over a frozen 64-pose corpus. The four public scenes
+continue to use the legacy co-rotated-linear material until explicit labels,
+nonlinear
+Cubature, local line search, convergence diagnostics, and Phase 1 scenes meet
+their roadmap gates. Contact is an implicit quadratic ground penalty with
+simple grounded viscous damping.
 Full incremental potential contact would additionally require broad-phase
 collision detection, continuous collision detection, barrier derivatives,
 Coulomb friction, and a collision-safe line search; none of those are silently
