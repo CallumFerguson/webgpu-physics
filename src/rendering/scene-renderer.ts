@@ -6,6 +6,8 @@ export interface SceneRenderInput {
   readonly surfaceTriangles: Uint32Array;
   readonly surfaceEdges: Uint32Array;
   readonly floorHeight: number;
+  /** Defaults to true. Force-free fixtures can suppress the decorative floor. */
+  readonly showFloor?: boolean;
 }
 
 export interface SceneCamera {
@@ -156,7 +158,7 @@ export class SceneRenderer {
     private readonly canvas: HTMLCanvasElement,
     format: GPUTextureFormat,
     private readonly input: SceneRenderInput,
-    private readonly camera: SceneCamera,
+    private camera: SceneCamera,
     positionBuffer: GPUBuffer,
     positionOffsetVertices: number,
   ) {
@@ -304,6 +306,19 @@ export class SceneRenderer {
     this.device.queue.writeBuffer(this.uniformBuffer, 0, values);
   }
 
+  setCamera(camera: SceneCamera): void {
+    const values = [
+      ...camera.eye,
+      ...camera.target,
+      ...camera.floorCenter,
+      camera.floorScale,
+    ];
+    if (!values.every(Number.isFinite) || !(camera.floorScale > 0)) {
+      throw new RangeError("Scene camera values must be finite with positive floor scale.");
+    }
+    this.camera = camera;
+  }
+
   render(frame = this.frame): void {
     this.frame = frame;
     this.writeUniforms(this.positionOffsetVertices);
@@ -324,8 +339,10 @@ export class SceneRenderer {
       },
     });
     pass.setBindGroup(0, this.bindGroup);
-    pass.setPipeline(this.floorPipeline);
-    pass.draw(6);
+    if (this.input.showFloor !== false) {
+      pass.setPipeline(this.floorPipeline);
+      pass.draw(6);
+    }
     pass.setIndexBuffer(this.triangleIndexBuffer, "uint32");
     pass.setPipeline(this.surfacePipeline);
     pass.drawIndexed(this.input.surfaceTriangles.length);

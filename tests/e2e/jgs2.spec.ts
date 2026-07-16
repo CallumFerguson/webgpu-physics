@@ -31,6 +31,7 @@ interface JGS2Diagnostics {
     readonly horizontalBodyCorrection: boolean;
   };
   readonly pinnedMaxError: number;
+  readonly pinnedMaxErrorValid: boolean;
   readonly minTetDeterminant: number;
   readonly minTetDeterminantValid: boolean;
   readonly minimumContactDistance: number;
@@ -64,6 +65,35 @@ interface JGS2TestHarness {
   stepIterations(iterationCount: number): Promise<void>;
   waitForGpu(): Promise<void>;
   diagnostics(): Promise<JGS2Diagnostics>;
+  configuration(): {
+    readonly fixtureId: "phase0.force-free-cuboid" | null;
+    readonly gravity: Vec3;
+    readonly floorStiffness: number;
+    readonly parityMode: boolean;
+    readonly velocityDamping: number;
+    readonly contactTangentialDamping: number;
+    readonly horizontalBodyCorrection: boolean;
+  };
+  submissionPolicy(): {
+    readonly maximumOutstanding: number;
+    readonly currentOutstanding: number;
+    readonly solverSubmissions: number;
+    readonly renderSubmissions: number;
+    readonly readbackSubmissions: number;
+    readonly testBatchFrameLimit: number;
+    readonly solverBatchFrameLimit: number;
+    readonly productionStepsPerSubmission: 1;
+  };
+  focusOnPrimaryBody(): Promise<Vec3>;
+  runForceFreeCorpus(): Promise<
+    readonly {
+      readonly id: string;
+      readonly finite: boolean;
+      readonly minimumDeterminant: number;
+      readonly linearMomentumError: number;
+      readonly angularMomentumError: number;
+    }[]
+  >;
 }
 
 declare global {
@@ -204,6 +234,190 @@ test("parity mode disables project stabilizers and accepts an even exact iterati
   expect(after.finite).toBe(true);
 });
 
+test("P0-EC-10/11: a force-free body conserves momentum for 10 seconds", async ({
+  page,
+}, testInfo) => {
+  const sceneId = "phase0.force-free-cuboid";
+  await page.goto(`/?test=1&fixture=${sceneId}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await requireHardwareWebGPU(page, testInfo);
+  await waitForTestHarness(page);
+  await waitForCanvasPresentation(page);
+
+  const configuration = await page.evaluate(() =>
+    window.__jgs2Test!.configuration(),
+  );
+  expect(configuration).toEqual({
+    fixtureId: sceneId,
+    gravity: [0, 0, 0],
+    floorStiffness: 0,
+    parityMode: true,
+    velocityDamping: 1,
+    contactTangentialDamping: 0,
+    horizontalBodyCorrection: false,
+  });
+
+  const initial = await readDiagnostics(page);
+  assertDiagnostics(initial, 0, sceneId);
+  assertBodyCount(initial, 1, sceneId);
+  expect(initial.pinnedMaxErrorValid).toBe(false);
+  expect(initial.pinnedMaxError).toBe(0);
+  expect(initial.totalLinearMomentumValid).toBe(true);
+  expect(initial.totalAngularMomentumValid).toBe(true);
+  expect(vectorNorm(initial.totalLinearMomentum)).toBeGreaterThan(0);
+  expect(vectorNorm(initial.bodies[0]!.angularMomentum)).toBeGreaterThan(0);
+  const start = await captureCanvas(page, testInfo, "start.png");
+
+  const finalFrame = frameAtSeconds(initial.timestep, 10, sceneId);
+  await stepToFrame(page, 0, finalFrame);
+  await page.evaluate(async () => window.__jgs2Test!.waitForGpu());
+  await waitForCanvasPresentation(page);
+
+  const final = await readDiagnostics(page);
+  assertDiagnostics(final, finalFrame, sceneId);
+  expect(final.lastStepIterations).toBe(12);
+  expect(final.pinnedMaxErrorValid).toBe(false);
+  expect(final.pinnedMaxError).toBe(0);
+  expect(final.totalLinearMomentumValid).toBe(true);
+  expect(final.totalAngularMomentumValid).toBe(true);
+  const end = await captureCanvas(page, testInfo, "end.png");
+  const focusedTarget = await page.evaluate(async () =>
+    window.__jgs2Test!.focusOnPrimaryBody(),
+  );
+  await waitForCanvasPresentation(page);
+  const focusedEnd = await captureCanvas(
+    page,
+    testInfo,
+    "end-follow-camera.png",
+  );
+  expect(
+    distance(focusedTarget, final.bodies[0]!.centerOfMass),
+    "the test-only follow camera must target the final body center",
+  ).toBeLessThan(1e-6);
+  expect(
+    comparePngs(end, focusedEnd).changedPixelRatio,
+    "the follow-camera artifact must visibly reveal the translated final body",
+  ).toBeGreaterThan(0.0005);
+
+  const totalMass = initial.bodies.reduce((sum, body) => sum + body.mass, 0);
+  const sceneScale = boundsDiagonal(initial);
+  const linearError = vectorDifferenceNorm(
+    final.totalLinearMomentum,
+    initial.totalLinearMomentum,
+  ) / Math.max(
+    vectorNorm(initial.totalLinearMomentum),
+    totalMass * sceneScale,
+  );
+  const angularError = vectorDifferenceNorm(
+    final.totalAngularMomentum,
+    initial.totalAngularMomentum,
+  ) / Math.max(
+    vectorNorm(initial.totalAngularMomentum),
+    totalMass * sceneScale * sceneScale,
+  );
+
+  console.log(
+    `${sceneId}: normalized linear momentum error=${linearError.toExponential(6)}, ` +
+      `angular momentum error=${angularError.toExponential(6)}, ` +
+      `minimum determinant=${final.minTetDeterminant.toExponential(6)}`,
+  );
+  expect(
+    linearError,
+    "force-free normalized total linear-momentum error after 10 seconds",
+  ).toBeLessThan(0.005);
+  expect(
+    angularError,
+    "force-free normalized total angular-momentum error after 10 seconds",
+  ).toBeLessThan(0.005);
+  expect(
+    comparePngs(start, end).changedPixelRatio,
+    "the translating and rotating conservation fixture must visibly move",
+  ).toBeGreaterThan(0.0005);
+
+  const submissionPolicy = await page.evaluate(() =>
+    window.__jgs2Test!.submissionPolicy(),
+  );
+  expect(submissionPolicy.maximumOutstanding).toBeLessThanOrEqual(2);
+  expect(submissionPolicy.currentOutstanding).toBe(0);
+  expect(submissionPolicy.testBatchFrameLimit).toBe(120);
+  expect(submissionPolicy.solverBatchFrameLimit).toBeGreaterThanOrEqual(
+    submissionPolicy.testBatchFrameLimit,
+  );
+  expect(submissionPolicy.productionStepsPerSubmission).toBe(1);
+});
+
+test("P0-CORPUS-01: all 32 frozen force-free states conserve momentum on hardware", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(600_000);
+  const sceneId = "phase0.force-free-cuboid";
+  await page.goto(`/?test=1&fixture=${sceneId}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await requireHardwareWebGPU(page, testInfo);
+  await waitForTestHarness(page);
+
+  const started = Date.now();
+  const results = await page.evaluate(async () =>
+    window.__jgs2Test!.runForceFreeCorpus(),
+  );
+  const elapsedMilliseconds = Date.now() - started;
+  expect(results).toHaveLength(32);
+  expect(new Set(results.map((result) => result.id)).size).toBe(32);
+
+  let worstLinear = results[0]!;
+  let worstAngular = results[0]!;
+  let minimumDeterminant = Infinity;
+  for (const result of results) {
+    expect(result.finite, `${result.id} must remain finite`).toBe(true);
+    expect(
+      result.minimumDeterminant,
+      `${result.id} must not invert at one-second checkpoints`,
+    ).toBeGreaterThan(0);
+    expect(
+      result.linearMomentumError,
+      `${result.id} normalized linear momentum error`,
+    ).toBeLessThanOrEqual(0.005);
+    expect(
+      result.angularMomentumError,
+      `${result.id} normalized angular momentum error`,
+    ).toBeLessThanOrEqual(0.005);
+    if (result.linearMomentumError > worstLinear.linearMomentumError) {
+      worstLinear = result;
+    }
+    if (result.angularMomentumError > worstAngular.angularMomentumError) {
+      worstAngular = result;
+    }
+    minimumDeterminant = Math.min(
+      minimumDeterminant,
+      result.minimumDeterminant,
+    );
+  }
+
+  const submissionPolicy = await page.evaluate(() =>
+    window.__jgs2Test!.submissionPolicy(),
+  );
+  expect(submissionPolicy.maximumOutstanding).toBeLessThanOrEqual(2);
+  expect(submissionPolicy.currentOutstanding).toBe(0);
+  console.log(
+    `Phase 0 force-free corpus: 32 cases x 1200 frames in ` +
+      `${elapsedMilliseconds} ms; worst linear=${worstLinear.linearMomentumError.toExponential(6)} ` +
+      `(${worstLinear.id}), worst angular=${worstAngular.angularMomentumError.toExponential(6)} ` +
+      `(${worstAngular.id}), minimum determinant=${minimumDeterminant.toExponential(6)}`,
+  );
+  await testInfo.attach("phase0-force-free-corpus.json", {
+    body: Buffer.from(
+      JSON.stringify(
+        { elapsedMilliseconds, submissionPolicy, results },
+        null,
+        2,
+      ),
+    ),
+    contentType: "application/json",
+  });
+});
+
 test.describe("deterministic JGS2 scenes", () => {
   for (const scene of scenes) {
     test(`${scene.id}: frame 0 to frame ${scene.frames}`, async ({ page }, testInfo) => {
@@ -216,6 +430,9 @@ test.describe("deterministic JGS2 scenes", () => {
 
       const startDiagnostics = await readDiagnostics(page);
       assertDiagnostics(startDiagnostics, 0, scene.id);
+      expect(startDiagnostics.pinnedMaxErrorValid).toBe(
+        scene.id === "minimal" || scene.id === "stiffness",
+      );
       const start = await captureCanvas(page, testInfo, "start.png");
       if (scene.id === "minimal") {
         const pageScreenshot = await page.screenshot({
@@ -561,13 +778,25 @@ function assertDiagnostics(
     Number.isFinite(diagnostics.pinnedMaxError),
     `${sceneId} pinned error must be finite`,
   ).toBe(true);
-  expect(
-    diagnostics.pinnedMaxError,
-    `${sceneId} pinned vertices must remain fixed`,
-  ).toBeLessThanOrEqual(1e-4);
+  expect(typeof diagnostics.pinnedMaxErrorValid).toBe("boolean");
+  if (diagnostics.pinnedMaxErrorValid) {
+    expect(
+      diagnostics.pinnedMaxError,
+      `${sceneId} pinned vertices must remain fixed`,
+    ).toBeLessThanOrEqual(1e-4);
+  } else {
+    expect(
+      diagnostics.pinnedMaxError,
+      `${sceneId} no-pin sentinel must be zero`,
+    ).toBe(0);
+  }
   expect(
     Number.isFinite(diagnostics.minTetDeterminant),
     `${sceneId} minimum tetrahedron determinant must be finite`,
+  ).toBe(true);
+  expect(
+    diagnostics.minTetDeterminantValid,
+    `${sceneId} tetrahedron determinant metric must be valid`,
   ).toBe(true);
   expect(
     diagnostics.minTetDeterminant,
@@ -720,6 +949,18 @@ function horizontalDistance(left: Vec3, right: Vec3): number {
 
 function horizontalSpeed(velocity: Vec3): number {
   return Math.hypot(velocity[0], velocity[2]);
+}
+
+function vectorNorm(value: Vec3): number {
+  return Math.hypot(value[0], value[1], value[2]);
+}
+
+function vectorDifferenceNorm(left: Vec3, right: Vec3): number {
+  return Math.hypot(
+    left[0] - right[0],
+    left[1] - right[1],
+    left[2] - right[2],
+  );
 }
 
 function assertStiffnessComparison(

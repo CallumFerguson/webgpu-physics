@@ -1,6 +1,7 @@
 export {
   assertHardwareWebGPUAdapter,
   requestWebGPUDevice,
+  selectWebGPUDeviceFeatures,
   WebGPUUnavailableError,
   type WebGPUDeviceContext,
 } from "./device";

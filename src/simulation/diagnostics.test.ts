@@ -3,6 +3,17 @@ import { describe, expect, it } from "vitest";
 import { buildScene, toJGS2GpuInput } from "../scenes";
 import { diagnosticsFromState } from "./diagnostics";
 
+const TEST_CONTEXT = {
+  frame: 0,
+  lastStepIterations: 0,
+  runtime: {
+    parityMode: true,
+    velocityDamping: 1,
+    contactTangentialDamping: 0,
+    horizontalBodyCorrection: false,
+  },
+} as const;
+
 describe("deterministic readback diagnostics", () => {
   it("reports momentum and honest validity flags", () => {
     const scene = buildScene("drop");
@@ -56,6 +67,8 @@ describe("deterministic readback diagnostics", () => {
     expect(diagnostics.source).toBe("cpu-readback");
     expect(diagnostics.finite).toBe(true);
     expect(diagnostics.lastStepIterations).toBe(4);
+    expect(diagnostics.totalLinearMomentumValid).toBe(true);
+    expect(diagnostics.totalAngularMomentumValid).toBe(true);
     expect(diagnostics.bodies).toHaveLength(1);
     expect(diagnostics.bodies[0]!.mass).toBeCloseTo(totalMass, 10);
     for (let axis = 0; axis < 3; axis += 1) {
@@ -94,5 +107,72 @@ describe("deterministic readback diagnostics", () => {
     expect(diagnostics.relativeResidualValid).toBe(false);
     expect(diagnostics.maximumUpdate).toBe(0);
     expect(diagnostics.maximumUpdateValid).toBe(false);
+  });
+
+  it("uses explicit finite sentinels for scenes without pins or tetrahedra", () => {
+    const baseScene = buildScene("minimal");
+    const scene = {
+      ...baseScene,
+      mesh: {
+        ...baseScene.mesh,
+        fixed: new Uint8Array(baseScene.mesh.fixed.length),
+        tetrahedra: new Uint32Array(),
+        materialIds: new Uint16Array(),
+      },
+    };
+    const positions = toJGS2GpuInput(baseScene).positions.slice();
+    const diagnostics = diagnosticsFromState(
+      scene,
+      positions,
+      new Float32Array(positions.length),
+      TEST_CONTEXT,
+    );
+
+    expect(diagnostics.finite).toBe(true);
+    expect(diagnostics.pinnedMaxError).toBe(0);
+    expect(diagnostics.pinnedMaxErrorValid).toBe(false);
+    expect(Number.isFinite(diagnostics.pinnedMaxError)).toBe(true);
+    expect(diagnostics.minTetDeterminant).toBe(0);
+    expect(diagnostics.minTetDeterminantValid).toBe(false);
+    expect(Number.isFinite(diagnostics.minTetDeterminant)).toBe(true);
+  });
+
+  it("marks the pinned maximum valid iff at least one vertex is fixed", () => {
+    const scene = buildScene("minimal");
+    const positions = toJGS2GpuInput(scene).positions.slice();
+    const diagnostics = diagnosticsFromState(
+      scene,
+      positions,
+      new Float32Array(positions.length),
+      TEST_CONTEXT,
+    );
+
+    expect(scene.mesh.fixed.some((fixed) => fixed !== 0)).toBe(true);
+    expect(diagnostics.pinnedMaxErrorValid).toBe(true);
+    expect(Number.isFinite(diagnostics.pinnedMaxError)).toBe(true);
+  });
+
+  it("returns empty bodies and invalid finite momentum sentinels without mass", () => {
+    const baseScene = buildScene("minimal");
+    const scene = {
+      ...baseScene,
+      lumpedMasses: new Float64Array(baseScene.lumpedMasses.length),
+    };
+    const positions = toJGS2GpuInput(baseScene).positions.slice();
+    const diagnostics = diagnosticsFromState(
+      scene,
+      positions,
+      new Float32Array(positions.length),
+      TEST_CONTEXT,
+    );
+
+    expect(diagnostics.finite).toBe(true);
+    expect(diagnostics.bodies).toEqual([]);
+    expect(diagnostics.totalLinearMomentum).toEqual([0, 0, 0]);
+    expect(diagnostics.totalLinearMomentumValid).toBe(false);
+    expect(diagnostics.totalAngularMomentum).toEqual([0, 0, 0]);
+    expect(diagnostics.totalAngularMomentumValid).toBe(false);
+    expect(diagnostics.totalLinearMomentum.every(Number.isFinite)).toBe(true);
+    expect(diagnostics.totalAngularMomentum.every(Number.isFinite)).toBe(true);
   });
 });

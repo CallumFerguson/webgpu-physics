@@ -13,6 +13,14 @@ import {
   type JGS2DynamicOffsets,
   type JGS2GpuInput,
 } from "./layout";
+import {
+  JGS2GpuOracleEvaluator,
+  type JGS2GpuOracleDiagnostics,
+} from "./jgs2-diagnostics";
+import {
+  GpuTimestampFrameTimer,
+  type GpuTimestampMeasurement,
+} from "./gpu-timestamp";
 import { JGS2_WORKGROUP_SIZE, jgs2Shader } from "./jgs2-shader";
 
 export interface JGS2StepSettings {
@@ -41,6 +49,12 @@ export interface JGS2PositionBufferView {
   readonly size: number;
   readonly stride: 16;
 }
+
+/**
+ * Practical command-buffer bound for one solver submission. Callers needing a
+ * longer run should chunk it so browsers do not accumulate unbounded commands.
+ */
+export const JGS2_MAX_BATCH_FRAMES = 240;
 
 export const DEFAULT_JGS2_STEP_SETTINGS: JGS2StepSettings = {
   timestep: 1 / 60,
@@ -209,6 +223,19 @@ function validateExactIterationCount(iterations: number): void {
   }
 }
 
+function validateFrameBatchCount(frameCount: number): void {
+  if (
+    !Number.isSafeInteger(frameCount) ||
+    frameCount < 1 ||
+    frameCount > JGS2_MAX_BATCH_FRAMES
+  ) {
+    throw new RangeError(
+      `frameCount must be a positive safe integer no greater than ` +
+        `${JGS2_MAX_BATCH_FRAMES}; got ${frameCount}.`,
+    );
+  }
+}
+
 function packUniforms(
   input: Pick<JGS2GpuInput, "vertexCount" | "tetCount" | "cubatureK"> & {
     readonly bodyCount: number;
@@ -234,7 +261,10 @@ function packUniforms(
     [offsets.old, offsets.vertexRotation, offsets.tetRotation, sourcePosition],
     8,
   );
-  integers.set([targetPosition, offsets.bodyCorrection, 0, 0], 12);
+  integers.set(
+    [targetPosition, offsets.bodyCorrection, offsets.finalUpdate, 0],
+    12,
+  );
 
   const inverseTimestep = 1 / settings.timestep;
   floats.set(
@@ -339,6 +369,10 @@ export class JGS2GpuSolver {
   private destroyed = false;
   private submittedIterations = 0;
   private submittedSettings: JGS2StepSettings;
+  private oracleEvaluator?: JGS2GpuOracleEvaluator;
+  private oracleEvaluatorCreation?: Promise<JGS2GpuOracleEvaluator>;
+  private readonly timestampTimer: GpuTimestampFrameTimer;
+  private diagnosticReadbackCount = 0;
 
   private constructor(
     private readonly device: GPUDevice,
@@ -359,6 +393,7 @@ export class JGS2GpuSolver {
     this.bodyCount = inputShape.bodyCount;
     this.dynamicOffsets = offsets;
     this.submittedSettings = defaultSettings;
+    this.timestampTimer = new GpuTimestampFrameTimer(device, "jgs2-step");
   }
 
   static async create(
@@ -619,6 +654,11 @@ export class JGS2GpuSolver {
     return this.submittedSettings;
   }
 
+  /** Number of explicit state/oracle diagnostic readbacks requested by tests. */
+  get explicitDiagnosticReadbackCount(): number {
+    return this.diagnosticReadbackCount;
+  }
+
   step(overrides: Partial<JGS2StepSettings> = {}): void {
     this.assertUsable();
     if (
@@ -634,6 +674,32 @@ export class JGS2GpuSolver {
     const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
     const iterations = normalizeOddIterationCount(settings.iterations);
     this.submitFrame(settings, iterations);
+  }
+
+  /**
+   * Advance several identical-settings frames in one command buffer and one
+   * queue submission. At most {@link JGS2_MAX_BATCH_FRAMES} may be encoded at
+   * once; chunk longer offline/test runs at that boundary.
+   */
+  stepFrames(
+    frameCount: number,
+    overrides: Partial<JGS2StepSettings> = {},
+  ): void {
+    this.assertUsable();
+    validateFrameBatchCount(frameCount);
+    if (
+      overrides.timestep !== undefined &&
+      !jgs2TimestepsMatch(this.preprocessingTimestep, overrides.timestep)
+    ) {
+      throw new RangeError(
+        `JGS2 was precomputed for timestep ${this.preprocessingTimestep}, ` +
+          `but stepFrames() requested ${overrides.timestep}. Regenerate the ` +
+          "precomputation before changing timestep.",
+      );
+    }
+    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    const iterations = normalizeOddIterationCount(settings.iterations);
+    this.submitFrames(settings, iterations, frameCount);
   }
 
   /**
@@ -660,7 +726,82 @@ export class JGS2GpuSolver {
     this.submitFrame(settings, iterations);
   }
 
+  /**
+   * Batched counterpart to stepExactIterations(). Every encoded frame retains
+   * the requested nonlinear iteration count, including even counts.
+   */
+  stepFramesExactIterations(
+    frameCount: number,
+    iterations: number,
+    overrides: Partial<JGS2StepSettings> = {},
+  ): void {
+    this.assertUsable();
+    validateFrameBatchCount(frameCount);
+    validateExactIterationCount(iterations);
+    if (
+      overrides.timestep !== undefined &&
+      !jgs2TimestepsMatch(this.preprocessingTimestep, overrides.timestep)
+    ) {
+      throw new RangeError(
+        `JGS2 was precomputed for timestep ${this.preprocessingTimestep}, ` +
+          `but stepFramesExactIterations() requested ${overrides.timestep}. ` +
+          "Regenerate the precomputation before changing timestep.",
+      );
+    }
+    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    this.submitFrames(settings, iterations, frameCount);
+  }
+
+  /**
+   * Advance one complete simulation frame and explicitly measure only its GPU
+   * compute command stream. This test/benchmark-only path is never used by the
+   * production animation loop.
+   */
+  async stepWithGpuTimestamp(
+    overrides: Partial<JGS2StepSettings> = {},
+  ): Promise<GpuTimestampMeasurement> {
+    this.assertUsable();
+    if (
+      overrides.timestep !== undefined &&
+      !jgs2TimestepsMatch(this.preprocessingTimestep, overrides.timestep)
+    ) {
+      throw new RangeError(
+        `JGS2 was precomputed for timestep ${this.preprocessingTimestep}, ` +
+          `but stepWithGpuTimestamp() requested ${overrides.timestep}. ` +
+          "Regenerate the precomputation before changing timestep.",
+      );
+    }
+    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    const iterations = normalizeOddIterationCount(settings.iterations);
+    return this.timestampTimer.measure((encoder) => {
+      this.prepareFrame(settings, iterations);
+      this.encodeFrame(encoder, settings, iterations);
+    });
+  }
+
   private submitFrame(settings: JGS2StepSettings, iterations: number): void {
+    this.submitFrames(settings, iterations, 1);
+  }
+
+  private submitFrames(
+    settings: JGS2StepSettings,
+    iterations: number,
+    frameCount: number,
+  ): void {
+    this.prepareFrame(settings, iterations);
+    const encoder = this.device.createCommandEncoder({
+      label:
+        frameCount === 1
+          ? "jgs2-step-command-encoder"
+          : "jgs2-batched-step-command-encoder",
+    });
+    for (let frame = 0; frame < frameCount; frame += 1) {
+      this.encodeFrame(encoder, settings, iterations);
+    }
+    this.device.queue.submit([encoder.finish()]);
+  }
+
+  private prepareFrame(settings: JGS2StepSettings, iterations: number): void {
     this.submittedIterations = iterations;
     this.submittedSettings = settings;
 
@@ -697,10 +838,13 @@ export class JGS2GpuSolver {
         this.dynamicOffsets.posB,
       ),
     );
+  }
 
-    const encoder = this.device.createCommandEncoder({
-      label: "jgs2-step-command-encoder",
-    });
+  private encodeFrame(
+    encoder: GPUCommandEncoder,
+    settings: JGS2StepSettings,
+    iterations: number,
+  ): void {
     encodeDispatch(
       encoder,
       this.pipelines.predict,
@@ -771,7 +915,6 @@ export class JGS2GpuSolver {
       this.vertexCount,
       "jgs2-finalize-pass",
     );
-    this.device.queue.submit([encoder.finish()]);
   }
 
   async awaitIdle(): Promise<void> {
@@ -797,6 +940,90 @@ export class JGS2GpuSolver {
     );
   }
 
+  /** Read the GPU's exact inertial target for CPU-oracle comparisons. */
+  async readPredictedPositions(): Promise<Float32Array> {
+    this.assertUsable();
+    return this.readVec4Region(
+      this.dynamicOffsets.predicted * 16,
+      this.currentPositionByteLength,
+      "jgs2-predicted-position-readback",
+    );
+  }
+
+  /**
+   * Explicitly read each vertex's final nonlinear update record. The x lane is
+   * ||delta|| and w is one after a submitted frame (zero before the first
+   * nonlinear iteration); pinned vertices report a zero magnitude.
+   */
+  async readFinalIterationUpdates(): Promise<Float32Array> {
+    this.assertUsable();
+    return this.readVec4Region(
+      this.dynamicOffsets.finalUpdate * 16,
+      this.currentPositionByteLength,
+      "jgs2-final-update-readback",
+    );
+  }
+
+  /**
+   * Explicitly evaluate the exact, all-element frozen-frame implicit-Euler
+   * oracle on the GPU. The production frame loop never creates, dispatches, or
+   * reads this diagnostic path unless this method is called.
+   *
+   * The current canonical position freezes the co-rotated element frames and
+   * is evaluated against the most recently submitted predicted inertial pose
+   * and step settings. Callers should pause stepping while awaiting a coherent
+   * deterministic snapshot.
+   */
+  async readOracleDiagnostics(): Promise<JGS2GpuOracleDiagnostics> {
+    this.assertUsable();
+    const settings = this.submittedSettings;
+    const evaluator = await this.getOracleEvaluator();
+    this.assertUsable();
+    this.diagnosticReadbackCount += 1;
+    return evaluator.evaluate({
+      currentPositionOffset: this.dynamicOffsets.posA,
+      predictedPositionOffset: this.dynamicOffsets.predicted,
+      finalUpdateOffset: this.dynamicOffsets.finalUpdate,
+      timestep: settings.timestep,
+      floorHeight: settings.floorHeight,
+      floorStiffness: settings.floorStiffness,
+      rotationEpsilon: settings.rotationEpsilon,
+    });
+  }
+
+  private getOracleEvaluator(): Promise<JGS2GpuOracleEvaluator> {
+    if (this.oracleEvaluator) {
+      return Promise.resolve(this.oracleEvaluator);
+    }
+    if (!this.oracleEvaluatorCreation) {
+      this.oracleEvaluatorCreation = JGS2GpuOracleEvaluator.create(
+        this.device,
+        this.vertexCount,
+        this.tetCount,
+        {
+          dynamic: this.buffers.dynamic,
+          vertices: this.buffers.vertices,
+          tets: this.buffers.tets,
+          stiffness: this.buffers.stiffness,
+          adjacency: this.buffers.adjacency,
+        },
+      )
+        .then((evaluator) => {
+          if (this.destroyed) {
+            evaluator.destroy();
+            throw new Error("JGS2GpuSolver has been destroyed.");
+          }
+          this.oracleEvaluator = evaluator;
+          return evaluator;
+        })
+        .catch((error: unknown) => {
+          this.oracleEvaluatorCreation = undefined;
+          throw error;
+        });
+    }
+    return this.oracleEvaluatorCreation;
+  }
+
   private positionView(vec4Offset: number): JGS2PositionBufferView {
     return {
       buffer: this.currentPositionBuffer,
@@ -811,6 +1038,7 @@ export class JGS2GpuSolver {
     byteLength: number,
     label: string,
   ): Promise<Float32Array> {
+    this.diagnosticReadbackCount += 1;
     const readback = this.device.createBuffer({
       label,
       size: byteLength,
@@ -849,6 +1077,8 @@ export class JGS2GpuSolver {
     this.uniforms.base.destroy();
     this.uniforms.fromBToA.destroy();
     this.uniforms.fromAToB.destroy();
+    this.oracleEvaluator?.destroy();
+    this.timestampTimer.destroy();
   }
 
   private assertUsable(): void {

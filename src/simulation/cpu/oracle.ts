@@ -12,16 +12,15 @@ import type {
   RestTetraData,
   TetrahedralMesh,
 } from "./types";
+import type {
+  DenseEnergyEvaluation,
+  DifferentiableEnergyModel,
+} from "./energy";
 
 const POLAR_EPSILON = 1e-14;
 const POLAR_ITERATIONS = 20;
 
-export interface EnergyEvaluation {
-  readonly energy: number;
-  readonly gradient: Float64Array;
-  /** Dense, row-major Hessian. */
-  readonly hessian: Float64Array;
-}
+export interface EnergyEvaluation extends DenseEnergyEvaluation {}
 
 export interface CorotatedLinearElementEvaluation extends EnergyEvaluation {}
 
@@ -62,13 +61,9 @@ export interface CorotatedLinearImplicitEulerOptions {
  * Exact Float64 oracle for one frozen-frame co-rotated implicit Euler solve.
  * Coordinates contain only the active degrees of freedom in restSystem order.
  */
-export interface CorotatedLinearImplicitEulerOracle {
-  readonly dimension: number;
+export interface CorotatedLinearImplicitEulerOracle
+  extends DifferentiableEnergyModel<ImplicitEulerEvaluation> {
   readonly rotations: Float64Array;
-  readonly evaluate: (coordinates: Float64Array) => ImplicitEulerEvaluation;
-  readonly energy: (coordinates: Float64Array) => number;
-  readonly gradient: (coordinates: Float64Array) => Float64Array;
-  readonly hessian: (coordinates: Float64Array) => Float64Array;
 }
 
 export interface ComplementaryEquilibriumBasis {

@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:unit": "vitest run",
+    "test:baseline-manifest": "node scripts/verify-baseline-tests.mjs",
     "test:screenshot": "playwright test"
   },
   "dependencies": {

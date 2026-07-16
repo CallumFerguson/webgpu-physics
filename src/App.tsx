@@ -4,13 +4,25 @@ import { requestWebGPUDevice } from "./renderer";
 import { SceneRenderer, type SceneCamera } from "./rendering/scene-renderer";
 import {
   DEFAULT_SCENE_ID,
+  FORCE_FREE_CONSERVATION_FIXTURE_ID,
+  PHASE0_FORCE_FREE_CORPUS_CASE_COUNT,
+  PHASE0_FORCE_FREE_FRAME_COUNT,
+  PHASE0_FORCE_FREE_ITERATIONS,
   SCENE_IDS,
+  buildForceFreeConservationDefinition,
+  buildForceFreeConservationScene,
   buildScene,
   buildSceneDefinition,
+  generatePhase0ForceFreeInitialStateCorpus,
+  toForceFreeConservationGpuInput,
   toJGS2GpuInput,
   type SceneId,
 } from "./scenes";
-import { JGS2GpuSolver } from "./simulation/gpu";
+import {
+  JGS2_MAX_BATCH_FRAMES,
+  JGS2GpuSolver,
+  type GpuTimestampMeasurement,
+} from "./simulation/gpu";
 import {
   diagnosticsFromState,
   type JGS2Diagnostics,
@@ -21,9 +33,48 @@ interface JGS2TestHarness {
   stepFrames(frameCount: number): Promise<void>;
   /** Advance one complete frame with exactly iterationCount nonlinear solves. */
   stepIterations(iterationCount: number): Promise<void>;
+  /** Advance one frame and explicitly time only its GPU simulation commands. */
+  timedStepFrame(): Promise<GpuTimestampMeasurement>;
   waitForGpu(): Promise<void>;
   diagnostics(): Promise<JGS2Diagnostics>;
+  diagnosticReadbackCount(): number;
+  configuration(): JGS2TestConfiguration;
+  submissionPolicy(): JGS2SubmissionPolicy;
+  runForceFreeCorpus(): Promise<readonly Phase0ForceFreeCorpusResult[]>;
+  /** Test-only camera follow used to make a translated final pose visible. */
+  focusOnPrimaryBody(): Promise<readonly [number, number, number]>;
 }
+
+interface JGS2TestConfiguration {
+  readonly fixtureId: typeof FORCE_FREE_CONSERVATION_FIXTURE_ID | null;
+  readonly gravity: readonly [number, number, number];
+  readonly floorStiffness: number;
+  readonly parityMode: boolean;
+  readonly velocityDamping: number;
+  readonly contactTangentialDamping: number;
+  readonly horizontalBodyCorrection: boolean;
+}
+
+interface JGS2SubmissionPolicy {
+  readonly maximumOutstanding: number;
+  readonly currentOutstanding: number;
+  readonly solverSubmissions: number;
+  readonly renderSubmissions: number;
+  readonly readbackSubmissions: number;
+  readonly testBatchFrameLimit: number;
+  readonly solverBatchFrameLimit: number;
+  readonly productionStepsPerSubmission: 1;
+}
+
+interface Phase0ForceFreeCorpusResult {
+  readonly id: string;
+  readonly finite: boolean;
+  readonly minimumDeterminant: number;
+  readonly linearMomentumError: number;
+  readonly angularMomentumError: number;
+}
+
+const TEST_BATCH_FRAME_LIMIT = 120;
 
 declare global {
   interface Window {
@@ -75,17 +126,55 @@ function phaseLabel(phase: AppPhase): string {
   }
 }
 
+function vectorNorm(vector: readonly number[]): number {
+  return Math.hypot(...vector);
+}
+
+function vectorDifferenceNorm(
+  left: readonly number[],
+  right: readonly number[],
+): number {
+  return Math.hypot(
+    (left[0] ?? 0) - (right[0] ?? 0),
+    (left[1] ?? 0) - (right[1] ?? 0),
+    (left[2] ?? 0) - (right[2] ?? 0),
+  );
+}
+
+function boundsDiagonal(diagnostics: JGS2Diagnostics): number {
+  return Math.hypot(
+    diagnostics.bounds.max[0] - diagnostics.bounds.min[0],
+    diagnostics.bounds.max[1] - diagnostics.bounds.min[1],
+    diagnostics.bounds.max[2] - diagnostics.bounds.min[2],
+  );
+}
+
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sceneId = useMemo(requestedSceneId, []);
-  const sceneDefinition = useMemo(() => buildSceneDefinition(sceneId), [sceneId]);
   const testMode = useMemo(
     () => new URLSearchParams(window.location.search).get("test") === "1",
     [],
   );
+  const conservationFixture = useMemo(
+    () =>
+      testMode &&
+      new URLSearchParams(window.location.search).get("fixture") ===
+        FORCE_FREE_CONSERVATION_FIXTURE_ID,
+    [testMode],
+  );
+  const sceneDefinition = useMemo(
+    () =>
+      conservationFixture
+        ? buildForceFreeConservationDefinition()
+        : buildSceneDefinition(sceneId),
+    [conservationFixture, sceneId],
+  );
   const parityMode = useMemo(
-    () => new URLSearchParams(window.location.search).get("parity") === "1",
-    [],
+    () =>
+      conservationFixture ||
+      new URLSearchParams(window.location.search).get("parity") === "1",
+    [conservationFixture],
   );
   const [phase, setPhase] = useState<AppPhase>("preparing");
   const [error, setError] = useState("");
@@ -102,15 +191,50 @@ export function App() {
     let animationFrame = 0;
     let submissionsEnabled = true;
     let inFlightBatches = 0;
+    let currentOutstandingSubmissions = 0;
+    let maximumOutstandingSubmissions = 0;
+    let solverSubmissions = 0;
+    let renderSubmissions = 0;
+    let readbackSubmissions = 0;
     let gpuDevice: GPUDevice | undefined;
     let solver: JGS2GpuSolver | undefined;
     let renderer: SceneRenderer | undefined;
     let installedHarness: JGS2TestHarness | undefined;
 
+    const recordSubmission = (
+      kind: "solver" | "render" | "readback",
+    ): void => {
+      currentOutstandingSubmissions += 1;
+      maximumOutstandingSubmissions = Math.max(
+        maximumOutstandingSubmissions,
+        currentOutstandingSubmissions,
+      );
+      if (kind === "solver") {
+        solverSubmissions += 1;
+      } else if (kind === "render") {
+        renderSubmissions += 1;
+      } else {
+        readbackSubmissions += 1;
+      }
+      if (currentOutstandingSubmissions > 2) {
+        throw new Error(
+          "The App queued more than two GPU submissions without a drain.",
+        );
+      }
+    };
+
+    const recordQueueDrained = (): void => {
+      currentOutstandingSubmissions = 0;
+    };
+
     const initialize = async (): Promise<void> => {
       const precomputeStart = performance.now();
-      const scene = buildScene(sceneId);
-      const gpuInput = toJGS2GpuInput(scene);
+      const scene = conservationFixture
+        ? buildForceFreeConservationScene()
+        : buildScene(sceneId);
+      const gpuInput = conservationFixture
+        ? toForceFreeConservationGpuInput(scene)
+        : toJGS2GpuInput(scene);
       const precomputeMilliseconds = performance.now() - precomputeStart;
       if (!active) {
         return;
@@ -124,12 +248,12 @@ export function App() {
         return;
       }
       const format = gpu.getPreferredCanvasFormat();
-      solver = await JGS2GpuSolver.create(device, gpuInput, {
+      const solverSettings = {
         timestep: scene.settings.timestep,
         gravity: scene.settings.gravity,
         iterations: scene.settings.solverIterations,
         floorHeight: scene.settings.floorY,
-        floorStiffness: 250_000,
+        floorStiffness: conservationFixture ? 0 : 250_000,
         velocityDamping: 0.997,
         contactTangentialDamping: 12,
         contactMargin: 0.01,
@@ -138,7 +262,8 @@ export function App() {
         regularization: 1e-6,
         rotationEpsilon: 1e-7,
         maxStep: 0.075,
-      });
+      } as const;
+      solver = await JGS2GpuSolver.create(device, gpuInput, solverSettings);
       if (!active) {
         solver.destroy();
         device.destroy();
@@ -166,13 +291,18 @@ export function App() {
           vertexColors: gpuInput.vertexColors,
           surfaceTriangles: scene.surface.triangles,
           surfaceEdges: scene.surface.edges,
+          // The canonical force-free manifest has no floor. Keep its decorative
+          // plane disabled while the solver uses exactly zero contact.
           floorHeight: scene.settings.floorY,
+          showFloor: !conservationFixture,
         },
         solver.currentPositionBuffer,
         solver.currentPositionByteOffset / 16,
         camera,
       );
+      recordSubmission("render");
       await renderer.renderAndWait(0);
+      recordQueueDrained();
       if (!active) {
         renderer.destroy();
         solver.destroy();
@@ -182,10 +312,15 @@ export function App() {
 
       let simulationFrame = 0;
       const readDiagnostics = async (): Promise<JGS2Diagnostics> => {
+        recordSubmission("readback");
+        const positionsPromise = solver!.readPositions();
+        recordSubmission("readback");
+        const velocitiesPromise = solver!.readVelocities();
         const [positions, velocities] = await Promise.all([
-          solver!.readPositions(),
-          solver!.readVelocities(),
+          positionsPromise,
+          velocitiesPromise,
         ]);
+        recordQueueDrained();
         const submittedSettings = solver!.lastSubmittedSettings;
         return diagnosticsFromState(
           scene,
@@ -207,6 +342,163 @@ export function App() {
       };
 
       if (testMode) {
+        const renderAndDrain = async (): Promise<void> => {
+          recordSubmission("render");
+          await renderer!.renderAndWait(simulationFrame);
+          recordQueueDrained();
+          setFrame(simulationFrame);
+        };
+
+        const runForceFreeCorpus = async (): Promise<
+          readonly Phase0ForceFreeCorpusResult[]
+        > => {
+          if (!conservationFixture) {
+            throw new Error(
+              "The force-free corpus is only available on its canonical fixture.",
+            );
+          }
+          const states = generatePhase0ForceFreeInitialStateCorpus();
+          if (states.length !== PHASE0_FORCE_FREE_CORPUS_CASE_COUNT) {
+            throw new Error("The frozen force-free corpus is incomplete.");
+          }
+          const results: Phase0ForceFreeCorpusResult[] = [];
+          for (const state of states) {
+            const corpusInput = toForceFreeConservationGpuInput(scene, state);
+            const initial = diagnosticsFromState(
+              scene,
+              corpusInput.positions,
+              corpusInput.velocities!,
+              {
+                frame: 0,
+                lastStepIterations: 0,
+                runtime: {
+                  parityMode: true,
+                  velocityDamping: 1,
+                  contactTangentialDamping: 0,
+                  horizontalBodyCorrection: false,
+                },
+              },
+            );
+            const corpusSolver = await JGS2GpuSolver.create(
+              device,
+              corpusInput,
+              solverSettings,
+            );
+            let minimumDeterminant = initial.minTetDeterminant;
+            let finite = initial.finite;
+            let finalDiagnostics: JGS2Diagnostics | undefined;
+            try {
+              for (
+                let completedFrames = 0;
+                completedFrames < PHASE0_FORCE_FREE_FRAME_COUNT;
+              ) {
+                const batchFrames = Math.min(
+                  TEST_BATCH_FRAME_LIMIT,
+                  PHASE0_FORCE_FREE_FRAME_COUNT - completedFrames,
+                );
+                corpusSolver.stepFramesExactIterations(
+                  batchFrames,
+                  PHASE0_FORCE_FREE_ITERATIONS,
+                );
+                recordSubmission("solver");
+                completedFrames += batchFrames;
+                await corpusSolver.awaitIdle();
+                recordQueueDrained();
+
+                if (completedFrames === PHASE0_FORCE_FREE_FRAME_COUNT) {
+                  recordSubmission("readback");
+                  const positionsPromise = corpusSolver.readPositions();
+                  recordSubmission("readback");
+                  const velocitiesPromise = corpusSolver.readVelocities();
+                  const [positions, velocities] = await Promise.all([
+                    positionsPromise,
+                    velocitiesPromise,
+                  ]);
+                  recordQueueDrained();
+                  finalDiagnostics = diagnosticsFromState(
+                    scene,
+                    positions,
+                    velocities,
+                    {
+                      frame: completedFrames,
+                      lastStepIterations: PHASE0_FORCE_FREE_ITERATIONS,
+                      runtime: {
+                        parityMode: true,
+                        velocityDamping: 1,
+                        contactTangentialDamping: 0,
+                        horizontalBodyCorrection: false,
+                      },
+                    },
+                  );
+                  minimumDeterminant = Math.min(
+                    minimumDeterminant,
+                    finalDiagnostics.minTetDeterminant,
+                  );
+                  finite &&= finalDiagnostics.finite;
+                } else {
+                  recordSubmission("readback");
+                  const positions = await corpusSolver.readPositions();
+                  recordQueueDrained();
+                  const checkpoint = diagnosticsFromState(
+                    scene,
+                    positions,
+                    corpusInput.velocities!,
+                    {
+                      frame: completedFrames,
+                      lastStepIterations: PHASE0_FORCE_FREE_ITERATIONS,
+                      runtime: {
+                        parityMode: true,
+                        velocityDamping: 1,
+                        contactTangentialDamping: 0,
+                        horizontalBodyCorrection: false,
+                      },
+                    },
+                  );
+                  minimumDeterminant = Math.min(
+                    minimumDeterminant,
+                    checkpoint.minTetDeterminant,
+                  );
+                  finite &&= checkpoint.finite;
+                }
+              }
+            } finally {
+              corpusSolver.destroy();
+            }
+            if (!finalDiagnostics) {
+              throw new Error(`Corpus case ${state.id} did not reach its end.`);
+            }
+            const totalMass = initial.bodies.reduce(
+              (sum, body) => sum + body.mass,
+              0,
+            );
+            const sceneScale = boundsDiagonal(initial);
+            results.push({
+              id: state.id,
+              finite,
+              minimumDeterminant,
+              linearMomentumError:
+                vectorDifferenceNorm(
+                  finalDiagnostics.totalLinearMomentum,
+                  initial.totalLinearMomentum,
+                ) /
+                Math.max(
+                  vectorNorm(initial.totalLinearMomentum),
+                  totalMass * sceneScale,
+                ),
+              angularMomentumError:
+                vectorDifferenceNorm(
+                  finalDiagnostics.totalAngularMomentum,
+                  initial.totalAngularMomentum,
+                ) /
+                Math.max(
+                  vectorNorm(initial.totalAngularMomentum),
+                  totalMass * sceneScale * sceneScale,
+                ),
+            });
+          }
+          return results;
+        };
+
         installedHarness = {
           ready: Promise.resolve(),
           stepFrames: async (frameCount: number) => {
@@ -216,29 +508,114 @@ export function App() {
             if (!Number.isSafeInteger(frameCount) || frameCount < 0) {
               throw new RangeError("frameCount must be a nonnegative integer.");
             }
-            for (let step = 0; step < frameCount; step += 1) {
-              solver!.step();
-              simulationFrame += 1;
+            let remaining = frameCount;
+            while (remaining > 0) {
+              const batchFrames = Math.min(TEST_BATCH_FRAME_LIMIT, remaining);
+              if (conservationFixture) {
+                solver!.stepFramesExactIterations(
+                  batchFrames,
+                  PHASE0_FORCE_FREE_ITERATIONS,
+                );
+              } else {
+                solver!.stepFrames(batchFrames);
+              }
+              recordSubmission("solver");
+              simulationFrame += batchFrames;
+              remaining -= batchFrames;
+              if (remaining > 0) {
+                await solver!.awaitIdle();
+                recordQueueDrained();
+              }
             }
-            await renderer!.renderAndWait(simulationFrame);
-            setFrame(simulationFrame);
+            await renderAndDrain();
           },
           stepIterations: async (iterationCount: number) => {
             if (!submissionsEnabled) {
               throw new Error("The WebGPU device is no longer available.");
             }
             solver!.stepExactIterations(iterationCount);
+            recordSubmission("solver");
             simulationFrame += 1;
-            await renderer!.renderAndWait(simulationFrame);
-            setFrame(simulationFrame);
+            await renderAndDrain();
+          },
+          timedStepFrame: async () => {
+            if (!submissionsEnabled) {
+              throw new Error("The WebGPU device is no longer available.");
+            }
+            recordSubmission("solver");
+            const measurement = await solver!.stepWithGpuTimestamp();
+            recordQueueDrained();
+            simulationFrame += 1;
+            await renderAndDrain();
+            return measurement;
           },
           waitForGpu: async () => {
             if (!submissionsEnabled) {
               throw new Error("The WebGPU device is no longer available.");
             }
             await solver!.awaitIdle();
+            recordQueueDrained();
           },
           diagnostics: readDiagnostics,
+          diagnosticReadbackCount: () =>
+            solver!.explicitDiagnosticReadbackCount,
+          configuration: () => {
+            const submittedSettings = solver!.lastSubmittedSettings;
+            return {
+              fixtureId: conservationFixture
+                ? FORCE_FREE_CONSERVATION_FIXTURE_ID
+                : null,
+              gravity: submittedSettings.gravity,
+              floorStiffness: submittedSettings.floorStiffness,
+              parityMode: submittedSettings.parityMode,
+              velocityDamping: submittedSettings.velocityDamping,
+              contactTangentialDamping:
+                submittedSettings.contactTangentialDamping,
+              horizontalBodyCorrection:
+                submittedSettings.horizontalBodyCorrection,
+            };
+          },
+          submissionPolicy: () => ({
+            maximumOutstanding: maximumOutstandingSubmissions,
+            currentOutstanding: currentOutstandingSubmissions,
+            solverSubmissions,
+            renderSubmissions,
+            readbackSubmissions,
+            testBatchFrameLimit: TEST_BATCH_FRAME_LIMIT,
+            solverBatchFrameLimit: JGS2_MAX_BATCH_FRAMES,
+            productionStepsPerSubmission: 1,
+          }),
+          focusOnPrimaryBody: async () => {
+            if (!conservationFixture) {
+              throw new Error(
+                "The follow camera is only exposed for the force-free fixture.",
+              );
+            }
+            const diagnostics = await readDiagnostics();
+            const primary = diagnostics.bodies[0];
+            if (!primary) {
+              throw new Error("The force-free fixture has no primary body.");
+            }
+            const target = primary.centerOfMass;
+            const eyeOffset = [
+              camera.eye[0] - camera.target[0],
+              camera.eye[1] - camera.target[1],
+              camera.eye[2] - camera.target[2],
+            ] as const;
+            renderer!.setCamera({
+              eye: [
+                target[0] + eyeOffset[0],
+                target[1] + eyeOffset[1],
+                target[2] + eyeOffset[2],
+              ],
+              target,
+              floorCenter: [target[0], target[2]],
+              floorScale: camera.floorScale,
+            });
+            await renderAndDrain();
+            return target;
+          },
+          runForceFreeCorpus,
         };
         window.__jgs2Test = installedHarness;
       } else {
@@ -254,26 +631,22 @@ export function App() {
             frameDuration * 3,
           );
           previousTime = now;
-          let submitted = false;
-          for (
-            let step = 0;
-            step < 3 && accumulator >= frameDuration && inFlightBatches < 2;
-            step += 1
-          ) {
+          if (accumulator >= frameDuration && inFlightBatches === 0) {
             solver!.step();
+            recordSubmission("solver");
             simulationFrame += 1;
             accumulator -= frameDuration;
-            submitted = true;
-          }
-          if (submitted) {
             renderer!.render(simulationFrame);
-            inFlightBatches += 1;
+            recordSubmission("render");
+            inFlightBatches = 1;
             void solver!.awaitIdle().then(
               () => {
-                inFlightBatches = Math.max(0, inFlightBatches - 1);
+                inFlightBatches = 0;
+                recordQueueDrained();
               },
               (reason: unknown) => {
-                inFlightBatches = Math.max(0, inFlightBatches - 1);
+                inFlightBatches = 0;
+                recordQueueDrained();
                 if (active && submissionsEnabled) {
                   submissionsEnabled = false;
                   cancelAnimationFrame(animationFrame);
@@ -335,7 +708,7 @@ export function App() {
       solver?.destroy();
       gpuDevice?.destroy();
     };
-  }, [sceneId, testMode]);
+  }, [conservationFixture, parityMode, sceneId, testMode]);
 
   return (
     <main className="app-shell">

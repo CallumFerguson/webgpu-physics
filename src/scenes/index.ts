@@ -14,10 +14,46 @@ import {
   validateJGS2GpuInput,
   type JGS2GpuInput,
 } from "../simulation/gpu/layout";
+import {
+  PHASE0_FORCE_FREE_BASE_STATE,
+  PHASE0_FORCE_FREE_FIXTURE_ID,
+  buildPhase0ForceFreeDefinition,
+  buildPhase0ForceFreeInitialPositions,
+  buildPhase0ForceFreeScene,
+  buildPhase0RigidVelocityField,
+  type Phase0RigidInitialState,
+} from "./canonical-phase0";
+
+export {
+  PHASE0_FORCE_FREE_BASE_STATE,
+  PHASE0_FORCE_FREE_CORPUS_CASE_COUNT,
+  PHASE0_FORCE_FREE_CORPUS_GENERATOR_VERSION,
+  PHASE0_FORCE_FREE_CORPUS_ID,
+  PHASE0_FORCE_FREE_CORPUS_SEED,
+  PHASE0_FORCE_FREE_FIXTURE_ID,
+  PHASE0_FORCE_FREE_FRAME_COUNT,
+  PHASE0_FORCE_FREE_INITIAL_EULER,
+  PHASE0_FORCE_FREE_ITERATIONS,
+  PHASE0_FORCE_FREE_TIMESTEP,
+  PHASE0_REFERENCE_MATERIAL,
+  buildPhase0ForceFreeDefinition,
+  buildPhase0ForceFreeInitialPositions,
+  buildPhase0ForceFreeScene,
+  buildPhase0RigidVelocityField,
+  generatePhase0ForceFreeInitialStateCorpus,
+  type Phase0RigidInitialState,
+} from "./canonical-phase0";
 
 export const SCENE_IDS = ["minimal", "stiffness", "drop", "stress"] as const;
 export type SceneId = (typeof SCENE_IDS)[number];
 export const DEFAULT_SCENE_ID: SceneId = "minimal";
+
+/**
+ * Test-only scene identifier. It is deliberately excluded from SCENE_IDS so
+ * the four public demo links remain stable.
+ */
+export const FORCE_FREE_CONSERVATION_FIXTURE_ID =
+  PHASE0_FORCE_FREE_FIXTURE_ID;
 
 const SOFT_MATERIAL: LinearMaterial = {
   name: "soft rubber",
@@ -219,6 +255,10 @@ function stressDefinition(): SceneDefinition {
   };
 }
 
+export function buildForceFreeConservationDefinition(): SceneDefinition {
+  return buildPhase0ForceFreeDefinition();
+}
+
 export function buildSceneDefinition(id: SceneId): SceneDefinition {
   switch (id) {
     case "minimal":
@@ -234,6 +274,10 @@ export function buildSceneDefinition(id: SceneId): SceneDefinition {
 
 export function buildScene(id: SceneId = DEFAULT_SCENE_ID): PrecomputedScene {
   return buildPrecomputedScene(buildSceneDefinition(id));
+}
+
+export function buildForceFreeConservationScene(): PrecomputedScene {
+  return buildPhase0ForceFreeScene();
 }
 
 function buildAdjacency(mesh: TetrahedralMesh): {
@@ -286,11 +330,15 @@ function computeVertexColors(scene: PrecomputedScene): Float32Array {
   return colors;
 }
 
-/** Convert f64 CPU precomputation to the GPU module's padded, fixed-width ABI. */
-export function toJGS2GpuInput(scene: PrecomputedScene): JGS2GpuInput {
+function packJGS2GpuInput(
+  scene: PrecomputedScene,
+  cubatureK: number,
+): JGS2GpuInput {
   const vertexCount = getVertexCount(scene.mesh);
   const tetCount = getTetrahedronCount(scene.mesh);
-  const cubatureK = scene.settings.cubatureSamples;
+  if (!Number.isSafeInteger(cubatureK) || cubatureK < 1) {
+    throw new RangeError("The packed Cubature width must be a positive integer.");
+  }
   const positions = new Float32Array(vertexCount * 4);
   const vertexRest = new Float32Array(vertexCount * 4);
   const adjacency = buildAdjacency(scene.mesh);
@@ -375,6 +423,34 @@ export function toJGS2GpuInput(scene: PrecomputedScene): JGS2GpuInput {
   };
   validateJGS2GpuInput(input);
   return input;
+}
+
+/** Convert selected CPU Cubature to the GPU module's padded, fixed-width ABI. */
+export function toJGS2GpuInput(scene: PrecomputedScene): JGS2GpuInput {
+  return packJGS2GpuInput(scene, scene.settings.cubatureSamples);
+}
+
+/**
+ * Add a deterministic rigid velocity field to the force-free fixture. A rigid
+ * field v(x) = v_cm + omega x (x - x_cm) contains translation and rotation
+ * without introducing an artificial initial strain rate.
+ */
+export function toForceFreeConservationGpuInput(
+  scene: PrecomputedScene,
+  state: Phase0RigidInitialState = PHASE0_FORCE_FREE_BASE_STATE,
+): JGS2GpuInput {
+  if (scene.id !== FORCE_FREE_CONSERVATION_FIXTURE_ID) {
+    throw new RangeError(
+      `Expected ${FORCE_FREE_CONSERVATION_FIXTURE_ID}; got ${scene.id}.`,
+    );
+  }
+
+  const input = packJGS2GpuInput(scene, getTetrahedronCount(scene.mesh));
+  const positions = buildPhase0ForceFreeInitialPositions(scene);
+  const velocities = buildPhase0RigidVelocityField(scene, positions, state);
+  const fixtureInput: JGS2GpuInput = { ...input, positions, velocities };
+  validateJGS2GpuInput(fixtureInput);
+  return fixtureInput;
 }
 
 export type { JGS2GpuInput, PrecomputedScene, SceneDefinition };

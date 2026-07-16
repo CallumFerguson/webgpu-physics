@@ -1,0 +1,55 @@
+{
+  "schema": "org.jgs2.phase0-performance-evidence-summary",
+  "schemaVersion": 1,
+  "criterion": "P0-EC-13",
+  "recordedAtUtc": "2026-07-16T21:08:33.536Z",
+  "command": "npm.cmd run test:screenshot -- tests/e2e/performance-baseline.spec.ts",
+  "environment": {
+    "browser": "Google Chrome 150.0.7871.124",
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "architecture": "blackwell",
+    "driver": "596.21",
+    "cpu": "Intel Core i7-13700K",
+    "operatingSystem": "Windows 11 Home x64",
+    "hardwareAdapter": true,
+    "timestampQueryAdvertised": true,
+    "timestampQueryEnabled": true
+  },
+  "workload": {
+    "sceneId": "stress",
+    "vertices": 72,
+    "tetrahedra": 72,
+    "surfaceTriangles": 120,
+    "surfaceEdges": 180,
+    "bodies": 6,
+    "materials": 2,
+    "timestepSeconds": 0.008333333333333333,
+    "solverIterationsPerFrame": 17,
+    "cubatureSamplesPerVertex": 6,
+    "warmupFrames": 120,
+    "measuredFrames": 600
+  },
+  "wallMilliseconds": {
+    "minimum": 2.0999999940395355,
+    "mean": 3.832333333293597,
+    "p50": 3.7000000029802322,
+    "p95": 5,
+    "p99": 6.5,
+    "maximum": 14.799999997019768,
+    "percentileMethod": "nearest-rank"
+  },
+  "gpuSimulation": {
+    "feature": "timestamp-query",
+    "nanoseconds": 1376256,
+    "milliseconds": 1.376256,
+    "includesRendering": false
+  },
+  "validity": {
+    "finalFrame": 721,
+    "finite": true,
+    "browserErrors": 0,
+    "diagnosticReadbacksUnchangedDuringMeasurement": true,
+    "performanceTargetApplied": false
+  },
+  "rawSamples": "Playwright attachment phase0-performance-baseline.json"
+}

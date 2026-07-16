@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertHardwareWebGPUAdapter,
+  selectWebGPUDeviceFeatures,
   WebGPUUnavailableError,
 } from "./device";
 
@@ -40,5 +41,22 @@ describe("assertHardwareWebGPUAdapter", () => {
         adapterInfo({ description: "Google SwiftShader Vulkan" }),
       ),
     ).toThrow(/SwiftShader and other fallback adapters are disabled/);
+  });
+});
+
+describe("selectWebGPUDeviceFeatures", () => {
+  const adapterWithFeatures = (...features: GPUFeatureName[]) =>
+    ({
+      features: new Set(features) as unknown as GPUSupportedFeatures,
+    }) satisfies Pick<GPUAdapter, "features">;
+
+  it("requests timestamp queries when the adapter advertises them", () => {
+    expect(
+      selectWebGPUDeviceFeatures(adapterWithFeatures("timestamp-query")),
+    ).toEqual(["timestamp-query"]);
+  });
+
+  it("does not require timestamp queries from unsupported adapters", () => {
+    expect(selectWebGPUDeviceFeatures(adapterWithFeatures())).toEqual([]);
   });
 });

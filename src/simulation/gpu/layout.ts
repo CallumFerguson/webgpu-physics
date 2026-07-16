@@ -57,6 +57,8 @@ export interface JGS2DynamicOffsets {
   readonly vertexRotation: number;
   readonly tetRotation: number;
   readonly bodyCorrection: number;
+  /** Per-vertex final nonlinear update magnitude and validity flag. */
+  readonly finalUpdate: number;
   readonly vec4Count: number;
 }
 
@@ -196,6 +198,8 @@ export function computeJGS2DynamicOffsets(
   const vertexRotation = old + vertexCount;
   const tetRotation = vertexRotation + vertexCount * 3;
   const bodyCorrection = tetRotation + tetCount * 3;
+  // Keep the existing position/rotation/body ABI stable and append diagnostics.
+  const finalUpdate = bodyCorrection + bodyCount;
 
   return {
     posA,
@@ -206,7 +210,8 @@ export function computeJGS2DynamicOffsets(
     vertexRotation,
     tetRotation,
     bodyCorrection,
-    vec4Count: bodyCorrection + bodyCount,
+    finalUpdate,
+    vec4Count: finalUpdate + vertexCount,
   };
 }
 

@@ -56,22 +56,22 @@ The following are explicitly out of scope:
 
 | Field | Value |
 | --- | --- |
-| Roadmap owner | TBD |
+| Roadmap owner | Codex implementation agent; user approval retained |
 | Technical reviewer | TBD |
-| Target branch | TBD |
-| Baseline commit | TBD |
-| Start date | TBD |
+| Target branch | main |
+| Baseline commit | b3893b9 |
+| Start date | 2026-07-16 |
 | Target completion | TBD |
-| Target browser and version | TBD |
-| Target GPU and driver | TBD |
-| Target CPU | TBD |
-| Operating system | TBD |
-| Baseline test manifest | TBD |
-| Canonical scene/corpus manifest | TBD |
+| Target browser and version | Google Chrome 150.0.7871.124 |
+| Target GPU and driver | NVIDIA GeForce RTX 5090, driver 596.21 |
+| Target CPU | Intel Core i7-13700K |
+| Operating system | Windows 11 Home x64 |
+| Baseline test manifest | manifests/baseline-tests.v1.json |
+| Canonical scene/corpus manifest | manifests/canonical-scenes.v1.json |
 | Maximum permitted regularization ratio | TBD before Phase 1 |
 | IPC safety epsilon | TBD before Phase 4 |
 | Friction numerical tolerance | TBD before Phase 5 |
-| Last updated | TBD |
+| Last updated | 2026-07-16 |
 
 ## Default measurement definitions
 
@@ -131,7 +131,7 @@ targets in the decision log before Phase 1 begins.
 
 | Phase | Name | Depends on | Status | Exit review |
 | --- | --- | --- | --- | --- |
-| 0 | Reference foundation and parity-safe architecture | None | Not started | TBD |
+| 0 | Reference foundation and parity-safe architecture | None | Complete | Independent gate audit passed |
 | 1 | Stable Neo-Hookean solids and nonlinear JGS2 | Phase 0 | Not started | TBD |
 | 2 | General collision detection and swept candidates | Phase 1 | Not started | TBD |
 | 3 | Pairwise penalty contact and contact-aware JGS2 | Phase 2 | Not started | TBD |
@@ -153,84 +153,84 @@ runtime interfaces required to evaluate every later capability independently.
 
 | Field | Value |
 | --- | --- |
-| Status | [x] Not started [ ] In progress [ ] Blocked [ ] Complete |
-| Owner | TBD |
-| Reviewer | TBD |
-| Start date | TBD |
-| Completion date | TBD |
-| Branch or PR | TBD |
-| Design records | TBD |
-| Primary test command | TBD |
-| Performance result | TBD |
-| Known limitations | TBD |
-| Exit sign-off | TBD |
+| Status | [ ] Not started [ ] In progress [ ] Blocked [x] Complete |
+| Owner | Codex implementation agent |
+| Reviewer | Independent Phase 0 gate audit (Codex sub-agent) |
+| Start date | 2026-07-16 |
+| Completion date | 2026-07-16 |
+| Branch or PR | main; foundation commit 1453c48; Phase 0 completion milestone (this commit) |
+| Design records | docs/reproducibility.md; docs/evidence/phase0-performance-baseline.md |
+| Primary test command | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:screenshot |
+| Performance result | Stress scene: mean 3.832 ms, p95 5.000 ms wall; explicit GPU simulation timestamp 1.376256 ms |
+| Known limitations | Phase 0 remains co-rotated and has no general body-body candidate buffer. Candidate overflow therefore reports a finite zero sentinel with valid=false until Phase 2. General contact, nonlinear material, friction, and cloth remain later-phase work. |
+| Exit sign-off | Pass: independent audit plus exact-current-code unit, build, baseline-selector, and 14-test hardware suite |
 
 ### Required implementation
 
-- [ ] Add a small CPU Float64 reference path for total energy, gradient,
+- [x] Add a small CPU Float64 reference path for total energy, gradient,
       Hessian blocks, and full Newton steps.
-- [ ] Keep an exact all-element, no-Cubature path for tiny systems.
-- [ ] Define shared interfaces for material, external-force, constraint, and
+- [x] Keep an exact all-element, no-Cubature path for tiny systems.
+- [x] Define shared interfaces for material, external-force, constraint, and
       contact energies.
-- [ ] Add deterministic APIs for stepping exact frames and exact nonlinear
+- [x] Add deterministic APIs for stepping exact frames and exact nonlinear
       iterations.
-- [ ] Add GPU reductions for total energy, relative residual, maximum update,
+- [x] Add GPU reductions for total energy, relative residual, maximum update,
       minimum deformation determinant, minimum contact distance, active
       contact count, candidate-buffer overflow, and finite-state status.
-- [ ] Add per-body linear and angular momentum diagnostics.
-- [ ] Add GPU timestamp instrumentation where the adapter supports it.
-- [ ] Define a versioned precomputation artifact schema with topology,
+- [x] Add per-body linear and angular momentum diagnostics.
+- [x] Add GPU timestamp instrumentation where the adapter supports it.
+- [x] Define a versioned precomputation artifact schema with topology,
       materials, timestep, basis, Cubature, and solver-schedule fingerprints.
-- [ ] Add an explicit parity mode that disables project-specific physical
+- [x] Add an explicit parity mode that disables project-specific physical
       approximations.
-- [ ] Freeze a checked-in baseline-test manifest with expected test IDs and
+- [x] Freeze a checked-in baseline-test manifest with expected test IDs and
       allowed skips.
-- [ ] Define the Phase 0 canonical scenes and corpora in the checked-in
+- [x] Define the Phase 0 canonical scenes and corpora in the checked-in
       scene/corpus manifest.
-- [ ] Record the nominated hardware and final performance targets above.
+- [x] Record the nominated hardware and final performance targets above.
 
 ### Mandatory exit criteria
 
-- [ ] P0-EC-01: CPU analytic gradients match central finite differences with relative
+- [x] P0-EC-01: CPU analytic gradients match central finite differences with relative
       error <= 1e-5 on every reference energy available in this phase.
-- [ ] P0-EC-02: CPU analytic Hessians match finite differences of the gradient with
+- [x] P0-EC-02: CPU analytic Hessians match finite differences of the gradient with
       relative error <= 1e-4.
-- [ ] P0-EC-03: GPU energy, gradient, and local Hessian blocks match the CPU reference
+- [x] P0-EC-03: GPU energy, gradient, and local Hessian blocks match the CPU reference
       with relative error <= 1e-3.
-- [ ] P0-EC-04: The exact equilibrium-basis local update matches the corresponding block
+- [x] P0-EC-04: The exact equilibrium-basis local update matches the corresponding block
       of a full CPU Newton solve with relative error <= 1e-8 on CPU and
       <= 1e-3 on GPU.
-- [ ] P0-EC-05: Full-coordinate bases from equations 19-23 match direct
+- [x] P0-EC-05: Full-coordinate bases from equations 19-23 match direct
       complementary-coordinate solves with relative error <= 1e-8 on the
       canonical tiny systems.
-- [ ] P0-EC-06: The deterministic harness can pause animation, step exact frames, step
+- [x] P0-EC-06: The deterministic harness can pause animation, step exact frames, step
       exact nonlinear iterations, and wait for GPU completion.
-- [ ] P0-EC-07: Every required diagnostic is finite when valid; empty-set
+- [x] P0-EC-07: Every required diagnostic is finite when valid; empty-set
       diagnostics expose a false validity flag and the documented finite
       sentinel.
-- [ ] P0-EC-08: Production animation performs no synchronous per-frame GPU readback.
-- [ ] P0-EC-09: Parity mode uses velocity damping equal to 1 and disables grounded
+- [x] P0-EC-08: Production animation performs no synchronous per-frame GPU readback.
+- [x] P0-EC-09: Parity mode uses velocity damping equal to 1 and disables grounded
       tangential damping and horizontal COM restoration.
-- [ ] P0-EC-10: Force-free isolated-body tests conserve linear momentum within 0.5% over
+- [x] P0-EC-10: Force-free isolated-body tests conserve linear momentum within 0.5% over
       10 simulated seconds in parity mode.
-- [ ] P0-EC-11: The same force-free tests conserve angular momentum within
+- [x] P0-EC-11: The same force-free tests conserve angular momentum within
       0.5% using the roadmap's angular-momentum normalization.
-- [ ] P0-EC-12: The frozen baseline manifest and the complete current unit,
+- [x] P0-EC-12: The frozen baseline manifest and the complete current unit,
       build, and Playwright suites pass with zero unexpected skips and no
       WebGPU errors.
-- [ ] P0-EC-13: A baseline performance report is recorded on the nominated hardware.
+- [x] P0-EC-13: A baseline performance report is recorded on the nominated hardware.
 
 ### Required evidence
 
 | Evidence | Location or result | Complete |
 | --- | --- | --- |
-| CPU finite-difference report | TBD | [ ] |
-| GPU-versus-CPU report | TBD | [ ] |
-| Newton-block oracle result | TBD | [ ] |
-| Deterministic test artifacts | TBD | [ ] |
-| Full regression output | TBD | [ ] |
-| Baseline performance report | TBD | [ ] |
-| Reviewer approval | TBD | [ ] |
+| CPU finite-difference report | Canonical 64-pose corpus: worst gradient 1.221e-10; worst Hessian 4.389e-12 | [x] |
+| GPU-versus-CPU report | Canonical sampled poses: energy 1.659e-6; gradient 1.847e-6; local Hessian 3.173e-8. Floor-active case: energy 1.237e-6; gradient 3.205e-5; local Hessian 7.120e-8 | [x] |
+| Newton-block oracle result | CPU worst 1.251e-17; GPU worst 5.469e-9 over all 64 poses and three active blocks; basis 4.437e-16 | [x] |
+| Deterministic test artifacts | Exact-frame/even-iteration assertions plus canonical start, fixed-camera final, and follow-camera final screenshots | [x] |
+| Full regression output | 74 unit tests, build, frozen 26/74 unit and 7/14 E2E selectors, and 14/14 hardware E2E tests passed with zero skips | [x] |
+| Baseline performance report | docs/evidence/phase0-performance-baseline.md | [x] |
+| Reviewer approval | Independent Phase 0 criterion audit passed after the exact-current-code full suite | [x] |
 
 ---
 
@@ -948,7 +948,25 @@ later passing run so the history remains visible.
 
 | Criterion ID | Date | Phase | Commit | Command or test | Hardware | Result | Artifact or log | Reviewer |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| P0-EC-01 | 2026-07-16 | 0 | 1453c48 | npm.cmd run test:unit -- src/simulation/cpu/oracle.test.ts | i7-13700K | Pass: relative gradient error 4.406e-11 | src/simulation/cpu/oracle.test.ts | Automated oracle; human TBD |
+| P0-EC-02 | 2026-07-16 | 0 | 1453c48 | npm.cmd run test:unit -- src/simulation/cpu/oracle.test.ts | i7-13700K | Pass: relative Hessian error 4.207e-12 | src/simulation/cpu/oracle.test.ts | Automated oracle; human TBD |
+| P0-EC-05 | 2026-07-16 | 0 | 1453c48 | npm.cmd run test:unit -- src/simulation/cpu/oracle.test.ts | i7-13700K | Pass: maximum direct/full basis error 3.169e-16 | src/simulation/cpu/oracle.test.ts | Automated oracle; human TBD |
+| P0-EC-06 | 2026-07-16 | 0 | 1453c48 | npm.cmd run test:screenshot -- --grep "parity mode" | RTX 5090 / Chrome 150 | Pass: deterministic frame, exact even iteration count, and GPU wait | tests/e2e/jgs2.spec.ts | Automated hardware E2E; human TBD |
+| P0-EC-09 | 2026-07-16 | 0 | 1453c48 | npm.cmd run test:screenshot -- --grep "parity mode" | RTX 5090 / Chrome 150 | Pass: damping 1, contact damping 0, COM dispatch disabled | tests/e2e/jgs2.spec.ts | Automated hardware E2E; human TBD |
+| P0-EC-12 | 2026-07-16 | 0 | 1453c48 | unit, build, and complete Playwright suite | i7-13700K / RTX 5090 | Pass: 47 unit and 8 E2E tests; zero skips/errors | docs/reproducibility.md | Automated suites; human TBD |
+| P0-EC-01 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:unit -- src/simulation/cpu/phase0-canonical.test.ts | i7-13700K | Pass: all 64 poses; worst relative gradient error 1.221e-10 | src/simulation/cpu/phase0-canonical.test.ts | Automated oracle; independent gate audit |
+| P0-EC-02 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:unit -- src/simulation/cpu/phase0-canonical.test.ts | i7-13700K | Pass: all 64 poses; worst relative Hessian error 4.389e-12 | src/simulation/cpu/phase0-canonical.test.ts | Automated oracle; independent gate audit |
+| P0-EC-03 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:screenshot -- tests/e2e/canonical-gpu-oracle.spec.ts tests/e2e/gpu-oracle.spec.ts | RTX 5090 / Chrome 150 | Pass: worst canonical energy 1.659e-6, gradient 1.847e-6, Hessian 3.173e-8; floor-active errors also below 1e-3 | tests/e2e/canonical-gpu-oracle.spec.ts; tests/e2e/gpu-oracle.spec.ts | Automated CPU/GPU oracle; independent gate audit |
+| P0-EC-04 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:unit -- src/simulation/cpu/phase0-canonical.test.ts; npm.cmd run test:screenshot -- tests/e2e/equilibrium-oracle.spec.ts | i7-13700K / RTX 5090 | Pass: CPU worst 1.251e-17; GPU worst 5.469e-9 over 64 poses and three active blocks; no guarded pivot | src/simulation/cpu/phase0-canonical.test.ts; tests/e2e/equilibrium-oracle.spec.ts | Automated equilibrium oracle; independent gate audit |
+| P0-EC-05 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:unit -- src/simulation/cpu/phase0-canonical.test.ts | i7-13700K | Pass: worst direct/full basis error 4.437e-16 | src/simulation/cpu/phase0-canonical.test.ts | Automated basis oracle; independent gate audit |
+| P0-EC-06 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:screenshot -- --grep "parity mode" | RTX 5090 / Chrome 150 | Pass: pause, exact frame, exact nonlinear iteration, and GPU completion controls | tests/e2e/jgs2.spec.ts | Automated hardware E2E; independent gate audit |
+| P0-EC-07 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:unit -- src/simulation/gpu/jgs2-diagnostics.test.ts src/simulation/diagnostics.test.ts; npm.cmd run test:screenshot | i7-13700K / RTX 5090 | Pass: valid diagnostics finite; empty floor/contact and unavailable candidate-overflow diagnostics use finite zero with valid=false | src/simulation/gpu/jgs2-diagnostics.test.ts; tests/e2e/jgs2.spec.ts | Automated diagnostic gates; independent gate audit |
+| P0-EC-08 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:screenshot | RTX 5090 / Chrome 150 | Pass: readbacks 0 -> 2 -> 2 -> 4 only at explicit checkpoints; at most two GPU submissions outstanding | tests/e2e/performance-baseline.spec.ts; tests/e2e/jgs2.spec.ts | Automated hardware instrumentation; independent gate audit |
+| P0-EC-09 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:screenshot -- --grep "parity mode" | RTX 5090 / Chrome 150 | Pass: velocity damping 1; grounded tangential damping 0; horizontal COM restoration disabled | tests/e2e/jgs2.spec.ts | Automated hardware E2E; independent gate audit |
+| P0-EC-10 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:screenshot -- --grep "force-free|frozen force-free" | RTX 5090 / Chrome 150 | Pass: base relative linear error 2.236119e-5; 32-state corpus worst 8.839392e-5 over 1,200 frames | tests/e2e/jgs2.spec.ts | Automated conservation corpus; independent gate audit |
+| P0-EC-11 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:screenshot -- --grep "force-free|frozen force-free" | RTX 5090 / Chrome 150 | Pass: base relative angular error 6.200642e-4; 32-state corpus worst 3.312243e-3 over 1,200 frames | tests/e2e/jgs2.spec.ts | Automated conservation corpus; independent gate audit |
+| P0-EC-12 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:screenshot | i7-13700K / RTX 5090 | Pass: 74 unit, build, frozen 26/74 unit and 7/14 E2E selectors, 14/14 hardware E2E; zero skips/errors | docs/reproducibility.md | Complete exact-current-code regression; independent gate audit |
+| P0-EC-13 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:screenshot -- tests/e2e/performance-baseline.spec.ts | i7-13700K / RTX 5090 | Pass: mean 3.832 ms, p95 5.000 ms wall; GPU simulation timestamp 1.376256 ms; finite frame 721 | docs/evidence/phase0-performance-baseline.md | Automated performance evidence; independent gate audit |
 
 ## Decision log
 

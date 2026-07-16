@@ -27,16 +27,23 @@ settings, unsorted checkpoints, and sampled times that do not equal
 `frame * timestep`. They also compare every baseline fixture's material,
 timestep, solver, and camera values directly with the current scene builders.
 
+`scripts/verify-baseline-tests.mjs` independently asks Vitest and Playwright to
+list the tests they actually collect, then matches every frozen source and
+selector. This prevents a structurally valid manifest from concealing a
+renamed or deleted baseline test.
+
 Run the manifest and artifact checks alone with:
 
 ```powershell
 npm.cmd run test:unit -- src/reproducibility
+npm.cmd run test:baseline-manifest
 ```
 
 The Phase 0 regression gate still runs every command recorded by the baseline:
 
 ```powershell
 npm.cmd run test:unit
+npm.cmd run test:baseline-manifest
 npm.cmd run build
 npm.cmd run test:screenshot
 ```
@@ -47,6 +54,26 @@ Because the v1 manifest contains no allowed skips, any baseline skip is an
 unexpected failure. Hardware-browser output and the exact commands belong in
 the roadmap criterion evidence log; the manifests do not turn a prior run into
 evidence for a later commit.
+
+The canonical Phase 0 corpora are executable rather than descriptive only.
+`src/simulation/cpu/phase0-canonical.test.ts` evaluates all 64 frozen
+single-tetrahedron poses. The P0-EC-03 hardware oracle evaluates ten
+representative canonical poses plus a floor-active state. The P0-EC-04 GPU
+equilibrium oracle evaluates all 64 poses and three active vertex blocks. The
+conservation suite runs the frozen 2-by-2-by-2 force-free fixture and all 32
+seeded rigid-velocity states for 1,200 frames each. GPU oracle tests reuse the
+same fixture/corpus IDs and generators.
+
+The checked-in Phase 0 timing summary is
+[`docs/evidence/phase0-performance-baseline.md`](evidence/phase0-performance-baseline.md).
+Its Playwright test generates a versioned JSON attachment containing all raw
+samples on every run; the repository retains a compact machine-readable
+summary beside the report.
+The completion run recorded mean 3.832 ms and p95 5.000 ms end-to-end wall
+frames plus a 1.376256 ms explicit GPU simulation timestamp. These numbers are
+Phase 0 instrumentation evidence, not a performance target for later material
+and contact capabilities. The completion gate passed 74 unit and 14 hardware
+E2E tests with zero skips.
 
 ## Precomputation artifacts
 

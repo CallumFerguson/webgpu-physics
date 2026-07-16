@@ -24,7 +24,8 @@ no interaction is required.
 ```sh
 npm run build             # strict TypeScript + production bundle
 npm run test:unit         # FEM, basis, Cubature, and renderer tests
-npm run test:screenshot   # hardware-WebGPU deterministic browser tests
+npm run test:baseline-manifest # verify every frozen test selector still exists
+npm run test:screenshot   # full hardware-WebGPU E2E, oracle, and timing suite
 ```
 
 Software WebGPU adapters, including SwiftShader, are deliberately rejected.
@@ -70,16 +71,20 @@ evaluates complementary gradient and Hessian-vector products, performs a
 regularized `3 x 3` Cholesky solve, and writes to the opposite ping-pong region.
 No floating-point atomics or materialized `12 x 12` runtime Hessians are needed.
 Incident samples retain their neighbor/cross response while subtracting the
-source block already included by the exact local gather. A GPU post-pass
-restores every free body's mass-weighted horizontal center of mass to its
-predicted value, preventing finite local-solve errors from injecting net
-translation.
+source block already included by the exact local gather. Non-parity demos may
+run an optional GPU post-pass that restores each free body's mass-weighted
+horizontal center of mass to its predicted value. Parity mode disables that
+correction and grounded tangential damping.
 
-The strongest CPU test is the exact quadratic oracle from equations 7-13: one
-local equilibrium-basis solve must equal the corresponding block of the global
-Newton update. Other tests check `S_i Ubar_i = I`, complementary equilibrium,
-ordered low modes, nonnegative Cubature, mass conservation, surface topology,
-and deterministic scene packing.
+The Float64 CPU reference exercises a deterministic 64-pose tetrahedron corpus
+with finite-difference gradient and Hessian checks. Its exact quadratic oracle
+also requires each local equilibrium-basis solve to equal the corresponding
+block of the full Newton update. Hardware tests compare exact GPU energy,
+gradient, and local Hessian data against that CPU reference, and compare all
+64 poses times three active vertex blocks against the CPU equilibrium oracle.
+Other tests check `S_i Ubar_i = I`, complementary equilibrium, ordered low
+modes, nonnegative Cubature, mass conservation, surface topology, and
+deterministic scene packing.
 
 The four/six-sample cap is intentionally the paper's runtime budget, not a
 claim that these tiny educational meshes reproduce its reported sub-1% raw
@@ -94,9 +99,12 @@ error across the eight training modes.
   one dense Cholesky for these small demos, low modes, three-right-hand-side
   equilibrium solves, NNLS Cubature, and GPU buffer packing.
 - GPU every frame: implicit prediction, polar frames, co-rotated elasticity,
-  Cubature projection, local solves, body momentum stabilization, floor
-  penalty with grounded tangential damping, velocity update, and rendering.
-- CPU in tests only: synchronized checkpoint readback for numeric invariants.
+  Cubature projection, local solves, optional non-parity demo stabilization,
+  floor penalty, optional non-parity grounded damping, velocity update, and
+  rendering.
+- CPU in tests only: explicitly requested synchronized diagnostic checkpoints
+  for numeric invariants; normal production and benchmark stepping performs no
+  synchronous per-frame readback.
 
 WebAssembly is not used. It would not improve the GPU-resident hot loop and
 would introduce another memory boundary. WASM becomes sensible only for
@@ -115,15 +123,24 @@ In test mode (`?test=1`) the animation loop is disabled. The page exposes a
 fixed-step test harness that:
 
 1. renders and saves frame zero;
-2. advances an exact number of implicit timesteps;
+2. advances an exact number of implicit timesteps or nonlinear iterations;
 3. waits for submitted GPU work and canvas presentation;
 4. renders and saves the ending frame;
-5. reads positions once and checks finiteness, fixed vertices, positive
-   tetrahedron determinants, bounds, landmarks, and visible pixel change.
+5. performs explicitly requested diagnostic readbacks and checks finiteness,
+   fixed vertices, positive tetrahedron determinants, bounds, landmarks,
+   momentum, and visible pixel change.
 
-The Playwright suite covers all four scenes and also verifies the visible
-WebGPU-unavailable error path. Start/end PNGs are retained under `test-results`
-for manual inspection.
+The 14-test Phase 0 Playwright gate covers all four public scenes, long-running
+drop/stress behavior, and the visible WebGPU-unavailable path. It also exercises
+the canonical GPU oracles, the base and 32-case force-free conservation corpus,
+submission/readback invariants, and the timestamped performance baseline.
+Start/end PNGs and generated JSON reports are retained under `test-results` for
+inspection.
+
+See the [reproducibility guide](docs/reproducibility.md), the checked-in
+[Phase 0 performance evidence](docs/evidence/phase0-performance-baseline.md),
+and the [capability-parity roadmap](docs/jgs2-capability-roadmap.md) for exact
+commands, frozen manifests, criteria, and results.
 
 ## Scope
 

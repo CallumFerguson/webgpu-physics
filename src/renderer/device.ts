@@ -34,6 +34,13 @@ export function assertHardwareWebGPUAdapter(info: GPUAdapterInfo): void {
   }
 }
 
+/** Select optional features only when the chosen adapter advertises them. */
+export function selectWebGPUDeviceFeatures(
+  adapter: Pick<GPUAdapter, "features">,
+): GPUFeatureName[] {
+  return adapter.features.has("timestamp-query") ? ["timestamp-query"] : [];
+}
+
 export async function requestWebGPUDevice(): Promise<WebGPUDeviceContext> {
   const gpu = navigator.gpu;
 
@@ -57,7 +64,9 @@ export async function requestWebGPUDevice(): Promise<WebGPUDeviceContext> {
 
   assertHardwareWebGPUAdapter(adapter.info);
 
-  const device = await adapter.requestDevice();
+  const device = await adapter.requestDevice({
+    requiredFeatures: selectWebGPUDeviceFeatures(adapter),
+  });
 
   return { gpu, adapter, device };
 }

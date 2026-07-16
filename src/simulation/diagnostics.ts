@@ -28,7 +28,10 @@ export interface JGS2Diagnostics {
   readonly source: "cpu-readback";
   readonly runtime: JGS2DiagnosticRuntimeSettings;
   readonly finite: boolean;
+  /** Finite zero sentinel when the scene contains no kinematic vertices. */
   readonly pinnedMaxError: number;
+  /** True iff the scene contains at least one kinematic vertex. */
+  readonly pinnedMaxErrorValid: boolean;
   readonly minTetDeterminant: number;
   readonly minTetDeterminantValid: boolean;
   /** Finite sentinel until the general contact pipeline supplies this reduction. */
@@ -149,6 +152,7 @@ export function diagnosticsFromState(
   const maximum: [number, number, number] = [-Infinity, -Infinity, -Infinity];
   let finite = true;
   let pinnedMaxError = 0;
+  let pinnedVertexCount = 0;
   const bodyCount = inferBodyCount(scene.mesh.bodyIds);
   const bodyMasses = new Float64Array(bodyCount);
   const bodyPositionMoments = new Float64Array(bodyCount * 3);
@@ -203,6 +207,7 @@ export function diagnosticsFromState(
     );
 
     if (scene.mesh.fixed[vertex] !== 0) {
+      pinnedVertexCount += 1;
       pinnedMaxError = Math.max(
         pinnedMaxError,
         Math.abs(px - (scene.mesh.positions[vertex * 3] ?? 0)),
@@ -310,7 +315,17 @@ export function diagnosticsFromState(
   const totalLinearMomentum = vec3(totalLinearMomentumValues);
   const totalAngularMomentum = vec3(totalAngularMomentumValues);
   const totalMass = bodyMasses.reduce((sum, mass) => sum + mass, 0);
+  const pinnedMaxErrorValid = pinnedVertexCount > 0;
+  const totalLinearMomentumValid =
+    Number.isFinite(totalMass) &&
+    totalMass > 0 &&
+    finiteVec3(totalLinearMomentum);
+  const totalAngularMomentumValid =
+    Number.isFinite(totalMass) &&
+    totalMass > 0 &&
+    finiteVec3(totalAngularMomentum);
   finite &&=
+    (!pinnedMaxErrorValid || Number.isFinite(pinnedMaxError)) &&
     finiteVec3(totalLinearMomentum) &&
     finiteVec3(totalAngularMomentum) &&
     finiteVec3(landmark) &&
@@ -324,6 +339,7 @@ export function diagnosticsFromState(
     runtime: context.runtime,
     finite,
     pinnedMaxError,
+    pinnedMaxErrorValid,
     minTetDeterminant,
     minTetDeterminantValid: hasTetrahedra,
     minimumContactDistance: 0,
@@ -337,9 +353,9 @@ export function diagnosticsFromState(
     maximumUpdate: 0,
     maximumUpdateValid: false,
     totalLinearMomentum,
-    totalLinearMomentumValid: totalMass > 0,
+    totalLinearMomentumValid,
     totalAngularMomentum,
-    totalAngularMomentumValid: totalMass > 0,
+    totalAngularMomentumValid,
     floorHeight: scene.settings.floorY,
     bounds: { min: minimum, max: maximum },
     landmark,

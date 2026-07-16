@@ -1,4 +1,18 @@
 export {
+  createCompositeEnergyModel,
+  createLinearExternalForceTerm,
+  createQuadraticTargetTerm,
+  type CompositeEnergyEvaluation,
+  type CompositeEnergyModel,
+  type DenseEnergyEvaluation,
+  type DifferentiableEnergyModel,
+  type DifferentiableEnergyTerm,
+  type EnergyContribution,
+  type EnergyTermKind,
+  type LinearExternalForceOptions,
+  type QuadraticTargetOptions,
+} from "./energy";
+export {
   buildLowFrequencyTrainingPoses,
   selectCubatureSamples,
   type CubatureSelection,
@@ -60,6 +74,28 @@ export {
   type ImplicitEulerEvaluation,
   type QuadraticFloorContact,
 } from "./oracle";
+export {
+  PHASE0_ORACLE_CORPUS_CASE_COUNT,
+  PHASE0_ORACLE_CORPUS_GENERATOR_VERSION,
+  PHASE0_ORACLE_CORPUS_ID,
+  PHASE0_ORACLE_CORPUS_SEED,
+  PHASE0_ORACLE_DISPLACEMENT_SCALE,
+  PHASE0_ORACLE_FIXTURE_ID,
+  PHASE0_ORACLE_MINIMUM_DETERMINANT,
+  PHASE0_ORACLE_REST_POSITIONS,
+  PHASE0_ORACLE_TIMESTEP,
+  PHASE0_REFERENCE_MATERIAL,
+  buildPhase0OracleDefinition,
+  buildPhase0OracleFixture,
+  evaluatePhase0OraclePose,
+  generatePhase0OraclePoseCorpus,
+  measurePhase0OraclePoseErrors,
+  type Phase0OracleFixture,
+  type Phase0OraclePose,
+  type Phase0OraclePoseErrors,
+  type Phase0OraclePoseEvaluation,
+  type Phase0OraclePoseKind,
+} from "./phase0-canonical";
 export type {
   ColorRgba,
   CubatureSample,

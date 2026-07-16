@@ -28,7 +28,7 @@ struct SimParams {
   offsets0: vec4u,
   // old, vertex rotation, tet rotation, iteration source position
   offsets1: vec4u,
-  // iteration target position, per-body horizontal correction, reserved
+  // iteration target position, per-body correction, final update, reserved
   offsets2: vec4u,
   // dt, inverse dt, inverse dt squared, maximum local step
   time: vec4f,
@@ -357,6 +357,8 @@ fn predict(@builtin(global_invocation_id) globalId: vec3u) {
   dynamicData[params.offsets0.z + vertex] = vec4f(predicted, 1.0);
   // Starting in posB means every odd solve count lands back in posA.
   dynamicData[params.offsets0.y + vertex] = vec4f(predicted, 1.0);
+  // A solve later in this frame makes the update record valid again.
+  dynamicData[params.offsets2.z + vertex] = vec4f(0.0);
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -412,6 +414,7 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
   let vertexItem = vertexData[vertex];
   if (vertexItem.info.z != 0u) {
     dynamicData[params.offsets2.x + vertex] = vec4f(vertexItem.restMass.xyz, 1.0);
+    dynamicData[params.offsets2.z + vertex] = vec4f(0.0, 0.0, 0.0, 1.0);
     return;
   }
 
@@ -501,6 +504,11 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
     delta *= maxStep * inverseSqrt(deltaLengthSquared);
   }
   dynamicData[params.offsets2.x + vertex] = vec4f(position + delta, 1.0);
+  // Every nonlinear solve overwrites this record. After the command stream
+  // finishes it therefore describes the final iteration, including after an
+  // even-result copy or velocity finalization.
+  dynamicData[params.offsets2.z + vertex] =
+    vec4f(length(delta), 0.0, 0.0, 1.0);
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)

@@ -34,7 +34,8 @@ describe("JGS2 per-body bookkeeping", () => {
       vertexRotation: 10,
       tetRotation: 16,
       bodyCorrection: 19,
-      vec4Count: 22,
+      finalUpdate: 22,
+      vec4Count: 24,
     });
   });
 
