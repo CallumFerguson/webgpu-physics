@@ -68,7 +68,7 @@ The following are explicitly out of scope:
 | Operating system | Windows 11 Home x64 |
 | Baseline test manifest | manifests/baseline-tests.v1.json |
 | Canonical scene/corpus manifest | manifests/canonical-scenes.v1.json |
-| Maximum permitted regularization ratio | TBD before Phase 1 |
+| Maximum permitted regularization ratio | 1e-3 normalized local diagonal shift (P1-D01) |
 | IPC safety epsilon | TBD before Phase 4 |
 | Friction numerical tolerance | TBD before Phase 5 |
 | Last updated | 2026-07-16 |
@@ -132,7 +132,7 @@ targets in the decision log before Phase 1 begins.
 | Phase | Name | Depends on | Status | Exit review |
 | --- | --- | --- | --- | --- |
 | 0 | Reference foundation and parity-safe architecture | None | Complete | Independent gate audit passed |
-| 1 | Stable Neo-Hookean solids and nonlinear JGS2 | Phase 0 | Not started | TBD |
+| 1 | Stable Neo-Hookean solids and nonlinear JGS2 | Phase 0 | In progress | TBD |
 | 2 | General collision detection and swept candidates | Phase 1 | Not started | TBD |
 | 3 | Pairwise penalty contact and contact-aware JGS2 | Phase 2 | Not started | TBD |
 | 4 | IPC, CCD feasibility, and local line search | Phase 3 | Not started | TBD |
@@ -246,21 +246,21 @@ nonlinear energy gradient and Hessian.
 
 | Field | Value |
 | --- | --- |
-| Status | [x] Not started [ ] In progress [ ] Blocked [ ] Complete |
-| Owner | TBD |
+| Status | [ ] Not started [x] In progress [ ] Blocked [ ] Complete |
+| Owner | Codex implementation agent |
 | Reviewer | TBD |
-| Start date | TBD |
+| Start date | 2026-07-16 |
 | Completion date | TBD |
-| Branch or PR | TBD |
-| Design records | TBD |
-| Primary test command | TBD |
+| Branch or PR | main; Phase 0 gate ce478e6 |
+| Design records | docs/phase1-stable-neo-hookean.md |
+| Primary test command | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:screenshot |
 | Performance result | TBD |
-| Known limitations | TBD |
+| Known limitations | CPU material, exact tangent, feasibility guard, and affine-exact vertex-frame reference are implemented. WGSL parity, nonlinear Cubature, globalization, forces/handles, scenes, and performance evidence remain. |
 | Exit sign-off | TBD |
 
 ### Required implementation
 
-- [ ] Implement stable Neo-Hookean energy, gradient, and tangent Hessian in the
+- [x] Implement stable Neo-Hookean energy, gradient, and tangent Hessian in the
       CPU reference.
 - [ ] Implement the same current-pose calculations in WGSL.
 - [ ] Generalize material data so the runtime does not depend on a constant
@@ -292,7 +292,7 @@ nonlinear energy gradient and Hessian.
       and GPU relative tolerance 1e-5.
 - [ ] P1-EC-02: Rigid rotation changes energy by <= 1e-8 on CPU and <= 1e-4 on GPU and
       produces no material force above the same normalized tolerances.
-- [ ] P1-EC-03: Neo-Hookean CPU gradients and Hessians meet the Phase 0 finite-difference
+- [x] P1-EC-03: Neo-Hookean CPU gradients and Hessians meet the Phase 0 finite-difference
       tolerances.
 - [ ] P1-EC-04: GPU Neo-Hookean energy, gradients, and Hessian blocks match CPU with
       relative error <= 1e-3.
@@ -331,8 +331,8 @@ nonlinear energy gradient and Hessian.
 
 | Evidence | Location or result | Complete |
 | --- | --- | --- |
-| Neo-Hookean derivative report | TBD | [ ] |
-| Objectivity and rest-state report | TBD | [ ] |
+| Neo-Hookean derivative report | CPU 60-pose corpus: worst gradient 8.975e-10; worst Hessian 1.957e-11; exact tangent symmetry and rest-stiffness parity pass | [x] |
+| Objectivity and rest-state report | CPU density, stress, tangent action, translated tetrahedron, internal force/torque, and translational null-mode tests pass; GPU evidence pending | [ ] |
 | CPU-versus-GPU report | TBD | [ ] |
 | Convergence history | TBD | [ ] |
 | Cubature residual report | TBD | [ ] |
@@ -967,6 +967,10 @@ later passing run so the history remains visible.
 | P0-EC-11 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:screenshot -- --grep "force-free|frozen force-free" | RTX 5090 / Chrome 150 | Pass: base relative angular error 6.200642e-4; 32-state corpus worst 3.312243e-3 over 1,200 frames | tests/e2e/jgs2.spec.ts | Automated conservation corpus; independent gate audit |
 | P0-EC-12 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:screenshot | i7-13700K / RTX 5090 | Pass: 74 unit, build, frozen 26/74 unit and 7/14 E2E selectors, 14/14 hardware E2E; zero skips/errors | docs/reproducibility.md | Complete exact-current-code regression; independent gate audit |
 | P0-EC-13 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:screenshot -- tests/e2e/performance-baseline.spec.ts | i7-13700K / RTX 5090 | Pass: mean 3.832 ms, p95 5.000 ms wall; GPU simulation timestamp 1.376256 ms; finite frame 721 | docs/evidence/phase0-performance-baseline.md | Automated performance evidence; independent gate audit |
+| P1-EC-01 | 2026-07-16 | 1 | Phase 1 CPU material milestone | npm.cmd run test:unit -- src/simulation/cpu/stable-neo-hookean.test.ts | i7-13700K | Partial pass: CPU rest-normalized energy and force are below 1e-10; GPU pending | src/simulation/cpu/stable-neo-hookean.test.ts | Automated CPU oracle; reviewer pending |
+| P1-EC-02 | 2026-07-16 | 1 | Phase 1 CPU material milestone | npm.cmd run test:unit -- src/simulation/cpu/stable-neo-hookean.test.ts | i7-13700K | Partial pass: CPU energy, stress, tangent action, and tetrahedral response are objective; GPU pending | src/simulation/cpu/stable-neo-hookean.test.ts | Automated CPU oracle; reviewer pending |
+| P1-EC-03 | 2026-07-16 | 1 | Phase 1 CPU material milestone | .\\node_modules\\.bin\\vitest.cmd run src/simulation/cpu/stable-neo-hookean.test.ts --disableConsoleIntercept --reporter=verbose | i7-13700K | Pass: 60 deformed poses; worst gradient 8.975e-10 and Hessian 1.957e-11 | src/simulation/cpu/stable-neo-hookean.test.ts | Automated derivative oracle; reviewer pending |
+| P1-EC-05 | 2026-07-16 | 1 | Phase 1 CPU material milestone | npm.cmd run test:unit -- src/simulation/cpu/stable-neo-hookean.test.ts | i7-13700K | Partial pass: J=0.5, 0.1, and 0.01 finite; raw J=0/-0.1/-1 finite; separate accepted-step guard rejects J<=floor; GPU pending | src/simulation/cpu/stable-neo-hookean.test.ts; docs/phase1-stable-neo-hookean.md | Automated material/feasibility tests; reviewer pending |
 
 ## Decision log
 
@@ -975,7 +979,10 @@ and accepted limitations.
 
 | ID | Date | Phase | Decision | Reason and evidence | Downstream effect | Approver |
 | --- | --- | --- | --- | --- | --- | --- |
-| TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| P1-D01 | 2026-07-16 | 1 | Cap solve-only normalized local diagonal shift at 1e-3; target f32 eigenvalue floor is 256 times unit roundoff | Keeps the exact material oracle unmodified and turns excessive regularization into a visible failure; nonlinear corpus must leave fourfold headroom or trigger projection/Cubature diagnosis | GPU local solve must expose raw minimum eigenvalue, shift, normalized ratio, and descent; threshold changes require a new decision | Codex implementation agent; reviewer pending |
+| P1-D02 | 2026-07-16 | 1 | Preserve raw stable Neo-Hookean behavior for all finite J, but require accepted runtime poses to satisfy J>1e-4 and revert an infeasible assembled Jacobi iteration | Matches the source material's collapse/inversion robustness while enforcing the roadmap's positive dynamic checkpoint policy | Line search and feasibility reductions must reject before acceptance; world-space clamping cannot substitute | Codex implementation agent; reviewer pending |
+| P1-D03 | 2026-07-16 | 1 | Use a 4,800-tetrahedron non-contact solid at p95<=16.7 ms as the Phase 1 development gate; retain the final 20,000-30,000-tet Phase 7 target | Current dense browser preprocessing is intentionally a tiny-system oracle; the smaller gate validates the nonlinear hot loop without weakening final capability parity | Phase 1 manifest must freeze the exact interval; Phase 7 still requires scalable offline artifacts and the larger target | Codex implementation agent; reviewer pending |
+| P1-D04 | 2026-07-16 | 1 | Keep Phase 1 Float64 oracle/preprocessing on CPU JavaScript and per-frame work on WebGPU; do not add WASM | WASM does not improve the GPU-resident loop and large in-browser sparse preprocessing is outside this phase | Reconsider only for arbitrary large user meshes; fixed large scenes should load offline artifacts | Codex implementation agent; reviewer pending |
 
 ## Blocker log
 

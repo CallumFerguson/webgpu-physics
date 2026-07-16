@@ -59,6 +59,26 @@ export interface TetrahedronStiffnessResult {
   readonly stiffness: Float64Array;
 }
 
+/** Four row-major material-space gradients for linear tetrahedron shapes. */
+export function computeTetrahedronShapeGradients(
+  inverseRestMatrix: ArrayLike<number>,
+): Float64Array {
+  if (inverseRestMatrix.length !== 9) {
+    throw new RangeError("A tetrahedron inverse rest matrix must be 3 by 3.");
+  }
+  const gradients = new Float64Array(12);
+  for (let coordinate = 0; coordinate < 3; coordinate += 1) {
+    gradients[3 + coordinate] = inverseRestMatrix[coordinate]!;
+    gradients[6 + coordinate] = inverseRestMatrix[3 + coordinate]!;
+    gradients[9 + coordinate] = inverseRestMatrix[6 + coordinate]!;
+    gradients[coordinate] =
+      -gradients[3 + coordinate]! -
+      gradients[6 + coordinate]! -
+      gradients[9 + coordinate]!;
+  }
+  return gradients;
+}
+
 export function computeLinearTetrahedronStiffness(
   positions: Float64Array,
   vertices: readonly [number, number, number, number],
@@ -72,17 +92,7 @@ export function computeLinearTetrahedronStiffness(
     throw new Error("Cannot assemble a degenerate tetrahedron.");
   }
   const inverseRestMatrix = invert3(matrix);
-  const gradients = new Float64Array(12);
-
-  for (let coordinate = 0; coordinate < 3; coordinate += 1) {
-    gradients[3 + coordinate] = inverseRestMatrix[coordinate]!;
-    gradients[6 + coordinate] = inverseRestMatrix[3 + coordinate]!;
-    gradients[9 + coordinate] = inverseRestMatrix[6 + coordinate]!;
-    gradients[coordinate] =
-      -gradients[3 + coordinate]! -
-      gradients[6 + coordinate]! -
-      gradients[9 + coordinate]!;
-  }
+  const gradients = computeTetrahedronShapeGradients(inverseRestMatrix);
 
   const strainDisplacement = new Float64Array(6 * 12);
   for (let vertex = 0; vertex < 4; vertex += 1) {

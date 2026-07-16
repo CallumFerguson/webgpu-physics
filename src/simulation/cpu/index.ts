@@ -22,6 +22,7 @@ export {
   computeLinearTetrahedronStiffness,
   computeLumpedMasses,
   computeRestTetraData,
+  computeTetrahedronShapeGradients,
   type TetrahedronStiffnessResult,
 } from "./fem";
 export {
@@ -31,6 +32,12 @@ export {
   type ScalarFunction,
   type VectorFunction,
 } from "./finite-difference";
+export {
+  buildVertexDeformationGradientStencil,
+  computeVertexPolarFrames,
+  evaluateVertexDeformationGradients,
+  type VertexDeformationGradientStencil,
+} from "./deformation-gradient";
 export {
   choleskyFactor,
   determinant3,
@@ -96,6 +103,22 @@ export {
   type Phase0OraclePoseEvaluation,
   type Phase0OraclePoseKind,
 } from "./phase0-canonical";
+export {
+  applyStableNeoHookeanTangent,
+  assertStableNeoHookeanFeasible,
+  cofactor3,
+  computeStableNeoHookeanParameters,
+  createStableNeoHookeanMaterialTerm,
+  directionalCofactor3,
+  evaluateStableNeoHookeanDensity,
+  evaluateStableNeoHookeanMesh,
+  evaluateStableNeoHookeanTetrahedron,
+  type StableNeoHookeanDensityEvaluation,
+  type StableNeoHookeanMaterialTermOptions,
+  type StableNeoHookeanMeshEvaluation,
+  type StableNeoHookeanParameters,
+  type StableNeoHookeanTetrahedronEvaluation,
+} from "./stable-neo-hookean";
 export type {
   ColorRgba,
   CubatureSample,
