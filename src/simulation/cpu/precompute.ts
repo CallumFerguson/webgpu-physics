@@ -1,5 +1,10 @@
 import { computeLumpedMasses, computeRestTetraData, assembleRestLinearSystem } from "./fem";
 import { buildLowFrequencyTrainingPoses, selectCubatureSamples } from "./cubature";
+import { buildNonlinearCubaturePoseCorpus } from "./nonlinear-cubature";
+import {
+  NONLINEAR_CUBATURE_TRAINING_RESIDUAL_TOLERANCE,
+  selectStableNeoHookeanCubatureSamples,
+} from "./nonlinear-cubature-training";
 import { invert3, solveCholesky } from "./math";
 import { extractBoundarySurface, getVertexCount } from "./mesh";
 import type {
@@ -121,16 +126,85 @@ export function buildPrecomputedScene(
     lumpedMasses,
     definition.settings.timestep,
   );
-  const trainingPoses = buildLowFrequencyTrainingPoses(
-    definition.mesh,
-    restSystem,
-    CUBATURE_TRAINING_MODE_COUNT,
-    CUBATURE_INVERSE_ITERATIONS,
+  const referencedMaterialModels = new Set(
+    [...definition.mesh.materialIds].map(
+      (materialId) =>
+        definition.materials[materialId]?.model ?? "corotated-linear",
+    ),
   );
+  const stableNeoHookean = referencedMaterialModels.has(
+    "stable-neo-hookean",
+  );
+  if (stableNeoHookean && referencedMaterialModels.size !== 1) {
+    throw new RangeError(
+      "Mixed stable Neo-Hookean/co-rotated nonlinear Cubature preprocessing is not implemented.",
+    );
+  }
+  const linearTrainingPoses = stableNeoHookean
+    ? undefined
+    : buildLowFrequencyTrainingPoses(
+        definition.mesh,
+        restSystem,
+        CUBATURE_TRAINING_MODE_COUNT,
+        CUBATURE_INVERSE_ITERATIONS,
+      );
+  const nonlinearCorpus = stableNeoHookean
+    ? buildNonlinearCubaturePoseCorpus({
+        mesh: definition.mesh,
+        restData: restTetraData,
+        materials: definition.materials,
+        lumpedMasses,
+        restSystem,
+      })
+    : undefined;
   const vertexPrecomputations: VertexPrecomputation[] = [];
 
   for (const vertex of restSystem.activeVertices) {
     const exact = computeExactVertexBasis(definition.mesh, restSystem, vertex);
+    if (nonlinearCorpus) {
+      const cubature = selectStableNeoHookeanCubatureSamples(
+        {
+          mesh: definition.mesh,
+          restData: restTetraData,
+          materials: definition.materials,
+          lumpedMasses,
+          restSystem,
+          timestep: definition.settings.timestep,
+          predictedPositions: definition.mesh.positions,
+          sourceVertex: vertex,
+          exactBasis: exact.basis,
+        },
+        nonlinearCorpus.training,
+        definition.settings.cubatureSamples,
+      );
+      if (
+        cubature.packedResidual >
+        NONLINEAR_CUBATURE_TRAINING_RESIDUAL_TOLERANCE + 1e-12
+      ) {
+        throw new Error(
+          `Stable Neo-Hookean Cubature source vertex ${vertex} has packed ` +
+            `training residual ${cubature.packedResidual}; required at most ` +
+            `${NONLINEAR_CUBATURE_TRAINING_RESIDUAL_TOLERANCE}.`,
+        );
+      }
+      vertexPrecomputations.push({
+        vertex,
+        ...(options.retainExactBases ? { exactBasis: exact.basis } : {}),
+        schurInverse: exact.schurInverse,
+        cubature: cubature.packedSamples,
+        cubatureModel: "stable-neo-hookean",
+        trainingResidualF64: cubature.residual,
+        trainingResidual: cubature.packedResidual,
+        validTrainingPoseCount: cubature.validTrainingPoseCount,
+        trivialTrainingPoseCount: cubature.trivialTrainingPoseCount,
+        nonzeroTrainingCandidateCount: cubature.nonzeroCandidateCount,
+        trainingColumnRank: cubature.trainingColumnRank,
+        packedNonzeroTrainingCandidateCount:
+          cubature.packedNonzeroCandidateCount,
+        packedTrainingColumnRank: cubature.packedTrainingColumnRank,
+      });
+      continue;
+    }
     const cubature = selectCubatureSamples(
       definition.mesh,
       restTetraData,
@@ -138,7 +212,7 @@ export function buildPrecomputedScene(
       definition.settings.timestep,
       vertex,
       exact.basis,
-      trainingPoses,
+      linearTrainingPoses!,
       definition.settings.cubatureSamples,
     );
     vertexPrecomputations.push({

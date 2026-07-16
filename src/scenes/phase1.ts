@@ -4,10 +4,13 @@ import type {
   TetrahedralMesh,
   Vec3,
 } from "../simulation/cpu/types";
+import { generateRegularCuboidMesh } from "../simulation/cpu/mesh";
 
 /** Frozen IDs from manifests/phase1-scenes.v1.json. */
 export const PHASE1_STABLE_NEO_HOOKEAN_FIXTURE_ID =
   "phase1.stable-neo-hookean-single-tetrahedron" as const;
+export const PHASE1_NONLINEAR_CUBATURE_FIXTURE_ID =
+  "phase1.nonlinear-cubature-beam" as const;
 export const PHASE1_STABLE_NEO_HOOKEAN_CORPUS_ID =
   "phase1.stable-neo-hookean-poses" as const;
 export const PHASE1_STABLE_NEO_HOOKEAN_CORPUS_VERSION =
@@ -45,6 +48,12 @@ export const PHASE1_STABLE_NEO_HOOKEAN_MATERIAL: Phase1StableNeoHookeanMaterial 
   youngModulus: 80_000,
   poissonRatio: 0.3,
   color: [0.55, 0.38, 0.95, 1],
+};
+
+export const PHASE1_NONLINEAR_CUBATURE_MATERIAL: Phase1StableNeoHookeanMaterial = {
+  ...PHASE1_STABLE_NEO_HOOKEAN_MATERIAL,
+  name: "phase1-nonlinear-cubature-reference",
+  youngModulus: 5_000,
 };
 
 export const PHASE1_STABLE_NEO_HOOKEAN_REST_POSITIONS = new Float64Array([
@@ -270,6 +279,41 @@ export function buildPhase1StableNeoHookeanOracleDefinition(): SceneDefinition {
       vertex: 3,
       label: "stable Neo-Hookean oracle apex",
       expectedMotion: [1, 1, 1],
+    },
+  };
+}
+
+/** Private multi-element fixture for nonlinear Cubature training and parity. */
+export function buildPhase1NonlinearCubatureDefinition(): SceneDefinition {
+  return {
+    id: PHASE1_NONLINEAR_CUBATURE_FIXTURE_ID,
+    title: "Canonical nonlinear Cubature beam",
+    description:
+      "A private twelve-tetrahedron stable Neo-Hookean solid used for nonredundant nonlinear Cubature training and held-out update validation.",
+    mesh: generateRegularCuboidMesh({
+      cells: [2, 1, 1],
+      origin: [0, 0, 0],
+      size: [1, 1, 1],
+      fixed: (_position, [x, y]) => x === 0 && y === 0,
+    }),
+    materials: [PHASE1_NONLINEAR_CUBATURE_MATERIAL],
+    settings: {
+      timestep: PHASE1_STABLE_NEO_HOOKEAN_TIMESTEP,
+      gravity: [0, 0, 0],
+      floorY: -10,
+      solverIterations: 1,
+      cubatureSamples: 6,
+    },
+    camera: {
+      eye: [4.5, 3, 5.5],
+      target: [0.5, 0.5, 0.5],
+      up: [0, 1, 0],
+      fovYRadians: Math.PI / 4,
+    },
+    landmark: {
+      vertex: 11,
+      label: "nonlinear Cubature beam tip",
+      expectedMotion: [0, -1, 0],
     },
   };
 }

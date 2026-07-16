@@ -14,8 +14,13 @@ export {
 } from "./energy";
 export {
   buildLowFrequencyTrainingPoses,
+  fitNonnegativeColumnWeights,
+  selectGreedyNonnegativeColumns,
   selectCubatureSamples,
   type CubatureSelection,
+  type GreedyNonnegativeColumnSelection,
+  type GreedyNonnegativeColumnSelectionOptions,
+  type NonnegativeColumnFit,
 } from "./cubature";
 export {
   assembleRestLinearSystem,
@@ -90,6 +95,59 @@ export {
   type StableNeoHookeanImplicitEulerOptions,
   type StableNeoHookeanImplicitEulerOracle,
 } from "./nonlinear-oracle";
+export {
+  createExactStableNeoHookeanJGS2LocalModel,
+  evaluateExactStableNeoHookeanJGS2Local,
+  projectDenseJGS2LocalTerm,
+  type ExactStableNeoHookeanJGS2LocalEvaluation,
+  type ExactStableNeoHookeanJGS2LocalModel,
+  type ExactStableNeoHookeanJGS2LocalOptions,
+  type JGS2LocalProjection,
+} from "./jgs2-local";
+export {
+  NONLINEAR_CUBATURE_CORPUS_VERSION,
+  NONLINEAR_CUBATURE_DIRECTION_NORMALIZATION,
+  NONLINEAR_CUBATURE_INVERSE_ITERATIONS,
+  NONLINEAR_CUBATURE_MINIMUM_POSE_DETERMINANT,
+  NONLINEAR_CUBATURE_MODE_COUNT,
+  NONLINEAR_CUBATURE_MIXTURE_COEFFICIENT_FORMULA,
+  NONLINEAR_CUBATURE_VALIDATION_ONLY_MODE_COUNT,
+  NONLINEAR_CUBATURE_VALIDATION_ROTATIONS,
+  NONLINEAR_CUBATURE_ROTATED_VALIDATION_COUNT,
+  NONLINEAR_CUBATURE_TRAINING_AMPLITUDE,
+  NONLINEAR_CUBATURE_VALIDATION_HIGH_AMPLITUDE,
+  NONLINEAR_CUBATURE_VALIDATION_HIGH_AMPLITUDE_START,
+  NONLINEAR_CUBATURE_VALIDATION_LOW_AMPLITUDE,
+  NONLINEAR_CUBATURE_VALIDATION_MIXTURE_COUNT,
+  NONLINEAR_CUBATURE_VALIDATION_PREDICTED_BLEND,
+  buildNonlinearCubaturePoseCorpus,
+  type NonlinearCubaturePose,
+  type NonlinearCubaturePoseCorpus,
+  type NonlinearCubaturePoseCorpusOptions,
+  type NonlinearCubaturePoseKind,
+} from "./nonlinear-cubature";
+export {
+  NONLINEAR_CUBATURE_COLUMN_RANK_RELATIVE_TOLERANCE,
+  NONLINEAR_CUBATURE_CO_ROTATION,
+  NONLINEAR_CUBATURE_GPU_PARITY_ITERATIONS,
+  NONLINEAR_CUBATURE_GPU_UPDATE_TOLERANCE,
+  NONLINEAR_CUBATURE_RESIDUAL_METRIC,
+  NONLINEAR_CUBATURE_SELECTION_METHOD,
+  NONLINEAR_CUBATURE_TARGET_NORMALIZATION,
+  NONLINEAR_CUBATURE_TRAINING_RESIDUAL_TOLERANCE,
+  NONLINEAR_CUBATURE_UPDATE_RMS_METRIC,
+  NONLINEAR_CUBATURE_UPDATE_RMS_TOLERANCE,
+  NONLINEAR_CUBATURE_VERTEX_FRAME,
+  assembleStableNeoHookeanJGS2LocalSystem,
+  buildCurrentCoRotatedEquilibriumBasis,
+  currentEquilibriumBasisToActiveMatrix,
+  evaluateStableNeoHookeanCubatureCandidate,
+  selectStableNeoHookeanCubatureSamples,
+  type NonlinearCubatureCandidateEvaluation,
+  type StableNeoHookeanCubatureContext,
+  type StableNeoHookeanCubatureSelection,
+  type StableNeoHookeanJGS2LocalSystem,
+} from "./nonlinear-cubature-training";
 export {
   PHASE0_ORACLE_CORPUS_CASE_COUNT,
   PHASE0_ORACLE_CORPUS_GENERATOR_VERSION,

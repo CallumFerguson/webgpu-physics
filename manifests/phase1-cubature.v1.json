@@ -1,0 +1,108 @@
+{
+  "schema": "org.jgs2.phase1-cubature",
+  "schemaVersion": 1,
+  "corpusVersion": "phase1-nonlinear-cubature-v1",
+  "fixture": {
+    "id": "phase1.nonlinear-cubature-beam",
+    "generator": {
+      "id": "regular-cuboid-twelve-tetrahedra-edge-fixed",
+      "version": "1",
+      "parameters": {
+        "positions": [0, 0, 0, 0.5, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 1, 0, 1, 1, 0, 0, 0, 1, 0.5, 0, 1, 1, 0, 1, 0, 1, 1, 0.5, 1, 1, 1, 1, 1],
+        "tetrahedra": [0, 1, 4, 10, 0, 4, 3, 10, 0, 3, 9, 10, 0, 9, 6, 10, 0, 6, 7, 10, 0, 7, 1, 10, 1, 2, 5, 11, 1, 5, 4, 11, 1, 4, 10, 11, 1, 10, 7, 11, 1, 7, 8, 11, 1, 8, 2, 11],
+        "fixed": [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+        "materialIds": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "bodyIds": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      }
+    },
+    "material": {
+      "id": "phase1-nonlinear-cubature-reference",
+      "model": "stable-neo-hookean",
+      "density": 1000,
+      "youngModulus": 5000,
+      "poissonRatio": 0.3
+    },
+    "simulation": {
+      "timestep": 0.016666666666666666,
+      "gravity": [0, 0, 0],
+      "floorY": -10,
+      "solverIterations": 1
+    }
+  },
+  "basis": {
+    "modeCount": 8,
+    "validationOnlyModeCount": 4,
+    "inverseIterations": 24,
+    "coRotation": "R_v * Ubar_vi * transpose(R_i)",
+    "vertexFrame": "polar(rest-volume-weighted-average-F)"
+  },
+  "training": {
+    "count": 16,
+    "validCount": 16,
+    "trivialCount": 0,
+    "signsPerMode": [1, -1],
+    "amplitude": 0.12,
+    "normalization": "max(max-tet-displacement-gradient-frobenius,max-vertex-displacement-over-scene-scale)",
+    "targetNormalization": "per-pose-l2-complementary-gradient",
+    "predictedBlend": 0
+  },
+  "validation": {
+    "count": 8,
+    "mixtureCount": 8,
+    "lowAmplitude": 0.06,
+    "highAmplitude": 0.18,
+    "highAmplitudeStart": 4,
+    "predictedBlend": 0.25,
+    "coefficientFormula": "sin((r+1)(k+1)0.754877666)+0.5cos((r+1)(k+3)0.569840291)",
+    "rotatedCasesWhenUnconstrained": 4,
+    "minimumDeformationDeterminant": 0.5
+  },
+  "cubature": {
+    "candidateCount": 12,
+    "maximumSamples": 6,
+    "requireRankAboveSampleBudget": true,
+    "columnRankRelativeTolerance": 1e-9,
+    "normalizedTrainingResidual": 0.01,
+    "nonnegativeWeights": true,
+    "runtimePacking": "f32",
+    "selection": "deterministic-greedy-nnls-with-small-fixture-subset-audit",
+    "residualMetric": "l2(packed-columns*packed-weights-f64-target)/l2(f64-target)"
+  },
+  "updateValidation": {
+    "trainingRelativeRms": 0.02,
+    "validationRelativeRms": 0.02,
+    "combinedRelativeRms": 0.02,
+    "productionGpuRelativeError": 0.001,
+    "regularization": "none",
+    "metric": "sqrt(sum(l2(selected-update-exact-update)^2)/sum(l2(exact-update)^2))",
+    "exactReference": "independent-dense-current-projection",
+    "gpuPrediction": "production-f32-implicit-euler-predictor",
+    "productionIterations": 2
+  },
+  "anchors": {
+    "firstTraining": {
+      "id": "phase1.nonlinear-cubature-training/00",
+      "minimumDeformationDeterminant": 0.9908567283259437,
+      "positions": [0, 0, 0, 0.5000482472210858, 0.00005091256934424901, -0.000007778039722030363, 1.0049127774691795, 0.019696084939887146, 0.00108873487556633, 0.007684211560817064, 1.0142024907196705, 0.008822504064244844, 0.5000194518712222, 1.0002513175467915, 0.00018776329872702158, 1.010503254463825, 1.0432931335881612, 0.030388623590238133, 0, 0, 1, 0.5001559271872958, -0.000004243053782609207, 0.9999398208795793, 1.0108332731905028, 0.0065035354363614664, 0.991316915873464, 0.0031541583941653182, 1.0071037424433988, 1.0016498229236828, 0.5000217934686909, 1.0000093119296438, 1.0000091950799774, 0.9999623021235877, 1.000037734523612, 1.000067351871581],
+      "predictedPositions": [0, 0, 0, 0.5, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 1, 0, 1, 1, 0, 0, 0, 1, 0.5, 0, 1, 1, 0, 1, 0, 1, 1, 0.5, 1, 1, 1, 1, 1]
+    },
+    "lastValidation": {
+      "id": "phase1.nonlinear-cubature-validation/07",
+      "minimumDeformationDeterminant": 0.9626310883064463,
+      "positions": [0, 0, 0, 0.5000889877369721, 0.00001756140368006149, 0.000022921121118485903, 1.023469302545737, 0.007350821080950538, 0.007738324830721108, -0.020342337430910115, 1.0600297946137085, -0.028188897228531008, 0.49975679614267315, 1.0001229266455571, 0.000026510048182770333, 1.0107173415628166, 0.9700863692107591, 0.009679822719392365, 0, 0, 1, 0.5002049503754307, 0.00002123456057432582, 0.9998776375719894, 1.0144560980749997, 0.01853248840378538, 0.9747711565190368, -0.00126770754436486, 0.9601525110909661, 0.948820705025112, 0.49997051772153417, 0.9999120830955445, 0.9997880975683109, 0.9999811981401574, 1.000002603751873, 0.9999766453677599],
+      "predictedPositions": [0, 0, 0, 0.500022246934243, 0.000004390350920015372, 0.000005730280279621476, 1.0058673256364343, 0.0018377052702376346, 0.001934581207680277, -0.005085584357727529, 1.015007448653427, -0.007047224307132752, 0.4999391990356683, 1.0000307316613892, 0.000006627512045692583, 1.0026793353907042, 0.9925215923026898, 0.002419955679848091, 0, 0, 1, 0.5000512375938576, 0.000005308640143581455, 0.9999694093929974, 1.00361402451875, 0.004633122100946345, 0.9936927891297592, -0.000316926886091215, 0.9900381277727415, 0.987205176256278, 0.49999262943038353, 0.9999780207738861, 0.9999470243920777, 0.9999952995350394, 1.0000006509379682, 0.99999416134194]
+    }
+  },
+  "expectedPackedSelections": [
+    { "vertex": 1, "tetrahedra": [0, 6, 7, 9, 10, 11], "weights": [3.2548813819885254, 1.0261820554733276, 0.9755896925926208, 3.187013626098633, 1.02816641330719, 0.973626971244812], "nonzeroCandidateCount": 12, "trainingColumnRank": 12, "packedTrainingColumnRank": 12, "packedResidual": 0.003008680543001657 },
+    { "vertex": 2, "tetrahedra": [0, 6, 7, 8, 10, 11], "weights": [1.9830701351165771, 1.0070197582244873, 0.9930704832077026, 2.0003743171691895, 1.0089281797409058, 0.9911739230155945], "nonzeroCandidateCount": 12, "trainingColumnRank": 12, "packedTrainingColumnRank": 12, "packedResidual": 0.00004943210939874363 },
+    { "vertex": 3, "tetrahedra": [0, 1, 2, 3, 5, 7], "weights": [2.226137399673462, 1.7433727979660034, 1.0154471397399902, 0.9852519035339355, 1.9349238872528076, 1.628112554550171], "nonzeroCandidateCount": 12, "trainingColumnRank": 12, "packedTrainingColumnRank": 12, "packedResidual": 0.0016935275953437977 },
+    { "vertex": 4, "tetrahedra": [1, 2, 3, 6, 7, 9], "weights": [1.0572130680084229, 0.9429865479469299, 0.691864550113678, 0.8887768387794495, 1.111069679260254, 6.080680847167969], "nonzeroCandidateCount": 12, "trainingColumnRank": 12, "packedTrainingColumnRank": 12, "packedResidual": 0.0008497518287871797 },
+    { "vertex": 5, "tetrahedra": [1, 6, 7, 8, 10, 11], "weights": [1.628081202507019, 0.9731386303901672, 1.804492473602295, 2.188305139541626, 1.4253534078598022, 1.0268288850784302], "nonzeroCandidateCount": 12, "trainingColumnRank": 12, "packedTrainingColumnRank": 12, "packedResidual": 0.0022849546830323248 },
+    { "vertex": 7, "tetrahedra": [0, 3, 6, 9, 10, 11], "weights": [3.2087883949279785, 1.6861053705215454, 0.38513845205307007, 4.340712547302246, 1.0482896566390991, 0.9521134495735168], "nonzeroCandidateCount": 12, "trainingColumnRank": 12, "packedTrainingColumnRank": 12, "packedResidual": 0.0005265104222852463 },
+    { "vertex": 8, "tetrahedra": [5, 6, 7, 8, 10, 11], "weights": [2.8300833702087402, 0.9732317924499512, 0.8693245649337769, 1.8988956212997437, 0.812691330909729, 1.0270092487335205], "nonzeroCandidateCount": 12, "trainingColumnRank": 12, "packedTrainingColumnRank": 12, "packedResidual": 0.0003183877556312736 },
+    { "vertex": 9, "tetrahedra": [0, 1, 2, 3, 9, 10], "weights": [3.178757905960083, 1.0050065517425537, 0.9949634671211243, 1.0057008266448975, 1.812360167503357, 1.6517833471298218], "nonzeroCandidateCount": 12, "trainingColumnRank": 12, "packedTrainingColumnRank": 12, "packedResidual": 0.00007802525419808173 },
+    { "vertex": 10, "tetrahedra": [1, 2, 3, 5, 8, 9], "weights": [1.0006742477416992, 0.9994004368782043, 1.0005080699920654, 1.3654437065124512, 3.0322611331939697, 2.8723714351654053], "nonzeroCandidateCount": 12, "trainingColumnRank": 12, "packedTrainingColumnRank": 12, "packedResidual": 0.001643804597586689 },
+    { "vertex": 11, "tetrahedra": [11, 7, 8, 4, 6, 10], "weights": [0.8722929358482361, 0.8711473941802979, 2.983570098876953, 3.86795711517334, 1.1279152631759644, 1.1256022453308105], "nonzeroCandidateCount": 12, "trainingColumnRank": 12, "packedTrainingColumnRank": 12, "packedResidual": 0.0054898866214139405 }
+  ]
+}

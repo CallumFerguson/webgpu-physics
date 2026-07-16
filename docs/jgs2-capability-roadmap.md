@@ -251,11 +251,11 @@ nonlinear energy gradient and Hessian.
 | Reviewer | TBD |
 | Start date | 2026-07-16 |
 | Completion date | TBD |
-| Branch or PR | main; Phase 0 gate ce478e6; Phase 1 CPU material ebb1017 |
-| Design records | docs/phase1-stable-neo-hookean.md; docs/jgs2-implementation.md; manifests/phase1-scenes.v1.json |
+| Branch or PR | main; Phase 0 gate ce478e6; Phase 1 material/runtime gate c0f5456 |
+| Design records | docs/phase1-stable-neo-hookean.md; docs/jgs2-implementation.md; docs/evidence/phase1-nonlinear-cubature.md; manifests/phase1-scenes.v1.json; manifests/phase1-cubature.v1.json |
 | Primary test command | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:screenshot |
 | Performance result | TBD |
-| Known limitations | CPU and WGSL material derivatives, exact diagnostics, material dispatch, and affine-exact CPU/GPU vertex frames are implemented. The shared ABI still carries legacy rest stiffness for stable-only meshes. Nonlinear Cubature, globalization and assembled-pose feasibility, explicit public-scene material labels, forces/handles, scenes, and performance evidence remain. |
+| Known limitations | CPU/WGSL material derivatives, exact diagnostics, material dispatch, affine-exact frames, nonlinear current-pose Cubature, packed-f32 quality gates, and production update parity are implemented. Dense TypeScript preprocessing is intentionally limited to small fixtures and fails closed when K=6 misses the 1% gate. The shared ABI still carries legacy rest stiffness for stable-only meshes. Globalization and assembled-pose feasibility, explicit public-scene material labels, forces/handles, scenes, and performance evidence remain. |
 | Exit sign-off | TBD |
 
 ### Required implementation
@@ -267,9 +267,9 @@ nonlinear energy gradient and Hessian.
       current-pose tangent rather than the constant rest 12-by-12 stiffness.
 - [x] Compute documented vertex-local deformation gradients and polar frames
       for the co-rotated equilibrium bases.
-- [ ] Evaluate current complementary gradients and Hessians in the Cubature
+- [x] Evaluate current complementary gradients and Hessians in the Cubature
       projection.
-- [ ] Retrain the equilibrium bases and Cubature data for the nonlinear model.
+- [x] Retrain the equilibrium bases and Cubature data for the nonlinear model.
 - [ ] Add arbitrary per-vertex external forces.
 - [ ] Add scripted and pointer-driven kinematic targets with clean release.
 - [ ] Add GPU-side convergence flags based on residual and update norms.
@@ -313,9 +313,9 @@ nonlinear energy gradient and Hessian.
 - [ ] P1-EC-10: Tiny reference solves finish with relative residual <= 1e-5; runtime
       demos finish within their configured threshold, which may not exceed
       1e-3.
-- [ ] P1-EC-11: Selected Cubature data reaches <= 1% normalized training residual for
+- [x] P1-EC-11: Selected Cubature data reaches <= 1% normalized training residual for
       every parity scene.
-- [ ] P1-EC-12: Selected-Cubature local updates differ from exact projected updates by
+- [x] P1-EC-12: Selected-Cubature local updates differ from exact projected updates by
       <= 2% RMS over the training and validation poses.
 - [ ] P1-EC-13: The soft cantilever tip deflects at least 1.5 times as far as the stiff
       tip under the same load.
@@ -335,7 +335,7 @@ nonlinear energy gradient and Hessian.
 | Objectivity and rest-state report | CPU density, stress, tangent action, translated tetrahedron, internal force/torque, and translational null-mode tests pass; f32-exact GPU quarter turns have rest and rigid energy/force errors 0/0 under the roadmap default zero-reference metric | [x] |
 | CPU-versus-GPU report | Frozen 64-pose material-only hardware corpus: worst relative energy 2.234e-6, gradient 1.161e-6, local Hessian 1.089e-6; total implicit parity also <=1e-3; scaled non-affine vertex-frame error 8.702e-8 | [x] |
 | Convergence history | TBD | [ ] |
-| Cubature residual report | TBD | [ ] |
+| Cubature residual report | 12-tet full-rank parity fixture, K=6: packed residual maximum 0.548989%; packed selected-vs-independent-dense update RMS training 3.713075e-5, held-out 3.984377e-5, combined 3.796498e-5; two-iteration production GPU parity 2.113e-9 | [x] |
 | Scene screenshots and diagnostics | TBD | [ ] |
 | Performance report | TBD | [ ] |
 | Reviewer approval | TBD | [ ] |
@@ -975,8 +975,11 @@ later passing run so the history remains visible.
 | P1-EC-02 | 2026-07-16 | 1 | Phase 1 GPU material/frame milestone | npm.cmd run test:screenshot -- tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | RTX 5090 / Chrome 150 | Pass: CPU objectivity below 1e-8; f32-exact GPU quarter-turn energy/force errors 0/0 using the roadmap default zero-reference metric | tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | Automated CPU/GPU oracle; independent gate audit findings resolved |
 | P1-EC-04 | 2026-07-16 | 1 | Phase 1 GPU material/frame milestone | npm.cmd run test:screenshot -- tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | RTX 5090 / Chrome 150 | Pass: all 64 frozen poses; material-only worst relative energy 2.234e-6, gradient 1.161e-6, local Hessian 1.089e-6; separate total implicit parity <=1e-3 | tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | Automated CPU/GPU oracle; independent gate audit findings resolved |
 | P1-EC-05 | 2026-07-16 | 1 | Phase 1 GPU material/frame milestone | npm.cmd run test:screenshot -- tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | RTX 5090 / Chrome 150 | Partial pass: GPU material and derivatives remain finite at J=0.5, 0.1, and 0.01; accepted assembled-step enforcement remains pending | tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | Automated positive-J corpus; independent gate audit; criterion intentionally unchecked |
-| P1-FRAME-01 | 2026-07-16 | 1 | Phase 1 GPU material/frame milestone | npm.cmd run test:screenshot -- tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | RTX 5090 / Chrome 150 | Pass: 0.01-scale non-affine polar(volume-weighted average F) CPU/GPU error 8.702e-8; production stable step finite with min J 0.9394; two explicit test-only readbacks | tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | Automated scale/frame/production smoke oracle; independent code-audit finding resolved |
+| P1-FRAME-01 | 2026-07-16 | 1 | Phase 1 GPU material/frame milestone | npm.cmd run test:screenshot -- tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | RTX 5090 / Chrome 150 | Pass: 0.01-scale non-affine polar(volume-weighted average F) CPU/GPU error 8.702e-8; stable runtime kernels with rest-equivalent diagnostic basis preprocessing remain finite at min J 0.9394; two explicit test-only readbacks | tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts | Automated scale/frame/production smoke oracle; independent code-audit finding resolved |
 | P1-GATE-02 | 2026-07-16 | 1 | Phase 1 GPU material/frame milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:screenshot | i7-13700K / RTX 5090 / Chrome 150 | Pass: 106 unit, build, frozen 26/106 unit and 7/16 E2E selectors, 16/16 hardware E2E; zero skips/errors; stress p95 5.000 ms | docs/reproducibility.md | Complete exact-current-code regression; independent code and gate audits |
+| P1-EC-11 | 2026-07-16 | 1 | Phase 1 nonlinear Cubature milestone | npm.cmd run test:unit -- src/simulation/cpu/nonlinear-cubature-training.test.ts src/reproducibility/phase1-cubature-manifest.test.ts | i7-13700K | Pass: every active source has 12 Float64/f32-ranked candidates, retains K=6, and has conservative packed-vs-f64-target residual <=0.548989%; all 16 normalized targets valid | docs/evidence/phase1-nonlinear-cubature.md; manifests/phase1-cubature.v1.json | Automated independent dense/manifest gates; three-agent audit findings resolved |
+| P1-EC-12 | 2026-07-16 | 1 | Phase 1 nonlinear Cubature milestone | npm.cmd run test:unit -- src/simulation/cpu/nonlinear-cubature-training.test.ts; npm.cmd run test:screenshot -- tests/e2e/nonlinear-cubature-gpu.spec.ts | i7-13700K / RTX 5090 / Chrome 150 | Pass: packed selected-vs-independent-dense update RMS training 3.713075e-5, held-out 3.984377e-5, combined 3.796498e-5; two-iteration production f32 predictor/GPU update parity 2.113e-9 | docs/evidence/phase1-nonlinear-cubature.md | Automated CPU/GPU oracle; three-agent audit findings resolved |
+| P1-GATE-03 | 2026-07-16 | 1 | Phase 1 nonlinear Cubature milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:screenshot | i7-13700K / RTX 5090 / Chrome 150 | Pass: 134 unit, build, frozen 26/134 unit and 7/17 E2E selectors, 17/17 hardware E2E; zero skips/errors; stress p95 4.9 ms | docs/reproducibility.md; docs/evidence/phase1-nonlinear-cubature.md | Complete exact-current-code regression; three-agent math/code/gate audits |
 
 ## Decision log
 
@@ -989,6 +992,7 @@ and accepted limitations.
 | P1-D02 | 2026-07-16 | 1 | Preserve raw stable Neo-Hookean behavior for all finite J, but require accepted runtime poses to satisfy J>1e-4 and revert an infeasible assembled Jacobi iteration | Matches the source material's collapse/inversion robustness while enforcing the roadmap's positive dynamic checkpoint policy | Line search and feasibility reductions must reject before acceptance; world-space clamping cannot substitute | Codex implementation agent; reviewer pending |
 | P1-D03 | 2026-07-16 | 1 | Use a 4,800-tetrahedron non-contact solid at p95<=16.7 ms as the Phase 1 development gate; retain the final 20,000-30,000-tet Phase 7 target | Current dense browser preprocessing is intentionally a tiny-system oracle; the smaller gate validates the nonlinear hot loop without weakening final capability parity | Phase 1 manifest must freeze the exact interval; Phase 7 still requires scalable offline artifacts and the larger target | Codex implementation agent; reviewer pending |
 | P1-D04 | 2026-07-16 | 1 | Keep Phase 1 Float64 oracle/preprocessing on CPU JavaScript and per-frame work on WebGPU; do not add WASM | WASM does not improve the GPU-resident loop and large in-browser sparse preprocessing is outside this phase | Reconsider only for arbitrary large user meshes; fixed large scenes should load offline artifacts | Codex implementation agent; reviewer pending |
+| P1-D05 | 2026-07-16 | 1 | Define the current P1-EC-11 parity set as the versioned nonlinear Cubature fixture, require T>K and both Float64/f32 candidate rank >K, and fail stable preprocessing closed above 1% | The material-only single-tet oracle is not a sparse-Cubature fixture, while the 12-tet edge-constrained fixture has rank 12 and nonzero K=6 approximation error; future stable parity scenes cannot silently inherit this result | Every future stable parity scene must be added to the Cubature manifest or carry its own equivalent gate; unsuitable automatic preprocessing throws instead of shipping low-quality weights | Codex implementation agent; independent architecture and gate audits |
 
 ## Blocker log
 

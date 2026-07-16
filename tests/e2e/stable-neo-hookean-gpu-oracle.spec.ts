@@ -614,8 +614,30 @@ test("P1-FRAME-01: GPU vertex frames are scale-invariant polar averages of defor
         expectedMotion: [0, 0, 0] as const,
       },
     };
-    const precomputed = cpuApi.buildPrecomputedScene(definition);
+    // This test isolates the vertex-frame construction on a deliberately
+    // dense 48-tet fixture. Precompute its rest-equivalent linear bases, then
+    // switch only the packed material parameters/tag to stable Neo-Hookean.
+    // Nonlinear Cubature itself has a separate quality-gated production E2E.
+    const preprocessingDefinition = {
+      ...definition,
+      materials: [
+        {
+          ...phase1.PHASE1_STABLE_NEO_HOOKEAN_MATERIAL,
+          model: "corotated-linear" as const,
+        },
+      ],
+    };
+    const precomputed = cpuApi.buildPrecomputedScene(preprocessingDefinition);
     const baseInput = scenes.toJGS2GpuInput(precomputed);
+    const stableParameters = cpuApi.computeStableNeoHookeanParameters(
+      phase1.PHASE1_STABLE_NEO_HOOKEAN_MATERIAL,
+    );
+    for (let tetrahedron = 0; tetrahedron < baseInput.tetCount; tetrahedron += 1) {
+      baseInput.tetMeta[tetrahedron * 4 + 1] = stableParameters.lambda;
+      baseInput.tetMeta[tetrahedron * 4 + 2] = stableParameters.mu;
+      baseInput.tetMeta[tetrahedron * 4 + 3] =
+        gpuApi.JGS2_MATERIAL_STABLE_NEO_HOOKEAN;
+    }
     const pose = new Float64Array(mesh.positions.length);
     const inputPositions = new Float32Array(baseInput.positions.length);
     for (let vertex = 0; vertex < mesh.positions.length / 3; vertex += 1) {

@@ -2,8 +2,8 @@
 
 This record freezes the Phase 1 material, feasibility, local-solve, convergence,
 performance, and CPU/GPU/WASM decisions. The exact CPU and WGSL material path,
-material dispatch, and deformation frames are implemented; the globalization
-and nonlinear Cubature sections remain implementation contracts.
+material dispatch, deformation frames, and nonlinear Cubature preprocessing
+are implemented. Globalization remains an implementation contract.
 
 ## Primary sources
 
@@ -123,8 +123,57 @@ deformation gradients, divides by total incident rest volume, then uses seven
 fixed `f32` polar iterations. The frozen non-affine fixture is scaled to `0.01`
 of its nominal dimensions to enforce scale invariance; hardware matches the
 Float64 CPU frames with maximum relative error `8.702e-8`. Its production
-stable solve remains finite with minimum `J = 0.9394`; both observations use
-explicit test-only readbacks.
+stable-kernel diagnostic uses rest-equivalent linear basis preprocessing before
+switching the packed material tag to stable; that runtime solve remains finite
+with minimum `J = 0.9394`. Both observations use explicit test-only readbacks.
+
+## Nonlinear equilibrium bases and Cubature
+
+The stable path keeps the equilibrium basis built from the model's rest
+implicit Hessian, then applies the paper's current co-rotation (Eq. 14) at each
+training, validation, and runtime pose:
+
+```text
+B_vi(x) = R_v(x) Ubar_vi transpose(R_i(x)).
+```
+
+For every tetrahedron, preprocessing evaluates the current stable
+Neo-Hookean gradient and exact tangent, adds that element's incident share of
+the inertial gradient and Hessian, and projects both through `B`. If the source
+vertex belongs to the tetrahedron, its direct 3-vector and 3-by-3 block are
+subtracted from the projected candidate because the runtime gathers those
+terms exactly. Consequently, source plus all candidates with unit weight
+matches `B^T g` and `B^T H B`; an independent dense CPU oracle checks both to
+relative error below `1e-12`.
+
+The deterministic v1 training corpus uses both signs of up to eight
+low-frequency rest-Hessian modes. A direction is normalized by the larger of
+its maximum tetrahedron displacement-gradient Frobenius norm and maximum
+vertex displacement divided by scene scale, then given amplitude `0.12`.
+Eight held-out modal mixtures use the training modes plus four validation-only
+modes, amplitudes `0.06` and `0.18`, and an implicit target at one quarter of
+the displacement. Each unconstrained connected component first removes its
+own rigid displacement subspace; wholly unconstrained validation meshes then
+add four exact global rotations. Every corpus pose
+must have `min J >= 0.5`.
+
+Following Eq. 18, every nontrivial pose target is normalized before a
+deterministic nonnegative least-squares selector retains at most the scene's
+four or six candidates. Cancellation-dominated targets are rejected. The
+acceptance gates use the data actually packed for the runtime: weights and
+rest basis blocks are round-tripped through `f32`, and packed columns are
+measured against the original Float64 target so packing drift cannot cancel.
+The normalized training residual must be at most `1%`, and the unregularized selected-update RMS must
+be at most `2%` separately on training, held-out, and combined poses. The
+versioned inputs and expected packed selection are frozen in
+`manifests/phase1-cubature.v1.json`.
+
+The checked-in capability fixture is intentionally one 12-tetrahedron,
+edge-constrained solid. Every source has 12 full-rank candidates and retains
+six, so it proves nonlinear projection, training, packing, and the production
+shader path under genuine approximation. It does not claim preprocessing scale.
+Larger fixed scenes should consume offline artifacts; arbitrary large browser
+meshes need the later sparse-preprocessing work.
 
 ## Local positive-definite treatment
 

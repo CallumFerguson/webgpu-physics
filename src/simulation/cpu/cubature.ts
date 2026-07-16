@@ -12,10 +12,45 @@ import type {
   TetrahedralMesh,
 } from "./types";
 
-interface CandidateColumn {
-  readonly tetrahedron: number;
+interface IndexedCandidateColumn {
+  /** Original input order. It is also the deterministic tie-break key. */
+  readonly sourceIndex: number;
   readonly values: Float64Array;
 }
+
+export interface GreedyNonnegativeColumnSelectionOptions {
+  /** Candidate columns in deterministic tie-break order. */
+  readonly columns: readonly ArrayLike<number>[];
+  /** The stacked training target approximated by a nonnegative column sum. */
+  readonly target: ArrayLike<number>;
+  readonly maximumColumns: number;
+  /** Stop growing once ||residual|| / ||target|| is below this value. */
+  readonly normalizedResidualTolerance?: number;
+  /** Deterministic one-for-one replacement passes after greedy growth. */
+  readonly refinementPasses?: number;
+}
+
+export interface GreedyNonnegativeColumnSelection {
+  /** Indices into the original `columns` array, in selected-slot order. */
+  readonly selectedColumnIndices: readonly number[];
+  /** One nonnegative weight per selected column. */
+  readonly weights: Float64Array;
+  readonly targetNorm: number;
+  readonly residualNorm: number;
+  readonly normalizedResidual: number;
+  readonly residualVector: Float64Array;
+}
+
+export interface NonnegativeColumnFit {
+  readonly weights: Float64Array;
+  readonly residualVector: Float64Array;
+  readonly residualNorm: number;
+  readonly normalizedResidual: number;
+}
+
+const DEFAULT_NORMALIZED_RESIDUAL_TOLERANCE = 0.01;
+const DEFAULT_REFINEMENT_PASSES = 4;
+const MAXIMUM_EXHAUSTIVE_NNLS_COLUMNS = 12;
 
 function canonicalizeVectorSign(vector: Float64Array): void {
   let largestIndex = 0;
@@ -348,7 +383,7 @@ function computeResidual(
   return residual;
 }
 
-/** Exhaustive active-set NNLS; selected sets never exceed six columns. */
+/** Exhaustive active-set NNLS for the selector's deliberately small sets. */
 function solveSmallNnls(
   columns: readonly Float64Array[],
   target: Float64Array,
@@ -402,6 +437,257 @@ function solveSmallNnls(
   }
 
   return bestWeights;
+}
+
+function requireNonnegativeInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${label} must be a nonnegative safe integer.`);
+  }
+  return value;
+}
+
+function requireFiniteVector(
+  value: ArrayLike<number>,
+  expectedLength: number | undefined,
+  label: string,
+): Float64Array {
+  if (expectedLength === undefined && value.length === 0) {
+    throw new RangeError(`${label} must not be empty.`);
+  }
+  if (expectedLength !== undefined && value.length !== expectedLength) {
+    throw new RangeError(
+      `${label} must contain ${expectedLength} entries; received ${value.length}.`,
+    );
+  }
+  // Reuse the native training representation without duplicating potentially
+  // large stacked column matrices. The selector never mutates its inputs.
+  const result =
+    value instanceof Float64Array ? value : Float64Array.from(value);
+  for (let index = 0; index < result.length; index += 1) {
+    if (!Number.isFinite(result[index])) {
+      throw new RangeError(`${label}[${index}] must be finite.`);
+    }
+  }
+  return result;
+}
+
+/** Exact active-set NNLS for a caller-supplied set of at most 12 columns. */
+export function fitNonnegativeColumnWeights(
+  columns: readonly ArrayLike<number>[],
+  targetValues: ArrayLike<number>,
+): NonnegativeColumnFit {
+  const target = requireFiniteVector(targetValues, undefined, "NNLS target");
+  if (columns.length > MAXIMUM_EXHAUSTIVE_NNLS_COLUMNS) {
+    throw new RangeError(
+      `Exact NNLS supports at most ${MAXIMUM_EXHAUSTIVE_NNLS_COLUMNS} columns.`,
+    );
+  }
+  const finiteColumns = columns.map((column, index) =>
+    requireFiniteVector(column, target.length, `NNLS column ${index}`),
+  );
+  const weights = solveSmallNnls(finiteColumns, target);
+  const residualVector = computeResidual(finiteColumns, weights, target);
+  const residualNorm = Math.sqrt(squaredNorm(residualVector));
+  const targetNorm = Math.sqrt(squaredNorm(target));
+  return {
+    weights,
+    residualVector,
+    residualNorm,
+    normalizedResidual: targetNorm > 1e-12 ? residualNorm / targetNorm : 0,
+  };
+}
+
+/**
+ * Deterministic greedy nonnegative column selection for stacked training data.
+ *
+ * Candidate order is semantically significant only for exact numerical ties:
+ * the lowest original index wins. Zero columns are ignored. The returned
+ * normalized residual is zero for a numerically zero target and one when a
+ * nonzero target has no usable candidate columns.
+ */
+export function selectGreedyNonnegativeColumns(
+  options: GreedyNonnegativeColumnSelectionOptions,
+): GreedyNonnegativeColumnSelection {
+  const target = requireFiniteVector(
+    options.target,
+    undefined,
+    "Selection target",
+  );
+  const maximumColumns = requireNonnegativeInteger(
+    options.maximumColumns,
+    "maximumColumns",
+  );
+  const refinementPasses = requireNonnegativeInteger(
+    options.refinementPasses ?? DEFAULT_REFINEMENT_PASSES,
+    "refinementPasses",
+  );
+  const normalizedResidualTolerance =
+    options.normalizedResidualTolerance ??
+    DEFAULT_NORMALIZED_RESIDUAL_TOLERANCE;
+  if (
+    !Number.isFinite(normalizedResidualTolerance) ||
+    normalizedResidualTolerance < 0 ||
+    normalizedResidualTolerance > 1
+  ) {
+    throw new RangeError(
+      "normalizedResidualTolerance must be finite and in [0, 1].",
+    );
+  }
+
+  const candidates: IndexedCandidateColumn[] = options.columns
+    .map((column, sourceIndex) => ({
+      sourceIndex,
+      values: requireFiniteVector(
+        column,
+        target.length,
+        `Selection column ${sourceIndex}`,
+      ),
+    }))
+    .filter((candidate) => squaredNorm(candidate.values) > 1e-18);
+  const selectionLimit = Math.min(maximumColumns, candidates.length);
+  if (selectionLimit > MAXIMUM_EXHAUSTIVE_NNLS_COLUMNS) {
+    throw new RangeError(
+      `Exhaustive NNLS supports at most ${MAXIMUM_EXHAUSTIVE_NNLS_COLUMNS} selected columns.`,
+    );
+  }
+
+  const targetNorm = Math.sqrt(squaredNorm(target));
+  if (targetNorm <= 1e-12) {
+    return {
+      selectedColumnIndices: [],
+      weights: new Float64Array(0),
+      targetNorm,
+      residualNorm: targetNorm,
+      normalizedResidual: 0,
+      residualVector: target.slice(),
+    };
+  }
+  if (candidates.length === 0 || selectionLimit === 0) {
+    return {
+      selectedColumnIndices: [],
+      weights: new Float64Array(0),
+      targetNorm,
+      residualNorm: targetNorm,
+      normalizedResidual: 1,
+      residualVector: target.slice(),
+    };
+  }
+
+  const selected: IndexedCandidateColumn[] = [];
+  let weights: Float64Array = new Float64Array(0);
+  let residual: Float64Array = target.slice();
+
+  for (let selection = 0; selection < selectionLimit; selection += 1) {
+    let best: IndexedCandidateColumn | undefined;
+    let bestWeights: Float64Array | undefined;
+    let bestResidual: Float64Array | undefined;
+    let bestError = squaredNorm(residual);
+    for (const candidate of candidates) {
+      if (selected.includes(candidate)) {
+        continue;
+      }
+      const trialSelection = [...selected, candidate];
+      const trialColumns = trialSelection.map((entry) => entry.values);
+      const trialWeights = solveSmallNnls(trialColumns, target);
+      const trialResidual = computeResidual(
+        trialColumns,
+        trialWeights,
+        target,
+      );
+      const trialError = squaredNorm(trialResidual);
+      if (
+        trialError < bestError - 1e-14 * Math.max(1, bestError) ||
+        (Math.abs(trialError - bestError) <=
+          1e-14 * Math.max(1, bestError) &&
+          best !== undefined &&
+          candidate.sourceIndex < best.sourceIndex)
+      ) {
+        best = candidate;
+        bestWeights = trialWeights;
+        bestResidual = trialResidual;
+        bestError = trialError;
+      }
+    }
+
+    if (!best || !bestWeights || !bestResidual) {
+      break;
+    }
+    selected.push(best);
+    weights = bestWeights;
+    residual = bestResidual;
+    if (
+      Math.sqrt(squaredNorm(residual)) / targetNorm <
+      normalizedResidualTolerance
+    ) {
+      break;
+    }
+  }
+
+  for (
+    let refinement = 0;
+    refinement < refinementPasses && selected.length > 0;
+    refinement += 1
+  ) {
+    let replacementSlot = -1;
+    let replacementCandidate: IndexedCandidateColumn | undefined;
+    let replacementWeights: Float64Array | undefined;
+    let replacementResidual: Float64Array | undefined;
+    let replacementError = squaredNorm(residual);
+
+    for (let slot = 0; slot < selected.length; slot += 1) {
+      for (const candidate of candidates) {
+        if (selected.includes(candidate)) {
+          continue;
+        }
+        const trialSelection = selected.slice();
+        trialSelection[slot] = candidate;
+        const trialColumns = trialSelection.map((entry) => entry.values);
+        const trialWeights = solveSmallNnls(trialColumns, target);
+        const trialResidual = computeResidual(
+          trialColumns,
+          trialWeights,
+          target,
+        );
+        const trialError = squaredNorm(trialResidual);
+        if (
+          trialError <
+            replacementError - 1e-14 * Math.max(1, replacementError) ||
+          (Math.abs(trialError - replacementError) <=
+            1e-14 * Math.max(1, replacementError) &&
+            replacementCandidate !== undefined &&
+            candidate.sourceIndex < replacementCandidate.sourceIndex)
+        ) {
+          replacementSlot = slot;
+          replacementCandidate = candidate;
+          replacementWeights = trialWeights;
+          replacementResidual = trialResidual;
+          replacementError = trialError;
+        }
+      }
+    }
+
+    if (
+      replacementSlot < 0 ||
+      !replacementCandidate ||
+      !replacementWeights ||
+      !replacementResidual
+    ) {
+      break;
+    }
+    selected[replacementSlot] = replacementCandidate;
+    weights = replacementWeights;
+    residual = replacementResidual;
+  }
+
+  const residualNorm = Math.sqrt(squaredNorm(residual));
+  return {
+    selectedColumnIndices: selected.map((candidate) => candidate.sourceIndex),
+    weights,
+    targetNorm,
+    residualNorm,
+    normalizedResidual: residualNorm / targetNorm,
+    residualVector: residual,
+  };
 }
 
 function copyTetBasisBlocks(
@@ -497,130 +783,37 @@ export function selectCubatureSamples(
     }
   }
 
-  const candidates: CandidateColumn[] = candidateTetrahedra
-    .map((tetrahedron, index) => ({
-      tetrahedron,
-      values: rawColumns[index]!,
-    }))
-    .filter((candidate) => squaredNorm(candidate.values) > 1e-18);
   const targetNorm = Math.sqrt(squaredNorm(target));
-  if (targetNorm <= 1e-12 || candidates.length === 0) {
+  if (
+    targetNorm <= 1e-12 ||
+    !rawColumns.some((column) => squaredNorm(column) > 1e-18)
+  ) {
     return { samples: [], residual: 0 };
   }
-
-  const selected: CandidateColumn[] = [];
-  let weights: Float64Array = new Float64Array(0);
-  let residual: Float64Array = target.slice();
-
-  for (
-    let selection = 0;
-    selection < Math.min(maximumSamples, candidates.length);
-    selection += 1
-  ) {
-    let best: CandidateColumn | undefined;
-    let bestWeights: Float64Array | undefined;
-    let bestResidual: Float64Array | undefined;
-    let bestError = squaredNorm(residual);
-    for (const candidate of candidates) {
-      if (selected.includes(candidate)) {
-        continue;
-      }
-      const trialSelection = [...selected, candidate];
-      const trialColumns = trialSelection.map((entry) => entry.values);
-      const trialWeights = solveSmallNnls(trialColumns, target);
-      const trialResidual = computeResidual(
-        trialColumns,
-        trialWeights,
-        target,
-      );
-      const trialError = squaredNorm(trialResidual);
-      if (
-        trialError < bestError - 1e-14 * Math.max(1, bestError) ||
-        (Math.abs(trialError - bestError) <= 1e-14 * Math.max(1, bestError) &&
-          best !== undefined &&
-          candidate.tetrahedron < best.tetrahedron)
-      ) {
-        best = candidate;
-        bestWeights = trialWeights;
-        bestResidual = trialResidual;
-        bestError = trialError;
-      }
-    }
-
-    if (!best || !bestWeights || !bestResidual) {
-      break;
-    }
-    selected.push(best);
-    weights = bestWeights;
-    residual = bestResidual;
-    if (Math.sqrt(squaredNorm(residual)) / targetNorm < 0.01) {
-      break;
-    }
-  }
-
-  for (let refinement = 0; refinement < 4 && selected.length > 0; refinement += 1) {
-    let replacementSlot = -1;
-    let replacementCandidate: CandidateColumn | undefined;
-    let replacementWeights: Float64Array | undefined;
-    let replacementResidual: Float64Array | undefined;
-    let replacementError = squaredNorm(residual);
-
-    for (let slot = 0; slot < selected.length; slot += 1) {
-      for (const candidate of candidates) {
-        if (selected.includes(candidate)) {
-          continue;
-        }
-        const trialSelection = selected.slice();
-        trialSelection[slot] = candidate;
-        const trialColumns = trialSelection.map((entry) => entry.values);
-        const trialWeights = solveSmallNnls(trialColumns, target);
-        const trialResidual = computeResidual(
-          trialColumns,
-          trialWeights,
-          target,
-        );
-        const trialError = squaredNorm(trialResidual);
-        if (
-          trialError <
-            replacementError - 1e-14 * Math.max(1, replacementError) ||
-          (Math.abs(trialError - replacementError) <=
-            1e-14 * Math.max(1, replacementError) &&
-            replacementCandidate !== undefined &&
-            candidate.tetrahedron < replacementCandidate.tetrahedron)
-        ) {
-          replacementSlot = slot;
-          replacementCandidate = candidate;
-          replacementWeights = trialWeights;
-          replacementResidual = trialResidual;
-          replacementError = trialError;
-        }
-      }
-    }
-
-    if (
-      replacementSlot < 0 ||
-      !replacementCandidate ||
-      !replacementWeights ||
-      !replacementResidual
-    ) {
-      break;
-    }
-    selected[replacementSlot] = replacementCandidate;
-    weights = replacementWeights;
-    residual = replacementResidual;
-  }
+  const selection = selectGreedyNonnegativeColumns({
+    columns: rawColumns,
+    target,
+    maximumColumns: maximumSamples,
+  });
 
   const samples: CubatureSample[] = [];
-  for (let index = 0; index < selected.length; index += 1) {
-    const weight = weights[index]!;
+  for (
+    let index = 0;
+    index < selection.selectedColumnIndices.length;
+    index += 1
+  ) {
+    const tetrahedron = candidateTetrahedra[
+      selection.selectedColumnIndices[index]!
+    ]!;
+    const weight = selection.weights[index]!;
     if (weight > 1e-10) {
       samples.push({
-        tetrahedron: selected[index]!.tetrahedron,
+        tetrahedron,
         weight,
         basisBlocks: copyTetBasisBlocks(
           mesh,
           exactBasis,
-          selected[index]!.tetrahedron,
+          tetrahedron,
         ),
       });
     }
@@ -628,6 +821,6 @@ export function selectCubatureSamples(
 
   return {
     samples,
-    residual: Math.sqrt(squaredNorm(residual)) / targetNorm,
+    residual: selection.normalizedResidual,
   };
 }

@@ -26,6 +26,15 @@ tolerances, and exact first/last corpus anchors. The executable corpus contains
 rest, three rigid rotations, determinants `0.5`, `0.1`, and `0.01`, shear,
 stretch, and 55 seeded positive-determinant states.
 
+Phase 1 nonlinear Cubature has its own additive
+[`manifests/phase1-cubature.v1.json`](../manifests/phase1-cubature.v1.json).
+It freezes the private 12-tetrahedron full-rank fixture, stable material and timestep,
+rest-Hessian mode settings, nonlinear training and held-out corpus protocol,
+determinant floor, packed-f32 residual/update tolerances, exact pose anchors,
+and the expected selected tetrahedra and packed weights for every active
+source. This small fixture establishes algorithm and CPU/GPU data-path parity;
+it is not a large-scene performance artifact.
+
 ## Validation
 
 `src/reproducibility/manifests.test.ts` parses both JSON files through the
@@ -42,6 +51,14 @@ floor, packed Cubature width, and corpus anchors to `src/scenes/phase1.ts`.
 Diagnostic-only settings such as exact-all evaluation, zero floor stiffness,
 and parity mode are asserted directly. Material ABI tests also require the
 stable material tag and converted Lamé constants to survive CPU-to-GPU packing.
+
+`src/reproducibility/phase1-cubature-manifest.test.ts` validates the nonlinear
+Cubature schema and binds it to the executable fixture, corpus constants and
+anchors, thresholds, and packed preprocessing output. It rejects malformed
+thresholds, pose anchors, and non-f32 expected weights. The numerical tests
+then independently enforce the all-element dense projection identity,
+nonnegative selection, packed training residual, held-out unregularized update
+RMS, and production WebGPU update parity.
 
 `scripts/verify-baseline-tests.mjs` independently asks Vitest and Playwright to
 list the tests they actually collect, then matches every frozen source and
@@ -102,6 +119,17 @@ readbacks. These additive tests do not alter the frozen Phase 0 counts.
 The completed GPU material/frame milestone gate passed 106 unit tests, the
 production build, frozen selector verification at 26/106 unit and 7/16 E2E,
 and all 16 hardware E2E tests with zero skips.
+
+The nonlinear Cubature capability evidence is recorded in
+[`docs/evidence/phase1-nonlinear-cubature.md`](evidence/phase1-nonlinear-cubature.md).
+Its focused production WebGPU run covers six training/held-out shapes and uses
+two explicit test-only readbacks per shape (predicted and solved positions);
+normal simulation retains the no-readback GPU-resident contract.
+The completion gate passed 134 unit tests, the production build, frozen
+selector verification at 26/134 unit and 7/17 E2E, and all 17 hardware E2E
+tests with zero skips. The corrected two-iteration Cubature oracle reported
+maximum update error `2.113e-9` and predictor error `1.683e-9`; the unchanged
+stress timing test reported `p95 = 4.9 ms`.
 
 ## Precomputation artifacts
 

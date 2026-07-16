@@ -6,7 +6,8 @@ small procedural tetrahedral scenes. It uses implicit Euler, a vertex-sized
 Jacobi subproblem, and the paper's precomputed perturbation bases and Cubature
 projection. The runtime can evaluate either the original co-rotated linear
 regression material or the paper's stable Neo-Hookean energy and exact current
-tangent. Nonlinear Cubature training and globalization remain Phase 1 work.
+tangent. The stable path now trains and validates nonlinear current-pose
+Cubature; globalization remains Phase 1 work.
 
 ## Algorithm mapping
 
@@ -34,17 +35,32 @@ selected remainder elements into the three-dimensional basis, and solves
 ```
 
 The GPU ABI has four or six fixed sample slots per movable vertex; zero-weight
-slots remain empty when NNLS retains fewer positive tetrahedra.
-Deterministic low-frequency training deformations are normalized as in the
-paper; a greedy search repeatedly solves the resulting small nonnegative least
-squares problem. Only nonnegative weights and the selected four `3 x 3` basis
-blocks are uploaded.
+slots remain empty when NNLS retains fewer positive tetrahedra. The legacy
+co-rotated-linear path trains candidates from the constant quadratic rest
+system. The stable path instead evaluates every candidate from the current
+stable Neo-Hookean gradient and tangent at deterministic low-mode nonlinear
+poses while applying `R_v Ubar_vi R_i^T`. A greedy search repeatedly solves
+the stacked nonnegative least-squares problem from Eq. 18. Only nonnegative
+weights and the selected rest-basis blocks are uploaded; current rotations are
+computed on the GPU.
 
 Every tetrahedron may be a remainder candidate. For an incident tetrahedron,
 training and WGSL subtract its source gradient and diagonal Hessian block from
 the full basis projection, because those terms were already gathered exactly;
 neighbor and cross terms from that same tet remain. This makes the local term
-plus all candidates reproduce the exact projected quadratic system.
+plus all candidates reproduce the exact projected system for either material.
+The nonlinear CPU oracle verifies the stable path against independently
+assembled `B^T g` and `B^T H B`, not a linearized `-displacement` identity.
+
+The stable training corpus uses both signs of up to eight rest-Hessian modes,
+eight held-out modal mixtures with different amplitudes and inertial targets,
+component-wise rigid-mode removal for free bodies, and rigidly rotated held-out
+cases when the whole mesh is unconstrained. Poses are
+deformation-gradient normalized and must keep `min J >= 0.5`. Runtime-packed
+`f32` data gates both the `<=1%` training residual and `<=2%` selected-versus-
+exact update RMS. The production WebGPU parity test then starts from selected
+training and validation shapes and compares one real solver iteration against
+the packed CPU reference.
 
 The paper does not specify several reproducibility details, including the exact
 local/complementary energy split, training-pose amplitudes, the rule used to
@@ -56,7 +72,7 @@ against a dense CPU oracle on tiny systems.
 
 | Location | Work | Reason |
 | --- | --- | --- |
-| CPU, once per scene | Procedural mesh construction, rest tetrahedral data, lumped masses, dense rest-Hessian Cholesky, equilibrium bases, Cubature training, and buffer packing | These tasks are irregular, use double precision, and are amortized over the scene. This mirrors the paper's CPU preprocessing. |
+| CPU, once per scene | Procedural mesh construction, rest tetrahedral data, lumped masses, dense rest-Hessian Cholesky, equilibrium bases, nonlinear pose generation, Cubature training, and buffer packing | These tasks are irregular, use double precision, and are amortized over the scene. This mirrors the paper's CPU preprocessing. |
 | GPU, every frame | Implicit prediction, polar frames, co-rotated linear or stable Neo-Hookean current gradients and tangent products, Cubature projection, regularized `3 x 3` vertex solves, per-body horizontal COM correction, floor contact and tangential damping, velocity update, and surface rendering | These are uniform data-parallel kernels. State stays GPU-resident, with no per-frame position readback. |
 | CPU, tests only | Requested checkpoint readback and invariant calculation | A deliberate synchronization is useful for correctness but would distort real-time performance. |
 
@@ -104,11 +120,12 @@ threads. Fixed demo assets would be better precomputed offline.
 The implementation exercises the paper's JGS2 basis, co-rotation, Cubature,
 and parallel local solve. The Phase 1 material path now contains the corrected
 stable Neo-Hookean energy, stress, and exact current tangent on both CPU and
-GPU, plus CPU/GPU checks over a frozen 64-pose corpus. The four public scenes
-continue to use the legacy co-rotated-linear material until explicit labels,
-nonlinear
-Cubature, local line search, convergence diagnostics, and Phase 1 scenes meet
-their roadmap gates. Contact is an implicit quadratic ground penalty with
+GPU, plus CPU/GPU checks over a frozen 64-pose material corpus. Its nonlinear
+current-pose Cubature preprocessing, held-out local-update oracle, and
+two-iteration production GPU parity path are also complete. The four public scenes continue
+to use the legacy co-rotated-linear material until explicit labels, local line
+search, convergence diagnostics, and Phase 1 scenes meet their roadmap gates.
+Contact is an implicit quadratic ground penalty with
 simple grounded viscous damping.
 Full incremental potential contact would additionally require broad-phase
 collision detection, continuous collision detection, barrier derivatives,
@@ -119,7 +136,10 @@ The browser demos are correctness and real-time demonstrations, not a
 reproduction of the paper's million-element benchmark. The dense educational
 precomputation deliberately caps scene size. A production path would generate
 sparse, precomputed binary assets offline and keep the same GPU runtime layout.
-The paper reports less than 1% Cubature training residual for its large meshes;
-these tiny scenes keep the same four/six-sample budget but use a relaxed fit.
-The exact all-candidate oracle matches the global Newton block, and the selected
-minimal K=4 solve is within roughly 1.5% RMS on its low-mode training set.
+The paper reports less than 1% Cubature training residual for its large meshes.
+The stable capability fixture enforces the same threshold after `f32` packing
+and also enforces a 2% held-out update-RMS threshold. It selects six of 12
+full-rank candidates, but does not establish large-mesh preprocessing
+scalability. The legacy
+public scenes retain their earlier regression thresholds until they are
+replaced by explicitly labeled stable scenes.

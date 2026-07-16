@@ -48,6 +48,8 @@ export {
 } from "./canonical-phase0";
 
 export {
+  PHASE1_NONLINEAR_CUBATURE_FIXTURE_ID,
+  PHASE1_NONLINEAR_CUBATURE_MATERIAL,
   PHASE1_STABLE_NEO_HOOKEAN_COMPRESSION_DETERMINANTS,
   PHASE1_STABLE_NEO_HOOKEAN_CORPUS_CASE_COUNT,
   PHASE1_STABLE_NEO_HOOKEAN_CORPUS_ID,
@@ -58,6 +60,7 @@ export {
   PHASE1_STABLE_NEO_HOOKEAN_REST_POSITIONS,
   PHASE1_STABLE_NEO_HOOKEAN_TIMESTEP,
   buildPhase1StableNeoHookeanOracleDefinition,
+  buildPhase1NonlinearCubatureDefinition,
   generatePhase1StableNeoHookeanPoseCorpus,
   type Phase1StableNeoHookeanPose,
 } from "./phase1";

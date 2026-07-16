@@ -8,8 +8,8 @@ The app builds a tetrahedral implicit-Euler problem, precomputes the paper's
 globally aware local perturbation bases and nonnegative Cubature weights, then
 runs vertex solves entirely in WebGPU compute shaders. The runtime includes
 co-rotated linear regression material and a CPU/GPU-validated stable
-Neo-Hookean current material path. The same GPU position buffer is rendered
-directly with no per-frame readback.
+Neo-Hookean current material path with nonlinear current-pose Cubature. The
+same GPU position buffer is rendered directly with no per-frame readback.
 
 ## Run it
 
@@ -57,10 +57,12 @@ Ubar_i = Y_i (S_i Y_i)^-1.
 ```
 
 This is the paper's full-coordinate form of
-`U_Ci = -H_CC^-1 H_Ci` (equations 19-23). Eight low-frequency modes of the
-rest Hessian train a deterministic greedy NNLS Cubature set. The demos retain
-up to four or six positive samples per vertex in fixed-width GPU slots and
-discard the dense bases.
+`U_Ci = -H_CC^-1 H_Ci` (equations 19-23). For stable Neo-Hookean solids, both
+signs of up to eight low-frequency rest-Hessian modes generate current-pose
+training shapes. At every shape, candidates use the current material gradient,
+exact tangent, and co-rotated basis `R_v Ubar_vi R_i^T`. A deterministic greedy
+NNLS fit implements equation 18. The runtime retains up to four or six positive
+samples per vertex in fixed-width GPU slots and discards the dense bases.
 
 Each runtime Jacobi invocation owns one vertex and solves equation 15:
 
@@ -87,14 +89,18 @@ gradient, and local Hessian data against that CPU reference, and compare all
 64 poses times three active vertex blocks against the CPU equilibrium oracle.
 Other tests check `S_i Ubar_i = I`, complementary equilibrium, ordered low
 modes, nonnegative Cubature, mass conservation, surface topology, and
-deterministic scene packing.
+deterministic scene packing. The stable Cubature gate additionally requires
+source plus all current candidates to reproduce an independently assembled
+`B^T g` and `B^T H B`, a `<=1%` normalized training residual after `f32`
+packing, and `<=2%` selected-versus-exact update RMS on both training and
+held-out shapes. A production WebGPU test mirrors two exact Jacobi iterations,
+including a nonzero inertial-gradient second pass, against the packed CPU
+reference.
 
-The four/six-sample cap is intentionally the paper's runtime budget, not a
-claim that these tiny educational meshes reproduce its reported sub-1% raw
-Cubature training residual. The implementation validates the more decisive
-quantity too: local plus all remainder candidates matches the global Newton
-block, while the selected K=4 minimal-scene basis has about 1.5% RMS update
-error across the eight training modes.
+The checked-in nonlinear capability fixture has 12 full-rank candidates per
+source and retains six. It proves the paper's nonlinear calculations and data
+flow under genuine approximation, but it does not claim the preprocessing
+scale of the paper's large examples.
 
 ## CPU, GPU, and WASM tradeoff
 
@@ -150,12 +156,13 @@ commands, frozen manifests, criteria, and results.
 This repository implements the JGS2 basis, co-rotation, Cubature, and parallel
 local-solve design. Its corrected stable Neo-Hookean CPU reference and WGSL
 energy, stress, exact current tangent, material dispatch, and deformation-frame
-construction pass the Phase 1 CPU/GPU oracle corpus. The four visible demos
-still use the legacy co-rotated-linear path. Explicit in-app material labels,
-nonlinear Cubature,
-globalization, convergence controls, forces/handles, and stable-material demo
-gates remain before the project claims the paper's complete nonlinear solid
-capability.
+construction pass the Phase 1 CPU/GPU oracle corpus. Nonlinear current-pose
+Cubature training, held-out update validation, `f32` packing, and production
+GPU update parity also pass on the private capability fixture. The four visible
+demos still use the legacy co-rotated-linear path. Explicit in-app material
+labels, globalization, convergence controls, forces/handles, and stable-
+material demo gates remain before the project claims the paper's complete
+nonlinear solid capability.
 
 Contact here is an implicit quadratic ground penalty with simple viscous
 tangential damping for grounded vertices. It is not a Coulomb friction model.

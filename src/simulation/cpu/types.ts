@@ -70,7 +70,18 @@ export interface VertexPrecomputation {
   /** (S_i H^-1 S_i^T)^-1, row-major 3 by 3. */
   readonly schurInverse: Float64Array;
   readonly cubature: readonly CubatureSample[];
+  /** Explicit when preprocessing selected a material-specific trainer. */
+  readonly cubatureModel?: ElasticMaterialModel;
+  /** Float64 fit before runtime f32 packing, when separately measured. */
+  readonly trainingResidualF64?: number;
+  /** Runtime-packed residual for nonlinear Cubature; legacy f64 residual otherwise. */
   readonly trainingResidual: number;
+  readonly validTrainingPoseCount?: number;
+  readonly trivialTrainingPoseCount?: number;
+  readonly nonzeroTrainingCandidateCount?: number;
+  readonly trainingColumnRank?: number;
+  readonly packedNonzeroTrainingCandidateCount?: number;
+  readonly packedTrainingColumnRank?: number;
 }
 
 export interface SimulationSettings {
