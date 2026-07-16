@@ -54,7 +54,7 @@ against a dense CPU oracle on tiny systems.
 | Location | Work | Reason |
 | --- | --- | --- |
 | CPU, once per scene | Procedural mesh construction, rest tetrahedral data, lumped masses, dense rest-Hessian Cholesky, equilibrium bases, Cubature training, and buffer packing | These tasks are irregular, use double precision, and are amortized over the scene. This mirrors the paper's CPU preprocessing. |
-| GPU, every frame | Implicit prediction, polar frames, co-rotated element gradients and Hessian products, Cubature projection, regularized `3 x 3` vertex solves, floor contact, velocity update, and surface rendering | These are uniform data-parallel kernels. State stays GPU-resident, with no per-frame position readback. |
+| GPU, every frame | Implicit prediction, polar frames, co-rotated element gradients and Hessian products, Cubature projection, regularized `3 x 3` vertex solves, per-body horizontal COM correction, floor contact and tangential damping, velocity update, and surface rendering | These are uniform data-parallel kernels. State stays GPU-resident, with no per-frame position readback. |
 | CPU, tests only | Requested checkpoint readback and invariant calculation | A deliberate synchronization is useful for correctness but would distort real-time performance. |
 
 WebAssembly is intentionally absent. It cannot improve the GPU-resident frame
@@ -79,6 +79,14 @@ threads. Fixed demo assets would be better precomputed offline.
   diagonal shift and maximum update length keep malformed `f32` systems finite.
 - Vertex subproblems gather incident elements through CSR. This avoids relying
   on floating-point atomics, which are not part of core WebGPU.
+- A free body's solved mass-weighted x/z center is translated to its predicted
+  center before velocity finalization. This projects out net translation
+  injected by finite independent local solves while preserving legitimate
+  predicted motion. Bodies containing fixed vertices are excluded. The current
+  `O(bodyCount * vertexCount)` pass is intended for these demo-scale scenes.
+- Vertices within the floor contact margin receive viscous tangential velocity
+  retention `exp(-12 * dt)`. This is timestep-independent ground drag, not a
+  Coulomb static/kinetic friction law.
 - The precomputed basis and weights are timestep-specific; the public solver
   rejects a runtime timestep that is not f32-equivalent to the training value.
 - The solver uses an odd number of ping-pong Jacobi iterations so the final
@@ -92,10 +100,11 @@ threads. Fixed demo assets would be better precomputed offline.
 The implementation exercises the paper's JGS2 basis, co-rotation, Cubature,
 and parallel local solve. The material is co-rotated linear elasticity rather
 than the stable Neo-Hookean model used in the paper's largest examples. Contact
-is an implicit quadratic ground penalty. Full incremental potential contact
-would additionally require broad-phase collision detection, continuous
-collision detection, barrier derivatives, friction, and a collision-safe line
-search; none of those are silently approximated or claimed here.
+is an implicit quadratic ground penalty with simple grounded viscous damping.
+Full incremental potential contact would additionally require broad-phase
+collision detection, continuous collision detection, barrier derivatives,
+Coulomb friction, and a collision-safe line search; none of those are silently
+approximated or claimed here.
 
 The browser demos are correctness and real-time demonstrations, not a
 reproduction of the paper's million-element benchmark. The dense educational

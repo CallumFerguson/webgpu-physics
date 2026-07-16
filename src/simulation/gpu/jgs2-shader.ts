@@ -22,13 +22,13 @@ struct TetStatic {
 }
 
 struct SimParams {
-  // vertex count, tet count, cubature K, reserved
+  // vertex count, tet count, cubature K, body count
   counts: vec4u,
   // posA, posB, predicted, velocity offsets in vec4 elements
   offsets0: vec4u,
   // old, vertex rotation, tet rotation, iteration source position
   offsets1: vec4u,
-  // iteration target position, remaining fields reserved
+  // iteration target position, per-body horizontal correction, reserved
   offsets2: vec4u,
   // dt, inverse dt, inverse dt squared, maximum local step
   time: vec4f,
@@ -36,6 +36,8 @@ struct SimParams {
   gravityFloor: vec4f,
   // floor stiffness, relative regularization, polar epsilon, velocity damping
   solver: vec4f,
+  // grounded tangential damping rate (s^-1), contact margin, reserved
+  contact: vec4f,
 }
 
 @group(0) @binding(0)
@@ -502,6 +504,61 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
+fn bodyHorizontalCorrection(@builtin(global_invocation_id) globalId: vec3u) {
+  let body = globalId.x;
+  if (body >= params.counts.w) {
+    return;
+  }
+
+  var totalMass = 0.0;
+  var solvedMoment = vec2f(0.0);
+  var predictedMoment = vec2f(0.0);
+  var hasPinnedVertex = false;
+  for (var vertex = 0u; vertex < params.counts.x; vertex += 1u) {
+    let item = vertexData[vertex];
+    if (item.info.w != body) {
+      continue;
+    }
+    hasPinnedVertex = hasPinnedVertex || item.info.z != 0u;
+    let mass = max(item.restMass.w, 0.0);
+    let solved = loadPosition(params.offsets0.x, vertex);
+    let predicted = loadPosition(params.offsets0.z, vertex);
+    totalMass += mass;
+    solvedMoment += mass * solved.xz;
+    predictedMoment += mass * predicted.xz;
+  }
+
+  var correction = vec2f(0.0);
+  // Anchored bodies can exchange horizontal momentum with their constraints;
+  // correcting them would fight the fixed vertices. Free bodies, however,
+  // have no external horizontal force on the level frictionless penalty plane.
+  if (!hasPinnedVertex && totalMass > 0.0) {
+    correction = (predictedMoment - solvedMoment) / totalMass;
+  }
+  dynamicData[params.offsets2.y + body] =
+    vec4f(correction.x, 0.0, correction.y, 0.0);
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE)
+fn applyBodyHorizontalCorrection(
+  @builtin(global_invocation_id) globalId: vec3u,
+) {
+  let vertex = globalId.x;
+  if (vertex >= params.counts.x || vertexData[vertex].info.z != 0u) {
+    return;
+  }
+  let body = vertexData[vertex].info.w;
+  if (body >= params.counts.w) {
+    return;
+  }
+  let correction = dynamicData[params.offsets2.y + body].xz;
+  var position = dynamicData[params.offsets0.x + vertex];
+  position.x += correction.x;
+  position.z += correction.y;
+  dynamicData[params.offsets0.x + vertex] = position;
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE)
 fn finalize(@builtin(global_invocation_id) globalId: vec3u) {
   let vertex = globalId.x;
   if (vertex >= params.counts.x) {
@@ -516,7 +573,18 @@ fn finalize(@builtin(global_invocation_id) globalId: vec3u) {
   }
   let position = loadPosition(params.offsets0.x, vertex);
   let oldPosition = loadPosition(params.offsets1.x, vertex);
-  dynamicData[params.offsets0.w + vertex] =
-    vec4f((position - oldPosition) * params.time.y, 0.0);
+  var velocity = (position - oldPosition) * params.time.y;
+  // This is a simple grounded viscous-friction model, not Coulomb friction:
+  // it removes only tangential velocity and leaves the normal penalty intact.
+  if (
+    params.solver.x > 0.0 &&
+    params.contact.x > 0.0 &&
+    position.y <= params.gravityFloor.w + params.contact.y
+  ) {
+    let tangentialScale = exp(-params.contact.x * params.time.x);
+    velocity.x *= tangentialScale;
+    velocity.z *= tangentialScale;
+  }
+  dynamicData[params.offsets0.w + vertex] = vec4f(velocity, 0.0);
 }
 `;

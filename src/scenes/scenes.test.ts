@@ -7,6 +7,7 @@ import {
   buildScene,
   buildSceneDefinition,
   toJGS2GpuInput,
+  type SceneId,
 } from ".";
 
 describe("procedural demo scenes", () => {
@@ -68,4 +69,58 @@ describe("procedural demo scenes", () => {
     ]);
     expect([...firstGpu.cubatureBasis]).toEqual([...secondGpu.cubatureBasis]);
   });
+
+  it("packs dense body metadata and valid mass inputs for COM correction", () => {
+    const expectedBodyCounts: Record<SceneId, number> = {
+      minimal: 1,
+      stiffness: 2,
+      drop: 1,
+      stress: 6,
+    };
+    const expectedPinnedBodyCounts: Record<SceneId, number> = {
+      minimal: 1,
+      stiffness: 2,
+      drop: 0,
+      stress: 0,
+    };
+
+    for (const id of SCENE_IDS) {
+      const input = toJGS2GpuInput(buildScene(id));
+      const bodyIds = new Set<number>();
+      const bodyHasPinnedVertex: boolean[] = [];
+      const bodyMasses: number[] = [];
+      const weightedRestPositions: [number, number, number][] = [];
+
+      for (let vertex = 0; vertex < input.vertexCount; vertex += 1) {
+        const bodyId = input.vertexInfo[vertex * 4 + 3]!;
+        const mass = input.vertexRest[vertex * 4 + 3]!;
+        bodyIds.add(bodyId);
+        bodyHasPinnedVertex[bodyId] ||=
+          input.vertexInfo[vertex * 4 + 2] !== 0;
+        bodyMasses[bodyId] = (bodyMasses[bodyId] ?? 0) + mass;
+        const weighted = (weightedRestPositions[bodyId] ??= [0, 0, 0]);
+        for (let axis = 0; axis < 3; axis += 1) {
+          weighted[axis] += input.vertexRest[vertex * 4 + axis]! * mass;
+        }
+      }
+
+      const bodyCount = Math.max(...bodyIds) + 1;
+      expect(bodyCount).toBe(expectedBodyCounts[id]);
+      expect([...bodyIds].sort((left, right) => left - right)).toEqual(
+        Array.from({ length: bodyCount }, (_unused, bodyId) => bodyId),
+      );
+      expect(bodyHasPinnedVertex.filter(Boolean)).toHaveLength(
+        expectedPinnedBodyCounts[id],
+      );
+
+      for (let bodyId = 0; bodyId < bodyCount; bodyId += 1) {
+        const mass = bodyMasses[bodyId]!;
+        expect(Number.isFinite(mass)).toBe(true);
+        expect(mass).toBeGreaterThan(0);
+        for (const weightedCoordinate of weightedRestPositions[bodyId]!) {
+          expect(Number.isFinite(weightedCoordinate / mass)).toBe(true);
+        }
+      }
+    }
+  }, 20_000);
 });

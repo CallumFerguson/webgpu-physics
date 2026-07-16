@@ -70,7 +70,10 @@ evaluates complementary gradient and Hessian-vector products, performs a
 regularized `3 x 3` Cholesky solve, and writes to the opposite ping-pong region.
 No floating-point atomics or materialized `12 x 12` runtime Hessians are needed.
 Incident samples retain their neighbor/cross response while subtracting the
-source block already included by the exact local gather.
+source block already included by the exact local gather. A GPU post-pass
+restores every free body's mass-weighted horizontal center of mass to its
+predicted value, preventing finite local-solve errors from injecting net
+translation.
 
 The strongest CPU test is the exact quadratic oracle from equations 7-13: one
 local equilibrium-basis solve must equal the corresponding block of the global
@@ -91,8 +94,8 @@ error across the eight training modes.
   one dense Cholesky for these small demos, low modes, three-right-hand-side
   equilibrium solves, NNLS Cubature, and GPU buffer packing.
 - GPU every frame: implicit prediction, polar frames, co-rotated elasticity,
-  Cubature projection, local solves, floor penalty, velocity update, and
-  rendering.
+  Cubature projection, local solves, body momentum stabilization, floor
+  penalty with grounded tangential damping, velocity update, and rendering.
 - CPU in tests only: synchronized checkpoint readback for numeric invariants.
 
 WebAssembly is not used. It would not improve the GPU-resident hot loop and
@@ -129,11 +132,12 @@ local-solve design for co-rotated linear tetrahedral elasticity. The paper's
 largest examples use stable Neo-Hookean elasticity; this implementation does
 not claim that material model.
 
-Contact here is an implicit quadratic ground penalty. Full incremental
-potential contact would also require broad-phase collision detection,
-continuous collision detection, barrier derivatives, friction, and a
-collision-safe line search. The six-body scene therefore keeps bodies in
-separate lanes rather than implying unsupported body-body collision.
+Contact here is an implicit quadratic ground penalty with simple viscous
+tangential damping for grounded vertices. It is not a Coulomb friction model.
+Full incremental potential contact would also require broad-phase collision
+detection, continuous collision detection, barrier derivatives, Coulomb
+friction, and a collision-safe line search. The six-body scene therefore keeps
+bodies in separate lanes rather than implying unsupported body-body collision.
 
 The checked-in demos favor transparent, inspectable preprocessing over scale.
 For million-element scenes, use a sparse native/offline precompute and serialize

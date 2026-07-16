@@ -9,18 +9,27 @@ import {
 
 type Vec3 = readonly [number, number, number];
 
+interface JGS2BodyDiagnostics {
+  readonly bodyId: number;
+  readonly centerOfMass: Vec3;
+  readonly linearVelocity: Vec3;
+  readonly minY: number;
+}
+
 interface JGS2Diagnostics {
   readonly frame: number;
   readonly finite: boolean;
   readonly pinnedMaxError: number;
   readonly minTetDeterminant: number;
   readonly floorHeight: number;
+  readonly timestep: number;
   readonly bounds: {
     readonly min: Vec3;
     readonly max: Vec3;
   };
   readonly landmark: Vec3;
   readonly comparisonLandmark?: Vec3;
+  readonly bodies: readonly JGS2BodyDiagnostics[];
 }
 
 interface JGS2TestHarness {
@@ -80,6 +89,11 @@ const scenes = [
     minBoundsMotionFraction: 0.001,
   },
 ] as const satisfies readonly SceneCase[];
+
+const longRunScenes = [
+  { id: "drop", expectedBodyCount: 1 },
+  { id: "stress", expectedBodyCount: 6 },
+] as const;
 
 const test = base.extend<{ pageErrorGuard: void }>({
   pageErrorGuard: [
@@ -223,6 +237,141 @@ test.describe("deterministic JGS2 scenes", () => {
   }
 });
 
+test.describe("long-run settled body stability", () => {
+  for (const scene of longRunScenes) {
+    test(`${scene.id}: remains in its lane for 20 simulated seconds`, async ({
+      page,
+    }, testInfo) => {
+      await page.goto(`/?scene=${scene.id}&test=1`, {
+        waitUntil: "domcontentloaded",
+      });
+      await requireHardwareWebGPU(page, testInfo);
+      await waitForTestHarness(page);
+
+      const initial = await readDiagnostics(page);
+      assertDiagnostics(initial, 0, scene.id);
+      assertBodyCount(initial, scene.expectedBodyCount, scene.id);
+
+      const impactFrame = frameAtSeconds(initial.timestep, 1, scene.id);
+      await stepToFrame(page, 0, impactFrame);
+      const impact = await readDiagnostics(page);
+      assertDiagnostics(impact, impactFrame, scene.id);
+      assertBodyCount(impact, scene.expectedBodyCount, scene.id);
+
+      const settledFrame = frameAtSeconds(initial.timestep, 4, scene.id);
+      await stepToFrame(page, impactFrame, settledFrame);
+      const settled = await readDiagnostics(page);
+      assertDiagnostics(settled, settledFrame, scene.id);
+      assertBodyCount(settled, scene.expectedBodyCount, scene.id);
+
+      const finalFrame = frameAtSeconds(initial.timestep, 20, scene.id);
+      await stepToFrame(page, settledFrame, finalFrame);
+      const final = await readDiagnostics(page);
+      assertDiagnostics(final, finalFrame, scene.id);
+      assertBodyCount(final, scene.expectedBodyCount, scene.id);
+      await waitForCanvasPresentation(page);
+      await captureCanvas(page, testInfo, "settled-20s.png");
+
+      expect(final.floorHeight, `${scene.id} floor height must remain stable`).toBe(
+        initial.floorHeight,
+      );
+      expect(final.timestep, `${scene.id} timestep must remain stable`).toBe(
+        initial.timestep,
+      );
+      expect(
+        final.minTetDeterminant / initial.minTetDeterminant,
+        `${scene.id} tetrahedra must retain at least 1% of their initial minimum determinant over 20 seconds`,
+      ).toBeGreaterThan(0.01);
+      expect(
+        final.bounds.min[1],
+        `${scene.id} must not pass materially through the floor over 20 seconds`,
+      ).toBeGreaterThanOrEqual(final.floorHeight - 0.12);
+
+      const initialBodies = indexBodies(initial);
+      const impactBodies = indexBodies(impact);
+      const settledBodies = indexBodies(settled);
+      const finalBodies = indexBodies(final);
+
+      for (const [bodyId, initialBody] of initialBodies) {
+        const impactBody = requireBody(impactBodies, bodyId, scene.id, "1 second");
+        const settledBody = requireBody(
+          settledBodies,
+          bodyId,
+          scene.id,
+          "4 seconds",
+        );
+        const finalBody = requireBody(finalBodies, bodyId, scene.id, "20 seconds");
+
+        expect(
+          impactBody.minY,
+          `${scene.id} body ${bodyId} must have reached the floor by 1 second`,
+        ).toBeLessThanOrEqual(impact.floorHeight + 0.05);
+        expect(
+          settledBody.minY,
+          `${scene.id} body ${bodyId} must remain in floor contact at 4 seconds`,
+        ).toBeLessThanOrEqual(settled.floorHeight + 0.05);
+        expect(
+          finalBody.minY,
+          `${scene.id} body ${bodyId} must not penetrate the floor at 20 seconds`,
+        ).toBeGreaterThanOrEqual(final.floorHeight - 0.12);
+
+        const initialToFinalDrift = horizontalDistance(
+          initialBody.centerOfMass,
+          finalBody.centerOfMass,
+        );
+        const settledToFinalDrift = horizontalDistance(
+          settledBody.centerOfMass,
+          finalBody.centerOfMass,
+        );
+        expect(
+          initialToFinalDrift,
+          `${scene.id} body ${bodyId} must remain within its initial camera lane`,
+        ).toBeLessThanOrEqual(0.5);
+        expect(
+          settledToFinalDrift,
+          `${scene.id} body ${bodyId} horizontal COM drift from 4 to 20 seconds`,
+        ).toBeLessThanOrEqual(0.05);
+
+        const impactSpeed = horizontalSpeed(impactBody.linearVelocity);
+        const settledSpeed = horizontalSpeed(settledBody.linearVelocity);
+        const finalSpeed = horizontalSpeed(finalBody.linearVelocity);
+        expect(
+          settledSpeed,
+          `${scene.id} body ${bodyId} tangential speed must not accelerate after impact`,
+        ).toBeLessThanOrEqual(impactSpeed + 0.01);
+        expect(
+          finalSpeed,
+          `${scene.id} body ${bodyId} tangential speed must not accelerate after settling`,
+        ).toBeLessThanOrEqual(settledSpeed + 0.005);
+        expect(
+          finalSpeed,
+          `${scene.id} body ${bodyId} tangential speed must decay from its impact value`,
+        ).toBeLessThanOrEqual(impactSpeed * 0.5 + 0.005);
+        expect(
+          finalSpeed,
+          `${scene.id} body ${bodyId} final horizontal speed`,
+        ).toBeLessThanOrEqual(0.01);
+        expect(
+          Math.abs(settledBody.linearVelocity[1]),
+          `${scene.id} body ${bodyId} must be vertically settled by 4 seconds`,
+        ).toBeLessThan(0.1);
+        expect(
+          Math.abs(finalBody.linearVelocity[1]),
+          `${scene.id} body ${bodyId} must remain vertically settled at 20 seconds`,
+        ).toBeLessThan(0.05);
+
+        console.log(
+          `${scene.id} body ${bodyId}: initial-to-final xz drift ` +
+            `${initialToFinalDrift.toFixed(5)}, settled-to-final xz drift ` +
+            `${settledToFinalDrift.toFixed(5)}, horizontal speed ` +
+            `${impactSpeed.toFixed(5)} -> ${settledSpeed.toFixed(5)} -> ` +
+            finalSpeed.toFixed(5),
+        );
+      }
+    });
+  }
+});
+
 async function requireHardwareWebGPU(
   page: Page,
   testInfo: TestInfo,
@@ -360,6 +509,13 @@ function assertDiagnostics(
     Number.isFinite(diagnostics.floorHeight),
     `${sceneId} floor height must be finite`,
   ).toBe(true);
+  expect(
+    Number.isFinite(diagnostics.timestep),
+    `${sceneId} timestep must be finite`,
+  ).toBe(true);
+  expect(diagnostics.timestep, `${sceneId} timestep must be positive`).toBeGreaterThan(
+    0,
+  );
 
   assertVec3(diagnostics.bounds.min, `${sceneId} bounds.min`);
   assertVec3(diagnostics.bounds.max, `${sceneId} bounds.max`);
@@ -370,6 +526,7 @@ function assertDiagnostics(
       `${sceneId} comparisonLandmark`,
     );
   }
+  assertBodyDiagnostics(diagnostics.bodies, sceneId);
 
   const diagonal = boundsDiagonal(diagnostics);
   expect(diagonal, `${sceneId} bounds must be nondegenerate`).toBeGreaterThan(
@@ -401,6 +558,100 @@ function assertDiagnostics(
       ).toBeLessThanOrEqual(diagnostics.bounds.max[axis] + tolerance);
     }
   }
+}
+
+function assertBodyDiagnostics(
+  bodies: readonly JGS2BodyDiagnostics[],
+  sceneId: string,
+): void {
+  expect(Array.isArray(bodies), `${sceneId} bodies must be an array`).toBe(true);
+  expect(bodies.length, `${sceneId} must expose at least one body`).toBeGreaterThan(
+    0,
+  );
+
+  const ids = bodies.map((body) => body.bodyId);
+  expect(ids, `${sceneId} body IDs must be unique and sorted`).toEqual(
+    [...new Set(ids)].sort((left, right) => left - right),
+  );
+  for (const body of bodies) {
+    expect(
+      Number.isSafeInteger(body.bodyId) && body.bodyId >= 0,
+      `${sceneId} body ID must be a nonnegative integer`,
+    ).toBe(true);
+    assertVec3(body.centerOfMass, `${sceneId} body ${body.bodyId} centerOfMass`);
+    assertVec3(body.linearVelocity, `${sceneId} body ${body.bodyId} linearVelocity`);
+    expect(
+      Number.isFinite(body.minY),
+      `${sceneId} body ${body.bodyId} minY must be finite`,
+    ).toBe(true);
+  }
+}
+
+function assertBodyCount(
+  diagnostics: JGS2Diagnostics,
+  expectedBodyCount: number,
+  sceneId: string,
+): void {
+  expect(diagnostics.bodies, `${sceneId} body count`).toHaveLength(
+    expectedBodyCount,
+  );
+}
+
+function frameAtSeconds(
+  timestep: number,
+  seconds: number,
+  sceneId: string,
+): number {
+  const frame = Math.round(seconds / timestep);
+  expect(
+    Math.abs(frame * timestep - seconds),
+    `${sceneId} must represent ${seconds} seconds with an integral frame count`,
+  ).toBeLessThan(1e-8);
+  return frame;
+}
+
+async function stepToFrame(
+  page: Page,
+  currentFrame: number,
+  targetFrame: number,
+): Promise<void> {
+  expect(targetFrame, "target frame must not precede current frame").toBeGreaterThanOrEqual(
+    currentFrame,
+  );
+  await page.evaluate(async (frameCount) => {
+    await window.__jgs2Test!.stepFrames(frameCount);
+  }, targetFrame - currentFrame);
+}
+
+function indexBodies(
+  diagnostics: JGS2Diagnostics,
+): ReadonlyMap<number, JGS2BodyDiagnostics> {
+  return new Map(diagnostics.bodies.map((body) => [body.bodyId, body]));
+}
+
+function requireBody(
+  bodies: ReadonlyMap<number, JGS2BodyDiagnostics>,
+  bodyId: number,
+  sceneId: string,
+  checkpoint: string,
+): JGS2BodyDiagnostics {
+  const body = bodies.get(bodyId);
+  expect(
+    body,
+    `${sceneId} body ${bodyId} must exist at ${checkpoint}`,
+  ).toBeDefined();
+  if (!body) {
+    throw new Error(`${sceneId} body ${bodyId} is missing at ${checkpoint}`);
+  }
+  return body;
+}
+
+function horizontalDistance(left: Vec3, right: Vec3): number {
+  return Math.hypot(right[0] - left[0], right[2] - left[2]);
+}
+
+function horizontalSpeed(velocity: Vec3): number {
+  return Math.hypot(velocity[0], velocity[2]);
 }
 
 function assertStiffnessComparison(
@@ -485,7 +736,7 @@ function maximumBoundsMotion(
 async function captureCanvas(
   page: Page,
   testInfo: TestInfo,
-  artifactName: "start.png" | "end.png",
+  artifactName: "start.png" | "end.png" | "settled-20s.png",
 ): Promise<DecodedPng> {
   const canvas = page.getByTestId("gpu-canvas");
   await expect(canvas).toBeVisible();

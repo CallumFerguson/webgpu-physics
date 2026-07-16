@@ -9,6 +9,7 @@ export {
   JGS2_CUBATURE_RECORD_WORDS,
   JGS2_REST_STIFFNESS_FLOATS,
   computeJGS2DynamicOffsets,
+  inferJGS2BodyCount,
   jgs2TimestepsMatch,
   normalizeOddIterationCount,
   packJGS2Cubature,
@@ -16,6 +17,7 @@ export {
   packJGS2TetStatic,
   packJGS2VertexStatic,
   validateJGS2GpuInput,
+  validateJGS2ContactParameters,
   type JGS2DynamicOffsets,
   type JGS2GpuInput,
 } from "./layout";

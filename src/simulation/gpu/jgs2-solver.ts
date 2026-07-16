@@ -1,12 +1,14 @@
 import {
   JGS2_UNIFORM_BYTES,
   computeJGS2DynamicOffsets,
+  inferJGS2BodyCount,
   jgs2TimestepsMatch,
   normalizeOddIterationCount,
   packJGS2Cubature,
   packJGS2InitialDynamic,
   packJGS2TetStatic,
   packJGS2VertexStatic,
+  validateJGS2ContactParameters,
   validateJGS2GpuInput,
   type JGS2DynamicOffsets,
   type JGS2GpuInput,
@@ -23,6 +25,10 @@ export interface JGS2StepSettings {
   readonly regularization: number;
   readonly rotationEpsilon: number;
   readonly maxStep: number;
+  /** Exponential x/z damping rate in s^-1 for grounded vertices. */
+  readonly contactTangentialDamping: number;
+  /** Distance above the floor at which tangential damping becomes active. */
+  readonly contactMargin: number;
 }
 
 export interface JGS2PositionBufferView {
@@ -42,6 +48,8 @@ export const DEFAULT_JGS2_STEP_SETTINGS: JGS2StepSettings = {
   regularization: 1e-6,
   rotationEpsilon: 1e-7,
   maxStep: 0.1,
+  contactTangentialDamping: 8,
+  contactMargin: 0.01,
 };
 
 interface JGS2GpuBuffers {
@@ -58,6 +66,8 @@ interface JGS2Pipelines {
   readonly tetPolarRotation: GPUComputePipeline;
   readonly vertexPolarRotation: GPUComputePipeline;
   readonly solve: GPUComputePipeline;
+  readonly bodyHorizontalCorrection: GPUComputePipeline;
+  readonly applyBodyHorizontalCorrection: GPUComputePipeline;
   readonly finalize: GPUComputePipeline;
 }
 
@@ -122,6 +132,8 @@ function validateStepSettings(settings: JGS2StepSettings): void {
     ["regularization", settings.regularization],
     ["rotationEpsilon", settings.rotationEpsilon],
     ["maxStep", settings.maxStep],
+    ["contactTangentialDamping", settings.contactTangentialDamping],
+    ["contactMargin", settings.contactMargin],
     ["gravity.x", settings.gravity[0]],
     ["gravity.y", settings.gravity[1]],
     ["gravity.z", settings.gravity[2]],
@@ -149,6 +161,10 @@ function validateStepSettings(settings: JGS2StepSettings): void {
   if (settings.maxStep < 0) {
     throw new RangeError("maxStep must be nonnegative.");
   }
+  validateJGS2ContactParameters(
+    settings.contactTangentialDamping,
+    settings.contactMargin,
+  );
 }
 
 function mergeStepSettings(
@@ -165,7 +181,9 @@ function mergeStepSettings(
 }
 
 function packUniforms(
-  input: Pick<JGS2GpuInput, "vertexCount" | "tetCount" | "cubatureK">,
+  input: Pick<JGS2GpuInput, "vertexCount" | "tetCount" | "cubatureK"> & {
+    readonly bodyCount: number;
+  },
   offsets: JGS2DynamicOffsets,
   settings: JGS2StepSettings,
   sourcePosition: number,
@@ -175,7 +193,10 @@ function packUniforms(
   const integers = new Uint32Array(buffer);
   const floats = new Float32Array(buffer);
 
-  integers.set([input.vertexCount, input.tetCount, input.cubatureK, 0], 0);
+  integers.set(
+    [input.vertexCount, input.tetCount, input.cubatureK, input.bodyCount],
+    0,
+  );
   integers.set(
     [offsets.posA, offsets.posB, offsets.predicted, offsets.velocity],
     4,
@@ -184,7 +205,7 @@ function packUniforms(
     [offsets.old, offsets.vertexRotation, offsets.tetRotation, sourcePosition],
     8,
   );
-  integers.set([targetPosition, 0, 0, 0], 12);
+  integers.set([targetPosition, offsets.bodyCorrection, 0, 0], 12);
 
   const inverseTimestep = 1 / settings.timestep;
   floats.set(
@@ -213,6 +234,10 @@ function packUniforms(
       settings.velocityDamping,
     ],
     24,
+  );
+  floats.set(
+    [settings.contactTangentialDamping, settings.contactMargin, 0, 0],
+    28,
   );
 
   return new Uint8Array(buffer);
@@ -279,6 +304,7 @@ export class JGS2GpuSolver {
   readonly vertexCount: number;
   readonly tetCount: number;
   readonly cubatureK: number;
+  readonly bodyCount: number;
   readonly dynamicOffsets: JGS2DynamicOffsets;
 
   private destroyed = false;
@@ -289,7 +315,7 @@ export class JGS2GpuSolver {
     private readonly inputShape: Pick<
       JGS2GpuInput,
       "vertexCount" | "tetCount" | "cubatureK"
-    >,
+    > & { readonly bodyCount: number },
     private readonly buffers: JGS2GpuBuffers,
     private readonly pipelines: JGS2Pipelines,
     private readonly uniforms: JGS2UniformState,
@@ -300,6 +326,7 @@ export class JGS2GpuSolver {
     this.vertexCount = inputShape.vertexCount;
     this.tetCount = inputShape.tetCount;
     this.cubatureK = inputShape.cubatureK;
+    this.bodyCount = inputShape.bodyCount;
     this.dynamicOffsets = offsets;
   }
 
@@ -317,7 +344,12 @@ export class JGS2GpuSolver {
     }
 
     const resolvedSettings = mergeStepSettings(DEFAULT_JGS2_STEP_SETTINGS, settings);
-    const offsets = computeJGS2DynamicOffsets(input.vertexCount, input.tetCount);
+    const bodyCount = inferJGS2BodyCount(input.vertexInfo, input.vertexCount);
+    const offsets = computeJGS2DynamicOffsets(
+      input.vertexCount,
+      input.tetCount,
+      bodyCount,
+    );
     const dynamic = packJGS2InitialDynamic(input, offsets);
     const vertices = packJGS2VertexStatic(input);
     const tets = packJGS2TetStatic(input);
@@ -420,12 +452,28 @@ export class JGS2GpuSolver {
         layout: pipelineLayout,
         compute: { module: shader, entryPoint },
       });
-    const [predict, tetPolarRotation, vertexPolarRotation, solve, finalize] =
+    const [
+      predict,
+      tetPolarRotation,
+      vertexPolarRotation,
+      solve,
+      bodyHorizontalCorrection,
+      applyBodyHorizontalCorrection,
+      finalize,
+    ] =
       await Promise.all([
         createPipeline("predict", "jgs2-predict-pipeline"),
         createPipeline("tetPolarRotation", "jgs2-tet-polar-pipeline"),
         createPipeline("vertexPolarRotation", "jgs2-vertex-polar-pipeline"),
         createPipeline("jgs2Solve", "jgs2-solve-pipeline"),
+        createPipeline(
+          "bodyHorizontalCorrection",
+          "jgs2-body-horizontal-correction-pipeline",
+        ),
+        createPipeline(
+          "applyBodyHorizontalCorrection",
+          "jgs2-apply-body-horizontal-correction-pipeline",
+        ),
         createPipeline("finalize", "jgs2-finalize-pipeline"),
       ]);
     const pipelines: JGS2Pipelines = {
@@ -433,6 +481,8 @@ export class JGS2GpuSolver {
       tetPolarRotation,
       vertexPolarRotation,
       solve,
+      bodyHorizontalCorrection,
+      applyBodyHorizontalCorrection,
       finalize,
     };
 
@@ -472,6 +522,7 @@ export class JGS2GpuSolver {
         vertexCount: input.vertexCount,
         tetCount: input.tetCount,
         cubatureK: input.cubatureK,
+        bodyCount,
       },
       buffers,
       pipelines,
@@ -492,6 +543,14 @@ export class JGS2GpuSolver {
   }
 
   get currentPositionByteLength(): number {
+    return this.vertexCount * 16;
+  }
+
+  get velocityByteOffset(): number {
+    return this.dynamicOffsets.velocity * 16;
+  }
+
+  get velocityByteLength(): number {
     return this.vertexCount * 16;
   }
 
@@ -599,6 +658,21 @@ export class JGS2GpuSolver {
 
     encodeDispatch(
       encoder,
+      this.pipelines.bodyHorizontalCorrection,
+      this.uniforms.baseBindGroup,
+      this.bodyCount,
+      "jgs2-body-horizontal-correction-pass",
+    );
+    encodeDispatch(
+      encoder,
+      this.pipelines.applyBodyHorizontalCorrection,
+      this.uniforms.baseBindGroup,
+      this.vertexCount,
+      "jgs2-apply-body-horizontal-correction-pass",
+    );
+
+    encodeDispatch(
+      encoder,
       this.pipelines.finalize,
       this.uniforms.baseBindGroup,
       this.vertexCount,
@@ -614,20 +688,41 @@ export class JGS2GpuSolver {
 
   async readPositions(): Promise<Float32Array> {
     this.assertUsable();
+    return this.readVec4Region(
+      this.currentPositionByteOffset,
+      this.currentPositionByteLength,
+      "jgs2-position-readback",
+    );
+  }
+
+  async readVelocities(): Promise<Float32Array> {
+    this.assertUsable();
+    return this.readVec4Region(
+      this.velocityByteOffset,
+      this.velocityByteLength,
+      "jgs2-velocity-readback",
+    );
+  }
+
+  private async readVec4Region(
+    sourceOffset: number,
+    byteLength: number,
+    label: string,
+  ): Promise<Float32Array> {
     const readback = this.device.createBuffer({
-      label: "jgs2-position-readback",
-      size: this.currentPositionByteLength,
+      label,
+      size: byteLength,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     const encoder = this.device.createCommandEncoder({
-      label: "jgs2-position-readback-encoder",
+      label: `${label}-encoder`,
     });
     encoder.copyBufferToBuffer(
       this.buffers.dynamic,
-      this.currentPositionByteOffset,
+      sourceOffset,
       readback,
       0,
-      this.currentPositionByteLength,
+      byteLength,
     );
     this.device.queue.submit([encoder.finish()]);
 

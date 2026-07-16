@@ -15,8 +15,16 @@ import { JGS2GpuSolver } from "./simulation/gpu";
 
 type Vec3 = readonly [number, number, number];
 
+interface JGS2BodyDiagnostics {
+  readonly bodyId: number;
+  readonly centerOfMass: Vec3;
+  readonly linearVelocity: Vec3;
+  readonly minY: number;
+}
+
 interface JGS2Diagnostics {
   readonly frame: number;
+  readonly timestep: number;
   readonly finite: boolean;
   readonly pinnedMaxError: number;
   readonly minTetDeterminant: number;
@@ -27,6 +35,7 @@ interface JGS2Diagnostics {
   };
   readonly landmark: Vec3;
   readonly comparisonLandmark?: Vec3;
+  readonly bodies: readonly JGS2BodyDiagnostics[];
 }
 
 interface JGS2TestHarness {
@@ -98,9 +107,10 @@ function determinant(
   );
 }
 
-function diagnosticsFromPositions(
+function diagnosticsFromState(
   scene: PrecomputedScene,
   positions: Float32Array,
+  velocities: Float32Array,
   frame: number,
 ): JGS2Diagnostics {
   const vertexCount = positions.length / 4;
@@ -108,13 +118,25 @@ function diagnosticsFromPositions(
   const maximum: [number, number, number] = [-Infinity, -Infinity, -Infinity];
   let finite = true;
   let pinnedMaxError = 0;
+  const bodyCount = Math.max(...scene.mesh.bodyIds) + 1;
+  const bodyMasses = new Float64Array(bodyCount);
+  const bodyPositionMoments = new Float64Array(bodyCount * 3);
+  const bodyVelocityMoments = new Float64Array(bodyCount * 3);
+  const bodyMinimumY = new Float64Array(bodyCount);
+  bodyMinimumY.fill(Infinity);
 
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const body = scene.mesh.bodyIds[vertex] ?? 0;
+    const mass = scene.lumpedMasses[vertex] ?? 0;
+    bodyMasses[body] += mass;
     for (let axis = 0; axis < 3; axis += 1) {
       const value = positions[vertex * 4 + axis] ?? Number.NaN;
-      finite &&= Number.isFinite(value);
+      const velocity = velocities[vertex * 4 + axis] ?? Number.NaN;
+      finite &&= Number.isFinite(value) && Number.isFinite(velocity);
       minimum[axis] = Math.min(minimum[axis], value);
       maximum[axis] = Math.max(maximum[axis], value);
+      bodyPositionMoments[body * 3 + axis] += mass * value;
+      bodyVelocityMoments[body * 3 + axis] += mass * velocity;
       if (scene.mesh.fixed[vertex] !== 0) {
         pinnedMaxError = Math.max(
           pinnedMaxError,
@@ -122,6 +144,10 @@ function diagnosticsFromPositions(
         );
       }
     }
+    bodyMinimumY[body] = Math.min(
+      bodyMinimumY[body] ?? Infinity,
+      positions[vertex * 4 + 1] ?? Number.NaN,
+    );
   }
 
   let minTetDeterminant = Infinity;
@@ -153,8 +179,30 @@ function diagnosticsFromPositions(
         positions[comparisonVertex * 4 + 2] ?? Number.NaN,
       ]
     : undefined;
+  const bodies: JGS2BodyDiagnostics[] = [];
+  for (let bodyId = 0; bodyId < bodyCount; bodyId += 1) {
+    const mass = bodyMasses[bodyId] ?? 0;
+    if (!(mass > 0)) {
+      continue;
+    }
+    bodies.push({
+      bodyId,
+      centerOfMass: [
+        (bodyPositionMoments[bodyId * 3] ?? 0) / mass,
+        (bodyPositionMoments[bodyId * 3 + 1] ?? 0) / mass,
+        (bodyPositionMoments[bodyId * 3 + 2] ?? 0) / mass,
+      ],
+      linearVelocity: [
+        (bodyVelocityMoments[bodyId * 3] ?? 0) / mass,
+        (bodyVelocityMoments[bodyId * 3 + 1] ?? 0) / mass,
+        (bodyVelocityMoments[bodyId * 3 + 2] ?? 0) / mass,
+      ],
+      minY: bodyMinimumY[bodyId] ?? Number.NaN,
+    });
+  }
   return {
     frame,
+    timestep: scene.settings.timestep,
     finite,
     pinnedMaxError,
     minTetDeterminant,
@@ -162,6 +210,7 @@ function diagnosticsFromPositions(
     bounds: { min: minimum, max: maximum },
     landmark,
     ...(comparisonLandmark ? { comparisonLandmark } : {}),
+    bodies,
   };
 }
 
@@ -230,6 +279,8 @@ export function App() {
         floorHeight: scene.settings.floorY,
         floorStiffness: 250_000,
         velocityDamping: 0.997,
+        contactTangentialDamping: 12,
+        contactMargin: 0.01,
         regularization: 1e-6,
         rotationEpsilon: 1e-7,
         maxStep: 0.075,
@@ -276,8 +327,18 @@ export function App() {
       }
 
       let simulationFrame = 0;
-      const readDiagnostics = async (): Promise<JGS2Diagnostics> =>
-        diagnosticsFromPositions(scene, await solver!.readPositions(), simulationFrame);
+      const readDiagnostics = async (): Promise<JGS2Diagnostics> => {
+        const [positions, velocities] = await Promise.all([
+          solver!.readPositions(),
+          solver!.readVelocities(),
+        ]);
+        return diagnosticsFromState(
+          scene,
+          positions,
+          velocities,
+          simulationFrame,
+        );
+      };
 
       if (testMode) {
         installedHarness = {
@@ -523,8 +584,8 @@ export function App() {
                 <h2>Built for the browser GPU</h2>
                 <p>
                   WGSL gathers incident elements, evaluates four or six Cubature
-                  samples, solves a regularized 3 × 3 system, and renders from the same
-                  GPU-resident position buffer.
+                  samples, solves a regularized 3 × 3 system, preserves each free
+                  body's horizontal center of mass, and renders from the same buffer.
                 </p>
               </div>
             </article>

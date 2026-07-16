@@ -4,7 +4,7 @@ export const JGS2_REST_STIFFNESS_FLOATS = 12 * 12;
 export const JGS2_CUBATURE_BASIS_FLOATS = 4 * 3 * 3;
 export const JGS2_CUBATURE_RECORD_WORDS =
   2 + JGS2_CUBATURE_BASIS_FLOATS;
-export const JGS2_UNIFORM_BYTES = 7 * 16;
+export const JGS2_UNIFORM_BYTES = 8 * 16;
 
 export interface JGS2GpuInput {
   readonly vertexCount: number;
@@ -56,6 +56,7 @@ export interface JGS2DynamicOffsets {
   readonly old: number;
   readonly vertexRotation: number;
   readonly tetRotation: number;
+  readonly bodyCorrection: number;
   readonly vec4Count: number;
 }
 
@@ -97,6 +98,7 @@ export function validateJGS2GpuInput(input: JGS2GpuInput): void {
   assertLength("vertexRest", input.vertexRest, vertexCount * 4);
   assertLength("vertexColors", input.vertexColors, vertexCount * 4);
   assertLength("vertexInfo", input.vertexInfo, vertexCount * 4);
+  inferJGS2BodyCount(input.vertexInfo, vertexCount);
   assertLength("tetIndices", input.tetIndices, tetCount * 4);
   assertLength("tetInverseDm", input.tetInverseDm, tetCount * 12);
   assertLength("tetMeta", input.tetMeta, tetCount * 4);
@@ -180,9 +182,11 @@ export function validateJGS2GpuInput(input: JGS2GpuInput): void {
 export function computeJGS2DynamicOffsets(
   vertexCount: number,
   tetCount: number,
+  bodyCount = 0,
 ): JGS2DynamicOffsets {
   assertInteger("vertexCount", vertexCount, 1);
   assertInteger("tetCount", tetCount, 1);
+  assertInteger("bodyCount", bodyCount, 0);
 
   const posA = 0;
   const posB = posA + vertexCount;
@@ -191,6 +195,7 @@ export function computeJGS2DynamicOffsets(
   const old = velocity + vertexCount;
   const vertexRotation = old + vertexCount;
   const tetRotation = vertexRotation + vertexCount * 3;
+  const bodyCorrection = tetRotation + tetCount * 3;
 
   return {
     posA,
@@ -200,8 +205,33 @@ export function computeJGS2DynamicOffsets(
     old,
     vertexRotation,
     tetRotation,
-    vec4Count: tetRotation + tetCount * 3,
+    bodyCorrection,
+    vec4Count: bodyCorrection + bodyCount,
   };
+}
+
+/**
+ * Body ids occupy vertexInfo.w and are expected to be compact enough that one
+ * correction slot per id is no larger than the vertex array itself.
+ */
+export function inferJGS2BodyCount(
+  vertexInfo: Uint32Array,
+  vertexCount: number,
+): number {
+  assertInteger("vertexCount", vertexCount, 1);
+  assertLength("vertexInfo", vertexInfo, vertexCount * 4);
+  let maximumBody = 0;
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    maximumBody = Math.max(maximumBody, vertexInfo[vertex * 4 + 3]!);
+  }
+  const bodyCount = maximumBody + 1;
+  if (!Number.isSafeInteger(bodyCount) || bodyCount > vertexCount) {
+    throw new RangeError(
+      "vertexInfo body ids must be compact nonnegative values whose maximum " +
+        `is smaller than vertexCount (${vertexCount}); got ${maximumBody}.`,
+    );
+  }
+  return bodyCount;
 }
 
 function writeIdentityRotation(
@@ -324,4 +354,22 @@ export function jgs2TimestepsMatch(
     runtimeTimestep > 0 &&
     Math.fround(preprocessingTimestep) === Math.fround(runtimeTimestep)
   );
+}
+
+/** Validate the viscous tangential floor-contact controls used by finalize. */
+export function validateJGS2ContactParameters(
+  contactTangentialDamping: number,
+  contactMargin: number,
+): void {
+  if (
+    !Number.isFinite(contactTangentialDamping) ||
+    contactTangentialDamping < 0
+  ) {
+    throw new RangeError(
+      "contactTangentialDamping must be finite and nonnegative.",
+    );
+  }
+  if (!Number.isFinite(contactMargin) || contactMargin < 0) {
+    throw new RangeError("contactMargin must be finite and nonnegative.");
+  }
 }
