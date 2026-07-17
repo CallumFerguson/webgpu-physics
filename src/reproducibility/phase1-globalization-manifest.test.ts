@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import manifestV1Json from "../../manifests/phase1-globalization.v1.json?raw";
 import manifestV2Json from "../../manifests/phase1-globalization.v2.json?raw";
+import manifestV3Json from "../../manifests/phase1-globalization.v3.json?raw";
 import nonlinearCubatureGpuSource from "../../tests/e2e/nonlinear-cubature-gpu.spec.ts?raw";
 import nonlinearGlobalizationGpuSource from "../../tests/e2e/nonlinear-globalization-gpu.spec.ts?raw";
+import nonlinearObjectivesGpuSource from "../../tests/e2e/nonlinear-objectives-gpu.spec.ts?raw";
 import { PHASE1_NONLINEAR_CUBATURE_FIXTURE_ID } from "../scenes/phase1";
 import {
   JGS2_LOCAL_ARMIJO_C1,
@@ -24,10 +26,15 @@ import {
   JGS2_GLOBALIZATION_TET_DIAGNOSTIC_VEC4S,
   JGS2_CONVERGENCE_COMPONENT_VEC4S,
   JGS2_UNIFORM_BYTES,
+  JGS2_VERTEX_OBJECTIVE_BYTES,
 } from "../simulation/gpu";
 import { validatePhase1GlobalizationManifest } from "./phase1-globalization-manifest";
 
 function manifestValue(): unknown {
+  return JSON.parse(manifestV3Json) as unknown;
+}
+
+function previousManifestValue(): unknown {
   return JSON.parse(manifestV2Json) as unknown;
 }
 
@@ -39,14 +46,15 @@ const GPU_TEST_SOURCE_TEXT: Readonly<Record<string, string>> = Object.freeze({
   "tests/e2e/nonlinear-globalization-gpu.spec.ts":
     nonlinearGlobalizationGpuSource,
   "tests/e2e/nonlinear-cubature-gpu.spec.ts": nonlinearCubatureGpuSource,
+  "tests/e2e/nonlinear-objectives-gpu.spec.ts": nonlinearObjectivesGpuSource,
 });
 
-describe("versioned Phase 1 globalization reference manifest", () => {
-  it("binds every frozen CPU reference policy and corpus gate", () => {
+describe("versioned Phase 1 globalization manifests", () => {
+  it("binds every frozen composite CPU/GPU policy and corpus gate", () => {
     const manifest = validatePhase1GlobalizationManifest(manifestValue());
-    expect(manifest.schemaVersion).toBe(2);
-    if (manifest.schemaVersion !== 2) {
-      throw new Error("The checked-in v2 manifest validated as another version.");
+    expect(manifest.schemaVersion).toBe(3);
+    if (manifest.schemaVersion !== 3) {
+      throw new Error("The checked-in v3 manifest validated as another version.");
     }
     expect(manifest.sourceFixtures.cubatureFixtureId).toBe(
       PHASE1_NONLINEAR_CUBATURE_FIXTURE_ID,
@@ -54,6 +62,7 @@ describe("versioned Phase 1 globalization reference manifest", () => {
     expect(manifest.sourceFixtures.gpuTestFiles).toEqual([
       "tests/e2e/nonlinear-globalization-gpu.spec.ts",
       "tests/e2e/nonlinear-cubature-gpu.spec.ts",
+      "tests/e2e/nonlinear-objectives-gpu.spec.ts",
     ]);
     expect(manifest.gpuTestSelectors).toEqual([
       {
@@ -91,6 +100,21 @@ describe("versioned Phase 1 globalization reference manifest", () => {
         selector:
           "P1-EC-12-GPU: production nonlinear Cubature updates match the packed CPU reference",
       },
+      {
+        source: "tests/e2e/nonlinear-objectives-gpu.spec.ts",
+        selector:
+          "P1-COMPOSITE-GPU: force and quadratic-target derivatives match the independent CPU reference",
+      },
+      {
+        source: "tests/e2e/nonlinear-objectives-gpu.spec.ts",
+        selector:
+          "P1-COMPOSITE-GPU: complete-objective Armijo, shift, and convergence policies hold",
+      },
+      {
+        source: "tests/e2e/nonlinear-objectives-gpu.spec.ts",
+        selector:
+          "P1-COMPOSITE-GPU: mutable objective inputs fail closed and release without hidden state",
+      },
     ]);
     expect(manifest.positiveDefiniteTreatment).toMatchObject({
       f32UnitRoundoff: 2 ** -24,
@@ -118,10 +142,28 @@ describe("versioned Phase 1 globalization reference manifest", () => {
       gpuHistoryCapacity: JGS2_GLOBALIZATION_HISTORY_CAPACITY,
     });
     expect(manifest.referenceGates.canonicalPackedLocalSystemCount).toBe(240);
+    expect(manifest.referenceGates).toMatchObject({
+      cpuPredictorEquivalenceTolerance: 1e-12,
+      gpuCompositeParityRelativeError: 1e-3,
+      selectedUpdateRmsRelativeError: 0.02,
+      routineActiveLocalSystemCount: 60,
+      fullActiveLocalSystemCount: 240,
+      minimumObjectiveDirectionEffect: 1e-4,
+      maximumEffectRelativeDirectionError: 1e-3,
+    });
+    expect(manifest.caseIds.slice(-5)).toEqual([
+      "paper-equivalent-external-force",
+      "composite-restricted-projection",
+      "objective-component-convergence",
+      "mutable-target-release",
+      "objective-input-fail-closed",
+    ]);
     expect(manifest.restrictedObjectiveTerms).toEqual([
       "implicit-euler-inertia",
       "stable-neo-hookean-material",
       "analytic-floor-penalty",
+      "linear-per-vertex-external-force",
+      "isotropic-per-vertex-quadratic-target",
     ]);
     expect(manifest.gpuRuntime).toMatchObject({
       enabledMaterial: "stable-neo-hookean",
@@ -138,14 +180,55 @@ describe("versioned Phase 1 globalization reference manifest", () => {
       explicitDiagnosticReadback: "on-request",
       assembledEnergyAcceptance: "diagnostic-only",
       pinnedTargetApplication: "assembled-feasibility-gated",
+      objectiveBytesPerVertex: JGS2_VERTEX_OBJECTIVE_BYTES,
+      objectiveBufferBinding: 6,
+      objectiveBufferAccess: "read-only-storage",
+      uniformBinding: 7,
+      storageBufferBindings: 7,
+      quadraticTargetApplication: "objective-only-no-snap",
+      quadraticTargetRelease: "zero-stiffness",
+      objectiveUpdateOrdering: "queue-ordered-sparse-writes",
+      stepFramesObjectiveSnapshot: "constant-per-batch",
+      pinnedObjectiveConflict: "rejected",
     });
+    expect(manifest.runtimeStatus).toEqual({
+      cpuMaterialInertiaReference: "implemented",
+      compositeForcesAndTargets: "implemented",
+      gpuProduction: "implemented-composite-objective",
+      qualifiesPhase1Exit: false,
+    });
+    expect(manifest.runtimeStatus.qualifiesPhase1Exit).toBe(false);
+  });
+
+  it("keeps the checked-in v2 manifest executable with historical GPU semantics", () => {
+    const manifest = validatePhase1GlobalizationManifest(
+      previousManifestValue(),
+    );
+    expect(manifest.schemaVersion).toBe(2);
+    if (manifest.schemaVersion !== 2) {
+      throw new Error("The checked-in v2 manifest validated as another version.");
+    }
+
+    expect(manifest.id).toBe(
+      "phase1.globalization-material-inertia-cpu-gpu",
+    );
+    expect(manifest.sourceFixtures.gpuTestFiles).toEqual([
+      "tests/e2e/nonlinear-globalization-gpu.spec.ts",
+      "tests/e2e/nonlinear-cubature-gpu.spec.ts",
+    ]);
+    expect(manifest.gpuTestSelectors).toHaveLength(7);
+    expect(manifest.restrictedObjectiveTerms).toEqual([
+      "implicit-euler-inertia",
+      "stable-neo-hookean-material",
+      "analytic-floor-penalty",
+    ]);
     expect(manifest.runtimeStatus).toEqual({
       cpuMaterialInertiaReference: "implemented",
       compositeForcesAndTargets: "pending",
       gpuProduction: "implemented-material-inertia-floor",
       qualifiesPhase1Exit: false,
     });
-    expect(manifest.runtimeStatus.qualifiesPhase1Exit).toBe(false);
+    expect("objectiveBytesPerVertex" in manifest.gpuRuntime).toBe(false);
   });
 
   it("keeps the checked-in v1 manifest executable with historical semantics", () => {
@@ -181,8 +264,8 @@ describe("versioned Phase 1 globalization reference manifest", () => {
 
   it("resolves every frozen GPU selector to its cited test source", () => {
     const manifest = validatePhase1GlobalizationManifest(manifestValue());
-    if (manifest.schemaVersion !== 2) {
-      throw new Error("GPU selector provenance requires the v2 manifest.");
+    if (manifest.schemaVersion !== 3) {
+      throw new Error("GPU selector provenance requires the v3 manifest.");
     }
 
     for (const entry of manifest.gpuTestSelectors) {
@@ -245,6 +328,185 @@ describe("versioned Phase 1 globalization reference manifest", () => {
     ).toThrow(
       /pinnedTargetApplication must equal assembled-feasibility-gated/i,
     );
+  });
+
+  it("rejects composite-objective ABI, update, and gate drift", () => {
+    const runtimeMutations: ReadonlyArray<{
+      key: string;
+      value: unknown;
+      expected: RegExp;
+    }> = [
+      { key: "objectiveBytesPerVertex", value: 16, expected: /must equal 32/i },
+      { key: "objectiveBufferBinding", value: 5, expected: /must equal 6/i },
+      {
+        key: "objectiveBufferAccess",
+        value: "read-write-storage",
+        expected: /must equal read-only-storage/i,
+      },
+      { key: "uniformBinding", value: 6, expected: /must equal 7/i },
+      { key: "storageBufferBindings", value: 6, expected: /must equal 7/i },
+      {
+        key: "quadraticTargetApplication",
+        value: "post-step-snap",
+        expected: /must equal objective-only-no-snap/i,
+      },
+      {
+        key: "quadraticTargetRelease",
+        value: "retain-last-target",
+        expected: /must equal zero-stiffness/i,
+      },
+      {
+        key: "objectiveUpdateOrdering",
+        value: "unordered",
+        expected: /must equal queue-ordered-sparse-writes/i,
+      },
+      {
+        key: "stepFramesObjectiveSnapshot",
+        value: "mutable-within-batch",
+        expected: /must equal constant-per-batch/i,
+      },
+      {
+        key: "pinnedObjectiveConflict",
+        value: "ignored",
+        expected: /must equal rejected/i,
+      },
+    ];
+
+    for (const mutation of runtimeMutations) {
+      const candidate = structuredClone(manifestValue()) as {
+        gpuRuntime: Record<string, unknown>;
+      };
+      candidate.gpuRuntime[mutation.key] = mutation.value;
+      expect(
+        () => validatePhase1GlobalizationManifest(candidate),
+        mutation.key,
+      ).toThrow(mutation.expected);
+    }
+
+    const gateMutations: ReadonlyArray<{
+      key: string;
+      value: unknown;
+      expected: RegExp;
+    }> = [
+      {
+        key: "cpuPredictorEquivalenceTolerance",
+        value: 1e-10,
+        expected: /must equal 1e-12/i,
+      },
+      {
+        key: "gpuCompositeParityRelativeError",
+        value: 0.01,
+        expected: /must equal 0.001/i,
+      },
+      {
+        key: "selectedUpdateRmsRelativeError",
+        value: 0.03,
+        expected: /must equal 0.02/i,
+      },
+      {
+        key: "routineActiveLocalSystemCount",
+        value: 59,
+        expected: /must equal 60/i,
+      },
+      {
+        key: "fullActiveLocalSystemCount",
+        value: 239,
+        expected: /must equal 240/i,
+      },
+      {
+        key: "minimumObjectiveDirectionEffect",
+        value: 1e-5,
+        expected: /must equal 0.0001/i,
+      },
+      {
+        key: "maximumEffectRelativeDirectionError",
+        value: 0.01,
+        expected: /must equal 0.001/i,
+      },
+    ];
+    for (const mutation of gateMutations) {
+      const candidate = structuredClone(manifestValue()) as {
+        referenceGates: Record<string, unknown>;
+      };
+      candidate.referenceGates[mutation.key] = mutation.value;
+      expect(
+        () => validatePhase1GlobalizationManifest(candidate),
+        mutation.key,
+      ).toThrow(mutation.expected);
+    }
+
+    const ambiguousCountAlias = structuredClone(manifestValue()) as {
+      referenceGates: Record<string, unknown>;
+    };
+    delete ambiguousCountAlias.referenceGates.routineActiveLocalSystemCount;
+    ambiguousCountAlias.referenceGates.canonicalFastCaseCount = 60;
+    expect(() =>
+      validatePhase1GlobalizationManifest(ambiguousCountAlias),
+    ).toThrow(/referenceGates keys must exactly match/i);
+
+    const weakenedTerms = structuredClone(manifestValue()) as {
+      restrictedObjectiveTerms: string[];
+    };
+    weakenedTerms.restrictedObjectiveTerms.pop();
+    expect(() => validatePhase1GlobalizationManifest(weakenedTerms)).toThrow(
+      /frozen objective scope/i,
+    );
+
+    const missingCompositeCase = structuredClone(manifestValue()) as {
+      caseIds: string[];
+    };
+    missingCompositeCase.caseIds.pop();
+    expect(() =>
+      validatePhase1GlobalizationManifest(missingCompositeCase),
+    ).toThrow(/frozen case inventory/i);
+
+    const pendingComposite = structuredClone(manifestValue()) as {
+      runtimeStatus: { compositeForcesAndTargets: string };
+    };
+    pendingComposite.runtimeStatus.compositeForcesAndTargets = "pending";
+    expect(() => validatePhase1GlobalizationManifest(pendingComposite)).toThrow(
+      /compositeForcesAndTargets must equal implemented/i,
+    );
+
+    const partialGpuStatus = structuredClone(manifestValue()) as {
+      runtimeStatus: { gpuProduction: string };
+    };
+    partialGpuStatus.runtimeStatus.gpuProduction =
+      "implemented-material-inertia-floor";
+    expect(() => validatePhase1GlobalizationManifest(partialGpuStatus)).toThrow(
+      /gpuProduction must equal implemented-composite-objective/i,
+    );
+
+    const prematureExitClaim = structuredClone(manifestValue()) as {
+      runtimeStatus: { qualifiesPhase1Exit: boolean };
+    };
+    prematureExitClaim.runtimeStatus.qualifiesPhase1Exit = true;
+    expect(() =>
+      validatePhase1GlobalizationManifest(prematureExitClaim),
+    ).toThrow(
+      /qualifiesPhase1Exit must equal false/i,
+    );
+
+    const retrofittedV2 = structuredClone(previousManifestValue()) as {
+      gpuRuntime: Record<string, unknown>;
+    };
+    retrofittedV2.gpuRuntime.objectiveBytesPerVertex = 32;
+    expect(() => validatePhase1GlobalizationManifest(retrofittedV2)).toThrow(
+      /gpuRuntime keys must exactly match/i,
+    );
+  });
+
+  it("rejects unsupported globalization schema versions", () => {
+    for (const schemaVersion of [0, 2.5, 4]) {
+      const candidate = structuredClone(manifestValue()) as {
+        schemaVersion: number;
+      };
+      candidate.schemaVersion = schemaVersion;
+      expect(
+        () => validatePhase1GlobalizationManifest(candidate),
+        String(schemaVersion),
+      ).toThrow(/schemaVersion must equal 1, 2, or 3/i);
+    }
   });
 
   it("rejects malformed or incomplete GPU source provenance", () => {

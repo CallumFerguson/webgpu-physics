@@ -3,9 +3,20 @@ import { stableNeoHookeanWgsl } from "./stable-neo-hookean-wgsl";
 export const JGS2_DIAGNOSTICS_WORKGROUP_SIZE = 128;
 export const JGS2_DIAGNOSTIC_TET_ROTATION_VEC4S = 3;
 export const JGS2_DIAGNOSTIC_TET_METRIC_VEC4S = 1;
-export const JGS2_DIAGNOSTIC_VERTEX_RECORD_VEC4S = 7;
-export const JGS2_DIAGNOSTIC_SUMMARY_VEC4S = 5;
+/**
+ * Seven historical records followed by explicit force and target records.
+ * Appending preserves every pre-composite field position in the opt-in ABI.
+ */
+export const JGS2_DIAGNOSTIC_VERTEX_RECORD_VEC4S = 9;
+/** Five historical records followed by objective energy/norm summaries. */
+export const JGS2_DIAGNOSTIC_SUMMARY_VEC4S = 7;
 export const JGS2_DIAGNOSTICS_UNIFORM_BYTES = 4 * 16;
+const JGS2_DIAGNOSTIC_OBJECTIVE_BYTES_PER_VERTEX = 2 * 16;
+const JGS2_DIAGNOSTIC_EXTERNAL_FORCE_ACTIVE_BIT = 1 << 0;
+const JGS2_DIAGNOSTIC_TARGET_ACTIVE_BIT = 1 << 1;
+const JGS2_DIAGNOSTIC_OBJECTIVE_FLAGS_MASK =
+  JGS2_DIAGNOSTIC_EXTERNAL_FORCE_ACTIVE_BIT |
+  JGS2_DIAGNOSTIC_TARGET_ACTIVE_BIT;
 
 export interface JGS2DiagnosticsLayout {
   /** Offsets are expressed in vec4 elements, not bytes. */
@@ -25,6 +36,12 @@ export interface JGS2GpuOracleVertexRecord {
   /** Row-major diagonal 3x3 block of the exact frozen global Hessian. */
   readonly localHessian: Float32Array;
   readonly inertiaEnergy: number;
+  /** Exact linear-potential energy, `-force dot position`. */
+  readonly externalForceEnergy: number;
+  /** Exact isotropic quadratic-target energy. */
+  readonly targetEnergy: number;
+  readonly externalForceGradient: readonly [number, number, number];
+  readonly targetGradient: readonly [number, number, number];
   readonly floorContactEnergy: number;
   /** Euclidean norm of this vertex's final nonlinear solve delta. */
   readonly updateMagnitude: number;
@@ -42,19 +59,30 @@ export interface JGS2GpuOracleTetrahedronRecord {
 }
 
 export interface JGS2GpuOracleDiagnostics {
-  /** Sum of all three exact implicit-Euler energy components. */
+  /** Sum of all five exact implicit-Euler energy components. */
   readonly energy: number;
   readonly components: {
     readonly inertia: number;
     readonly elasticity: number;
+    readonly externalForce: number;
+    readonly quadraticTarget: number;
     readonly floorContact: number;
   };
+  /** Same five component norms and naming order as production convergence. */
+  readonly componentGradientNorms: Readonly<{
+    readonly inertia: number;
+    readonly material: number;
+    readonly externalForce: number;
+    readonly target: number;
+    readonly contact: number;
+  }>;
   /** Euclidean norm of the complete active-coordinate gradient. */
   readonly gradientNorm: number;
   /** Numerator used by residual normalizations; equal to gradientNorm. */
   readonly residualNumerator: number;
   /**
-   * Force-balance residual: ||g|| / max(1, ||g_i|| + ||g_e|| + ||g_f||).
+   * Force-balance residual:
+   * ||g|| / max(1, ||g_i|| + ||g_m|| + ||g_ext|| + ||g_t|| + ||g_c||).
    */
   readonly relativeResidual: number;
   readonly relativeResidualValid: boolean;
@@ -88,6 +116,12 @@ export interface JGS2GpuDiagnosticsSourceBuffers {
   readonly tets: GPUBuffer;
   readonly stiffness: GPUBuffer;
   readonly adjacency: GPUBuffer;
+  /**
+   * Two vec4 records per vertex. Omit for an objective-inactive evaluator, or
+   * supply a one-record dummy; nonzero flags fail closed before dispatch unless
+   * the buffer has full per-vertex capacity.
+   */
+  readonly objectives?: GPUBuffer;
 }
 
 export interface JGS2GpuDiagnosticsEvaluationSettings {
@@ -99,6 +133,8 @@ export interface JGS2GpuDiagnosticsEvaluationSettings {
   readonly floorHeight: number;
   readonly floorStiffness: number;
   readonly rotationEpsilon: number;
+  /** Force/target activity bits for the queue-coherent objective snapshot. */
+  readonly objectiveFlags?: number;
 }
 
 function assertCount(name: string, value: number, minimum: number): void {
@@ -181,6 +217,18 @@ export function decodeJGS2GpuOracleDiagnostics(
         packed[base + 14]!,
       ]),
       inertiaEnergy: packed[base + 7]!,
+      externalForceEnergy: packed[base + 31]!,
+      targetEnergy: packed[base + 35]!,
+      externalForceGradient: [
+        packed[base + 28]!,
+        packed[base + 29]!,
+        packed[base + 30]!,
+      ],
+      targetGradient: [
+        packed[base + 32]!,
+        packed[base + 33]!,
+        packed[base + 34]!,
+      ],
       floorContactEnergy: packed[base + 11]!,
       updateMagnitude: packed[base + 15]!,
       gradientSquaredNorm: packed[base + 16]!,
@@ -194,12 +242,32 @@ export function decodeJGS2GpuOracleDiagnostics(
   const inertia = packed[summary]!;
   const elasticity = packed[summary + 1]!;
   const floorContact = packed[summary + 2]!;
+  const externalForce = packed[summary + 20]!;
+  const quadraticTarget = packed[summary + 21]!;
   const gradientNorm = packed[summary + 4]!;
   const activeVertexCount = Math.max(0, Math.round(packed[summary + 9]!));
   const activeValid = finiteFlag(packed[summary + 10]!);
   return {
-    energy: inertia + elasticity + floorContact,
-    components: { inertia, elasticity, floorContact },
+    energy:
+      inertia +
+      elasticity +
+      externalForce +
+      quadraticTarget +
+      floorContact,
+    components: {
+      inertia,
+      elasticity,
+      externalForce,
+      quadraticTarget,
+      floorContact,
+    },
+    componentGradientNorms: Object.freeze({
+      inertia: packed[summary + 24]!,
+      material: packed[summary + 25]!,
+      externalForce: packed[summary + 22]!,
+      target: packed[summary + 23]!,
+      contact: packed[summary + 26]!,
+    }),
     gradientNorm,
     residualNumerator: packed[summary + 16]!,
     residualDenominator: packed[summary + 17]!,
@@ -277,11 +345,21 @@ export function packJGS2DiagnosticsUniforms(
   if (!(settings.rotationEpsilon > 0)) {
     throw new RangeError("rotationEpsilon must be positive.");
   }
+  const objectiveFlags = settings.objectiveFlags ?? 0;
+  if (
+    !Number.isSafeInteger(objectiveFlags) ||
+    objectiveFlags < 0 ||
+    (objectiveFlags & ~JGS2_DIAGNOSTIC_OBJECTIVE_FLAGS_MASK) !== 0
+  ) {
+    throw new RangeError(
+      `objectiveFlags must contain only the force/target activity bits; got ${objectiveFlags}.`,
+    );
+  }
 
   const buffer = new ArrayBuffer(JGS2_DIAGNOSTICS_UNIFORM_BYTES);
   const integers = new Uint32Array(buffer);
   const floats = new Float32Array(buffer);
-  integers.set([vertexCount, tetCount, 0, 0], 0);
+  integers.set([vertexCount, tetCount, objectiveFlags, 0], 0);
   integers.set(
     [
       settings.currentPositionOffset,
@@ -325,8 +403,13 @@ struct TetStatic {
   attributes: vec4f,
 }
 
+struct VertexObjective {
+  externalForce: vec4f,
+  targetPositionStiffness: vec4f,
+}
+
 struct DiagnosticParams {
-  // vertex count, tetrahedron count, reserved
+  // vertex count, tetrahedron count, objective activity flags, reserved
   counts: vec4u,
   // current position, predicted position, tet rotation, tet metric offsets
   offsets: vec4u,
@@ -347,9 +430,14 @@ var<storage, read> restStiffness: array<f32>;
 @group(0) @binding(4)
 var<storage, read> adjacency: array<u32>;
 @group(0) @binding(5)
-var<storage, read_write> diagnosticData: array<vec4f>;
+var<storage, read> vertexObjectives: array<VertexObjective>;
 @group(0) @binding(6)
+var<storage, read_write> diagnosticData: array<vec4f>;
+@group(0) @binding(7)
 var<uniform> params: DiagnosticParams;
+
+const OBJECTIVE_FORCE_ENABLED_BIT: u32 = 1u;
+const OBJECTIVE_TARGET_ENABLED_BIT: u32 = 2u;
 
 ${stableNeoHookeanWgsl}
 
@@ -446,6 +534,28 @@ fn polarRotation(matrix: mat3x3f) -> mat3x3f {
 
 fn loadPosition(offset: u32, vertex: u32) -> vec3f {
   return dynamicData[offset + vertex].xyz;
+}
+
+fn objectiveForceEnabled() -> bool {
+  return (params.counts.z & OBJECTIVE_FORCE_ENABLED_BIT) != 0u;
+}
+
+fn objectiveTargetEnabled() -> bool {
+  return (params.counts.z & OBJECTIVE_TARGET_ENABLED_BIT) != 0u;
+}
+
+fn vertexExternalForce(vertex: u32) -> vec3f {
+  if (objectiveForceEnabled()) {
+    return vertexObjectives[vertex].externalForce.xyz;
+  }
+  return vec3f(0.0);
+}
+
+fn vertexTargetPositionStiffness(vertex: u32) -> vec4f {
+  if (objectiveTargetEnabled()) {
+    return vertexObjectives[vertex].targetPositionStiffness;
+  }
+  return vec4f(0.0);
 }
 
 fn loadDiagnosticRotation(tetrahedron: u32) -> mat3x3f {
@@ -696,9 +806,13 @@ fn evaluateDiagnosticVertices(
   var gradient = vec3f(0.0);
   var inertiaGradient = vec3f(0.0);
   var elasticityGradient = vec3f(0.0);
+  var externalForceGradient = vec3f(0.0);
+  var targetGradient = vec3f(0.0);
   var floorGradient = vec3f(0.0);
   var hessian = zeroMat3();
   var inertiaEnergy = 0.0;
+  var externalForceEnergy = 0.0;
+  var targetEnergy = 0.0;
   var floorEnergy = 0.0;
   var updateMagnitude = 0.0;
   var updateValid = false;
@@ -717,6 +831,22 @@ fn evaluateDiagnosticVertices(
     inertiaEnergy = 0.5 * inertiaWeight * dot(difference, difference);
     updateMagnitude = finalUpdate.x;
     updateValid = finalUpdate.w >= 0.5 && updateMagnitude >= 0.0;
+
+    let externalForce = vertexExternalForce(vertex);
+    externalForceGradient = -externalForce;
+    externalForceEnergy = -dot(externalForce, current);
+    gradient += externalForceGradient;
+    let targetRecord = vertexTargetPositionStiffness(vertex);
+    allFinite = allFinite && finiteVec3(externalForce) &&
+      finiteScalar(targetRecord.w) && targetRecord.w >= 0.0;
+    if (targetRecord.w > 0.0) {
+      allFinite = allFinite && finiteVec3(targetRecord.xyz);
+      let targetResidual = current - targetRecord.xyz;
+      targetGradient = targetRecord.w * targetResidual;
+      targetEnergy = 0.5 * targetRecord.w * dot(targetResidual, targetResidual);
+      gradient += targetGradient;
+      hessian += targetRecord.w * identityMat3();
+    }
 
     for (
       var incident = 0u;
@@ -757,15 +887,22 @@ fn evaluateDiagnosticVertices(
   let inertiaGradientSquaredNorm = dot(inertiaGradient, inertiaGradient);
   let elasticityGradientSquaredNorm =
     dot(elasticityGradient, elasticityGradient);
+  let externalForceGradientSquaredNorm =
+    dot(externalForceGradient, externalForceGradient);
+  let targetGradientSquaredNorm = dot(targetGradient, targetGradient);
   let floorGradientSquaredNorm = dot(floorGradient, floorGradient);
   allFinite = allFinite && finiteScalar(inertiaWeight) &&
-    finiteScalar(inertiaEnergy) && finiteScalar(floorEnergy) &&
+    finiteScalar(inertiaEnergy) && finiteScalar(externalForceEnergy) &&
+    finiteScalar(targetEnergy) && finiteScalar(floorEnergy) &&
     finiteScalar(updateMagnitude) && finiteVec3(gradient) &&
     finiteVec3(inertiaGradient) && finiteVec3(elasticityGradient) &&
+    finiteVec3(externalForceGradient) && finiteVec3(targetGradient) &&
     finiteVec3(floorGradient) && finiteMat3(hessian) &&
     finiteScalar(gradientSquaredNorm) &&
     finiteScalar(inertiaGradientSquaredNorm) &&
     finiteScalar(elasticityGradientSquaredNorm) &&
+    finiteScalar(externalForceGradientSquaredNorm) &&
+    finiteScalar(targetGradientSquaredNorm) &&
     finiteScalar(floorGradientSquaredNorm);
 
   let base = params.records.x + vertex * VERTEX_RECORD_VEC4S;
@@ -810,6 +947,14 @@ fn evaluateDiagnosticVertices(
     0.0,
     0.0,
   );
+  diagnosticData[base + 7u] = vec4f(
+    finiteVector(externalForceGradient),
+    finiteNumber(externalForceEnergy),
+  );
+  diagnosticData[base + 8u] = vec4f(
+    finiteVector(targetGradient),
+    finiteNumber(targetEnergy),
+  );
 }
 
 // Diagnostics are opt-in and intended for oracle-sized scenes. A serial final
@@ -822,10 +967,14 @@ fn reduceDiagnostics(@builtin(global_invocation_id) globalId: vec3u) {
 
   var elasticityEnergy = 0.0;
   var inertiaEnergy = 0.0;
+  var externalForceEnergy = 0.0;
+  var targetEnergy = 0.0;
   var floorEnergy = 0.0;
   var gradientSquaredNorm = 0.0;
   var inertiaGradientSquaredNorm = 0.0;
   var elasticityGradientSquaredNorm = 0.0;
+  var externalForceGradientSquaredNorm = 0.0;
+  var targetGradientSquaredNorm = 0.0;
   var floorGradientSquaredNorm = 0.0;
   var maximumUpdate = 0.0;
   var minimumDeterminant = 3.0e38;
@@ -850,12 +999,21 @@ fn reduceDiagnostics(@builtin(global_invocation_id) globalId: vec3u) {
     let metric = diagnosticData[base + 4u];
     let componentMetrics = diagnosticData[base + 5u];
     let contactMetrics = diagnosticData[base + 6u];
+    let externalForce = diagnosticData[base + 7u];
+    let targetMetrics = diagnosticData[base + 8u];
     let isActive = gradientAndActive.w >= 0.5;
     inertiaEnergy += row0.w;
+    externalForceEnergy += externalForce.w;
+    targetEnergy += targetMetrics.w;
     floorEnergy += row1.w;
     gradientSquaredNorm += metric.x;
     inertiaGradientSquaredNorm += componentMetrics.x;
     elasticityGradientSquaredNorm += componentMetrics.y;
+    externalForceGradientSquaredNorm += dot(
+      externalForce.xyz,
+      externalForce.xyz,
+    );
+    targetGradientSquaredNorm += dot(targetMetrics.xyz, targetMetrics.xyz);
     floorGradientSquaredNorm += componentMetrics.z;
     if (isActive) {
       maximumUpdate = max(maximumUpdate, row2.w);
@@ -881,17 +1039,27 @@ fn reduceDiagnostics(@builtin(global_invocation_id) globalId: vec3u) {
   let gradientNorm = sqrt(max(gradientSquaredNorm, 0.0));
   let inertiaGradientNorm = sqrt(max(inertiaGradientSquaredNorm, 0.0));
   let elasticityGradientNorm = sqrt(max(elasticityGradientSquaredNorm, 0.0));
+  let externalForceGradientNorm = sqrt(
+    max(externalForceGradientSquaredNorm, 0.0),
+  );
+  let targetGradientNorm = sqrt(max(targetGradientSquaredNorm, 0.0));
   let floorGradientNorm = sqrt(max(floorGradientSquaredNorm, 0.0));
   let residualDenominator = max(
     1.0,
-    inertiaGradientNorm + elasticityGradientNorm + floorGradientNorm,
+    inertiaGradientNorm + elasticityGradientNorm +
+      externalForceGradientNorm + targetGradientNorm + floorGradientNorm,
   );
   let relativeResidual = gradientNorm / residualDenominator;
   allFinite = allFinite && finiteScalar(elasticityEnergy) &&
-    finiteScalar(inertiaEnergy) && finiteScalar(floorEnergy) &&
+    finiteScalar(inertiaEnergy) && finiteScalar(externalForceEnergy) &&
+    finiteScalar(targetEnergy) && finiteScalar(floorEnergy) &&
     finiteScalar(gradientSquaredNorm) && finiteScalar(gradientNorm) &&
     finiteScalar(inertiaGradientSquaredNorm) &&
     finiteScalar(elasticityGradientSquaredNorm) &&
+    finiteScalar(externalForceGradientSquaredNorm) &&
+    finiteScalar(targetGradientSquaredNorm) &&
+    finiteScalar(externalForceGradientNorm) &&
+    finiteScalar(targetGradientNorm) &&
     finiteScalar(floorGradientSquaredNorm) &&
     finiteScalar(residualDenominator) && finiteScalar(relativeResidual) &&
     finiteScalar(maximumUpdate) && finiteScalar(minimumDeterminant) &&
@@ -928,6 +1096,18 @@ fn reduceDiagnostics(@builtin(global_invocation_id) globalId: vec3u) {
     finiteNumber(residualDenominator),
     finiteNumber(relativeResidual),
     select(0.0, 1.0, relativeResidualValid),
+  );
+  diagnosticData[summary + 5u] = vec4f(
+    finiteNumber(externalForceEnergy),
+    finiteNumber(targetEnergy),
+    finiteNumber(externalForceGradientNorm),
+    finiteNumber(targetGradientNorm),
+  );
+  diagnosticData[summary + 6u] = vec4f(
+    finiteNumber(inertiaGradientNorm),
+    finiteNumber(elasticityGradientNorm),
+    finiteNumber(floorGradientNorm),
+    0.0,
   );
 }
 `;
@@ -975,6 +1155,8 @@ export class JGS2GpuOracleEvaluator {
     private readonly layout: JGS2DiagnosticsLayout,
     private readonly scratch: GPUBuffer,
     private readonly uniforms: GPUBuffer,
+    private readonly ownedInactiveObjectives: GPUBuffer | undefined,
+    private readonly supportsActiveObjectives: boolean,
     private readonly bindGroup: GPUBindGroup,
     private readonly tetPipeline: GPUComputePipeline,
     private readonly vertexPipeline: GPUComputePipeline,
@@ -988,6 +1170,12 @@ export class JGS2GpuOracleEvaluator {
     source: JGS2GpuDiagnosticsSourceBuffers,
   ): Promise<JGS2GpuOracleEvaluator> {
     const layout = computeJGS2DiagnosticsLayout(vertexCount, tetCount);
+    if (device.limits.maxStorageBuffersPerShaderStage < 7) {
+      throw new Error(
+        "JGS2 exact diagnostics require seven storage buffers in the compute stage, " +
+          `but this adapter supports ${device.limits.maxStorageBuffersPerShaderStage}.`,
+      );
+    }
     if (
       layout.byteLength > device.limits.maxStorageBufferBindingSize ||
       layout.byteLength > device.limits.maxBufferSize
@@ -996,34 +1184,58 @@ export class JGS2GpuOracleEvaluator {
         `JGS2 diagnostics need ${layout.byteLength} bytes, exceeding this adapter's limits.`,
       );
     }
+    const objectiveByteLength =
+      vertexCount * JGS2_DIAGNOSTIC_OBJECTIVE_BYTES_PER_VERTEX;
+    if (
+      source.objectives &&
+      source.objectives.size < JGS2_DIAGNOSTIC_OBJECTIVE_BYTES_PER_VERTEX
+    ) {
+      throw new RangeError(
+        "JGS2 objective diagnostics need at least one 32-byte source record; " +
+          `the supplied buffer has ${source.objectives.size}.`,
+      );
+    }
+    const supportsActiveObjectives =
+      source.objectives !== undefined &&
+      source.objectives.size >= objectiveByteLength;
 
-    const scratch = device.createBuffer({
-      label: "jgs2-oracle-diagnostics-scratch",
-      size: layout.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    });
-    const uniforms = device.createBuffer({
-      label: "jgs2-oracle-diagnostics-uniforms",
-      size: JGS2_DIAGNOSTICS_UNIFORM_BYTES,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
+    let scratch: GPUBuffer | undefined;
+    let uniforms: GPUBuffer | undefined;
+    let ownedInactiveObjectives: GPUBuffer | undefined;
     try {
+      scratch = device.createBuffer({
+        label: "jgs2-oracle-diagnostics-scratch",
+        size: layout.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+      uniforms = device.createBuffer({
+        label: "jgs2-oracle-diagnostics-uniforms",
+        size: JGS2_DIAGNOSTICS_UNIFORM_BYTES,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      ownedInactiveObjectives = source.objectives
+        ? undefined
+        : device.createBuffer({
+            label: "jgs2-oracle-diagnostics-inactive-objectives",
+            size: JGS2_DIAGNOSTIC_OBJECTIVE_BYTES_PER_VERTEX,
+            usage: GPUBufferUsage.STORAGE,
+          });
+      const objectives = source.objectives ?? ownedInactiveObjectives!;
       const bindGroupLayout = device.createBindGroupLayout({
         label: "jgs2-oracle-diagnostics-bind-group-layout",
         entries: [
-          ...[0, 1, 2, 3, 4].map<GPUBindGroupLayoutEntry>((binding) => ({
+          ...[0, 1, 2, 3, 4, 5].map<GPUBindGroupLayoutEntry>((binding) => ({
             binding,
             visibility: GPUShaderStage.COMPUTE,
             buffer: { type: "read-only-storage" },
           })),
           {
-            binding: 5,
+            binding: 6,
             visibility: GPUShaderStage.COMPUTE,
             buffer: { type: "storage" },
           },
           {
-            binding: 6,
+            binding: 7,
             visibility: GPUShaderStage.COMPUTE,
             buffer: {
               type: "uniform",
@@ -1075,8 +1287,9 @@ export class JGS2GpuOracleEvaluator {
           { binding: 2, resource: { buffer: source.tets } },
           { binding: 3, resource: { buffer: source.stiffness } },
           { binding: 4, resource: { buffer: source.adjacency } },
-          { binding: 5, resource: { buffer: scratch } },
-          { binding: 6, resource: { buffer: uniforms } },
+          { binding: 5, resource: { buffer: objectives } },
+          { binding: 6, resource: { buffer: scratch } },
+          { binding: 7, resource: { buffer: uniforms } },
         ],
       });
       return new JGS2GpuOracleEvaluator(
@@ -1086,14 +1299,17 @@ export class JGS2GpuOracleEvaluator {
         layout,
         scratch,
         uniforms,
+        ownedInactiveObjectives,
+        supportsActiveObjectives,
         bindGroup,
         tetPipeline,
         vertexPipeline,
         reductionPipeline,
       );
     } catch (error) {
-      scratch.destroy();
-      uniforms.destroy();
+      scratch?.destroy();
+      uniforms?.destroy();
+      ownedInactiveObjectives?.destroy();
       throw error;
     }
   }
@@ -1102,6 +1318,11 @@ export class JGS2GpuOracleEvaluator {
     settings: JGS2GpuDiagnosticsEvaluationSettings,
   ): Promise<JGS2GpuOracleDiagnostics> {
     this.assertUsable();
+    if ((settings.objectiveFlags ?? 0) !== 0 && !this.supportsActiveObjectives) {
+      throw new Error(
+        "Active exact objective diagnostics require a full per-vertex objective source buffer.",
+      );
+    }
     const evaluation = this.evaluationTail.then(() =>
       this.evaluateImmediately(settings),
     );
@@ -1186,6 +1407,7 @@ export class JGS2GpuOracleEvaluator {
     this.destroyed = true;
     this.scratch.destroy();
     this.uniforms.destroy();
+    this.ownedInactiveObjectives?.destroy();
   }
 
   private assertUsable(): void {

@@ -126,7 +126,7 @@ These definitions apply unless a phase explicitly overrides them.
   feedback gate on the nominated machine. It runs every collected
   test, advances all 32 frozen force-free states by one step, and continues
   frozen cases `00` and `27` through 120 steps (one simulated second). The base
-  force-free trajectory remains 1,200 steps (10 seconds).
+  force-free trajectory runs a 480-step (four-second) conservation sentinel.
 - Every fast screenshot test continues its current state in place for one
   0-warm-up/12-measured combined telemetry interval with simultaneous wall/CPU
   and GPU timestamp instrumentation when supported. It logs and attaches FPS,
@@ -135,12 +135,12 @@ These definitions apply unless a phase explicitly overrides them.
   are smoke-only. The isolated
   stress baseline separately records one combined 30/120 CPU/GPU timestamp
   pass as smoke telemetry.
-- `npm.cmd run test:e2e:full` is the qualification gate. It restores all 32
-  force-free cases to the canonical 1,200-step trajectory and records formal
-  120-warm-up/600-measured CPU/GPU profiles for the isolated baseline and each
-  unique short visual workload. Long drop/stress tests retain the combined
-  0/12 smoke interval, continuing their actual settled state rather than
-  reloading frame zero.
+- `npm.cmd run test:e2e:full` is the qualification gate. It restores the base
+  force-free trajectory and all 32 force-free corpus cases to the canonical
+  1,200-step trajectory and records formal 120-warm-up/600-measured CPU/GPU
+  profiles for the isolated baseline and each unique short visual workload.
+  Long drop/stress tests retain the combined 0/12 smoke interval, continuing
+  their actual settled state rather than reloading frame zero.
 - The fast policy does not modify the canonical scene/corpus manifest or
   historical evidence. Criteria requiring the complete 32-by-1,200 corpus or
   formal performance samples must use `test:e2e:full`.
@@ -296,11 +296,11 @@ nonlinear energy gradient and Hessian.
 | Reviewer | TBD |
 | Start date | 2026-07-16 |
 | Completion date | TBD |
-| Branch or PR | main; Phase 0 gate ce478e6; Phase 1 material/runtime gate c0f5456; CPU globalization reference 988b4bc; GPU globalization milestone (this commit) |
-| Design records | docs/phase1-stable-neo-hookean.md; docs/jgs2-implementation.md; docs/evidence/phase1-nonlinear-cubature.md; docs/evidence/phase1-globalization-reference.md; docs/evidence/phase1-gpu-globalization.md; manifests/phase1-scenes.v1.json; manifests/phase1-cubature.v1.json; manifests/phase1-globalization.v1.json; manifests/phase1-globalization.v2.json |
+| Branch or PR | main; Phase 0 gate ce478e6; Phase 1 material/runtime gate c0f5456; CPU globalization reference 988b4bc; GPU globalization milestone 96045ca; composite-objective milestone (this milestone commit) |
+| Design records | docs/phase1-stable-neo-hookean.md; docs/jgs2-implementation.md; docs/evidence/phase1-nonlinear-cubature.md; docs/evidence/phase1-globalization-reference.md; docs/evidence/phase1-gpu-globalization.md; docs/evidence/phase1-composite-objective.md; manifests/phase1-scenes.v1.json; manifests/phase1-cubature.v1.json; manifests/phase1-globalization.v1.json; manifests/phase1-globalization.v2.json; manifests/phase1-globalization.v3.json |
 | Primary test command | Routine: npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e. Qualification: npm.cmd run test:e2e:full |
 | Performance result | TBD |
-| Known limitations | CPU/WGSL material derivatives, exact diagnostics, material dispatch, affine-exact frames, nonlinear current-pose Cubature, packed-f32 quality gates, and production update parity are implemented. The Float64 and stable WebGPU material/inertia paths now cover scale-aware solve-only shifting, effective-f32 geometry-before-energy Armijo trials, all-tetrahedron source/assembled feasibility with whole-pose revert, and component-aware GPU convergence histories. External-force and quadratic-target terms, GPU-driven early exit, public stable scenes/labels, forces/handles, tiny/public runtime convergence evidence, and Phase 1 performance qualification remain. Dense TypeScript preprocessing is intentionally limited to small fixtures. |
+| Known limitations | CPU/WGSL material derivatives, exact diagnostics, material dispatch, affine-exact frames, nonlinear current-pose Cubature, packed-f32 quality gates, and production update parity are implemented. The Float64 and stable WebGPU paths now include arbitrary per-vertex linear forces and isotropic quadratic targets in their scale-aware solve-only shifting, effective-f32 geometry-before-energy Armijo trials, all-tetrahedron source/assembled feasibility with whole-pose revert, and component-aware convergence histories. GPU-driven early exit, public stable scenes/labels, scripted/pointer controls, tiny/public runtime convergence evidence, and Phase 1 performance qualification remain. Dense TypeScript preprocessing is intentionally limited to small fixtures. |
 | Exit sign-off | TBD |
 
 ### Required implementation
@@ -315,7 +315,7 @@ nonlinear energy gradient and Hessian.
 - [x] Evaluate current complementary gradients and Hessians in the Cubature
       projection.
 - [x] Retrain the equilibrium bases and Cubature data for the nonlinear model.
-- [ ] Add arbitrary per-vertex external forces.
+- [x] Add arbitrary per-vertex external forces.
 - [ ] Add scripted and pointer-driven kinematic targets with clean release.
 - [x] Add GPU-side convergence flags based on residual and update norms.
 - [x] Add monotone local line-search infrastructure for nonlinear updates.
@@ -324,15 +324,20 @@ nonlinear energy gradient and Hessian.
 - [ ] Preserve co-rotated linear elasticity only as an explicitly labeled
       regression or debugging material in public scene metadata.
 
-CPU reference and partial production-WebGPU implementations for the solve-only
-shift, restricted line search, assembled feasibility, and convergence metric
-are recorded in `docs/evidence/phase1-globalization-reference.md` and
-`docs/evidence/phase1-gpu-globalization.md`. P1-EC-05 is now closed by the
+CPU reference and production-WebGPU implementations for the complete
+material/inertia/force/target solve-only shift, restricted line search,
+assembled feasibility, and convergence metric are recorded in
+`docs/evidence/phase1-globalization-reference.md`,
+`docs/evidence/phase1-gpu-globalization.md`, and
+`docs/evidence/phase1-composite-objective.md`. P1-EC-05 is closed by the
 positive-determinant material corpus plus GPU-exact source, local-trial, and
 assembled-candidate rejection/revert tests, including a post-gate pinned-target
-regression. P1-EC-06 through P1-EC-10 remain
-open until force/target terms, tiny/public histories, dynamic checkpoints, and
-the complete composite objective have their required evidence.
+regression. The focused full composite qualification closes P1-EC-07 through
+P1-EC-09 over all 240 active local systems: complete-objective accepted steps
+satisfy Armijo, nonzero directions descend, and normalized shift remains at
+most `1e-3`. P1-EC-06 and P1-EC-10 remain open for dynamic checkpoints and
+tiny/public histories. A production target API does not by itself satisfy the
+public scripted/pointer handle and release criterion P1-EC-14.
 
 ### Required scenes
 
@@ -356,14 +361,14 @@ the complete composite objective have their required evidence.
       material evaluation according to the documented inversion policy.
 - [ ] P1-EC-06: Every dynamic checkpoint in the canonical Phase 1 manifest has
       minimum deformation determinant >= 1e-4.
-- [ ] P1-EC-07: Every accepted local line-search step decreases its explicitly
+- [x] P1-EC-07: Every accepted local line-search step decreases its explicitly
       defined restricted JGS2 subproblem energy by at least the configured
       Armijo decrease; assembled Jacobi energy is recorded separately and is
       not used to accept an individual local step.
-- [ ] P1-EC-08: For every canonical nonzero-gradient local system, the accepted
+- [x] P1-EC-08: For every canonical nonzero-gradient local system, the accepted
       direction satisfies gradient dot direction < 0 after the documented
       positive-definite treatment.
-- [ ] P1-EC-09: The normalized local diagonal shift never exceeds the maximum
+- [x] P1-EC-09: The normalized local diagonal shift never exceeds the maximum
       permitted regularization ratio recorded in the project fields.
 - [ ] P1-EC-10: Tiny reference solves finish with relative residual <= 1e-5; runtime
       demos finish within their configured threshold, which may not exceed
@@ -390,8 +395,9 @@ the complete composite objective have their required evidence.
 | Neo-Hookean derivative report | CPU 60-pose corpus: worst gradient 8.975e-10; worst Hessian 1.957e-11; exact tangent symmetry and rest-stiffness parity pass | [x] |
 | Objectivity and rest-state report | CPU density, stress, tangent action, translated tetrahedron, internal force/torque, and translational null-mode tests pass; f32-exact GPU quarter turns have rest and rigid energy/force errors 0/0 under the roadmap default zero-reference metric | [x] |
 | CPU-versus-GPU report | Frozen 64-pose material-only hardware corpus: worst relative energy 2.234e-6, gradient 1.161e-6, local Hessian 1.089e-6; total implicit parity also <=1e-3; scaled non-affine vertex-frame error 8.702e-8 | [x] |
-| Convergence history | CPU normalization plus GPU material/inertia/contact component reduction and 64-record ABI pass; tiny-reference, public runtime, early-exit, force, and target evidence TBD | [ ] |
+| Convergence history | CPU normalization plus GPU material/inertia/contact/force/target component implementation and 64-record ABI pass focused hardware coverage; tiny-reference, public runtime, and early-exit evidence TBD | [ ] |
 | GPU globalization report | docs/evidence/phase1-gpu-globalization.md; stable production shift/Armijo/assembled-revert/component-reduction hardware cases | [x] |
+| Composite objective report | docs/evidence/phase1-composite-objective.md; CPU 15/15 with 240-system selected-update RMS 1.260195e-3; focused routine/full hardware 3/3 each over exactly 60/240 active locals; aggregate 282-unit/build/manifest and 27/27 routine/full E2E gates pass | [x] |
 | Cubature residual report | 12-tet full-rank parity fixture, K=6: packed residual maximum 0.548989%; packed selected-vs-independent-dense update RMS training 3.713075e-5, held-out 3.984377e-5, combined 3.796498e-5; two-iteration production GPU parity 2.113e-9 | [x] |
 | Scene screenshots and diagnostics | TBD | [ ] |
 | Performance report | TBD | [ ] |
@@ -1044,6 +1050,10 @@ later passing run so the history remains visible.
 | P1-GATE-04 | 2026-07-16 | 1 | Phase 1 CPU globalization reference milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e | i7-13700K / RTX 5090 / Chrome 150 | Pass: 189 unit, build, frozen 26/189 unit and 7/18 E2E selectors, 18/18 hardware E2E in 46802.453 ms with zero retries/skips/errors; no Phase 1 exit or formal performance claim | docs/reproducibility.md; docs/evidence/phase1-globalization-reference.md | Complete exact-current-tree routine regression; independent code/evidence audits; full qualification intentionally deferred to roadmap exit |
 | P1-EC-05 | 2026-07-17 | 1 | Phase 1 GPU globalization milestone | npm.cmd run test:e2e -- tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts tests/e2e/nonlinear-globalization-gpu.spec.ts | i7-13700K / RTX 5090 / Chrome 150 | Pass: GPU material remains finite at J=0.5, 0.1, and 0.01; a host-pass/GPU-f32-fail source is rejected at initialization; infeasible local trials skip energy; negative and nonfinite assembled candidates revert byte-exactly while preserving a valid source minimum; a pinned target with candidate J=-1 cannot bypass the gate during finalization | docs/evidence/phase1-gpu-globalization.md; manifests/phase1-globalization.v2.json | Automated material/source/local/assembled inversion policy evidence; fresh independent review |
 | P1-GATE-05 | 2026-07-17 | 1 | Phase 1 GPU globalization milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e; npm.cmd run test:e2e:full | i7-13700K / RTX 5090 / Chrome 150 | Pass: 248 unit, build, frozen 26/248 unit and 7/24 E2E selectors; routine 24/24 in 50.6 s and qualification 24/24 in 4.0 min with zero skips/retries; full Cubature 24 unique poses/240 locals, max update error 9.992e-7; no Phase 1 exit claim | docs/reproducibility.md; docs/evidence/phase1-gpu-globalization.md | Complete exact-current-tree routine and qualification regression; fresh independent code/evidence/invariant review |
+| P1-EC-07 | 2026-07-17 | 1 | Phase 1 composite-objective milestone (this milestone commit) | npm.cmd run test:e2e:full -- tests/e2e/nonlinear-objectives-gpu.spec.ts | i7-13700K / RTX 5090 / Chrome 150 | Pass: 3/3 selectors over exactly 240 active local systems; every accepted complete-objective step satisfies its Armijo bound and J>1e-4; maximum accepted-energy-delta relative error 2.493165e-6 | docs/evidence/phase1-composite-objective.md; manifests/phase1-globalization.v3.json | Focused full hardware qualification; aggregate P1-GATE-06 passed |
+| P1-EC-08 | 2026-07-17 | 1 | Phase 1 composite-objective milestone (this milestone commit) | npm.cmd run test:e2e:full -- tests/e2e/nonlinear-objectives-gpu.spec.ts | i7-13700K / RTX 5090 / Chrome 150 | Pass: every accepted nonzero direction descends; minimum objective-induced direction effect 4.052469e-3, maximum GPU/CPU direction relative error 2.228256e-8, and maximum error relative to objective effect 2.454325e-6 | docs/evidence/phase1-composite-objective.md; manifests/phase1-globalization.v3.json | Focused full hardware qualification; aggregate P1-GATE-06 passed |
+| P1-EC-09 | 2026-07-17 | 1 | Phase 1 composite-objective milestone (this milestone commit) | npm.cmd run test:e2e:full -- tests/e2e/nonlinear-objectives-gpu.spec.ts | i7-13700K / RTX 5090 / Chrome 150 | Pass: every one of 240 complete-objective local systems keeps normalized diagonal shift <=1e-3; maximum direction and alpha relative errors are 2.228256e-8 and 0 | docs/evidence/phase1-composite-objective.md; manifests/phase1-globalization.v3.json | Focused full hardware qualification; aggregate P1-GATE-06 passed |
+| P1-GATE-06 | 2026-07-17 | 1 | Phase 1 composite-objective milestone (this milestone commit) | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e; npm.cmd run test:e2e:full | i7-13700K / RTX 5090 / Chrome 150 | Pass: 282/282 unit tests across 38 files in 5.59 s; build; frozen 26/282 unit and 7/27 E2E selectors; routine 27/27 in 57.3 s Playwright / 58.5 s command wall, below one minute; full 27/27 in 5.0 min Playwright / 299 s command wall; full qualification includes 38,400 force-free frames and 240 composite active locals | docs/reproducibility.md; docs/evidence/phase1-composite-objective.md; manifests/phase1-globalization.v3.json | Complete exact-current-tree routine and qualification regression; Phase 1 exit remains open |
 
 ## Decision log
 
@@ -1059,6 +1069,7 @@ and accepted limitations.
 | P1-D04 | 2026-07-16 | 1 | Keep Phase 1 Float64 oracle/preprocessing on CPU JavaScript and per-frame work on WebGPU; do not add WASM | WASM does not improve the GPU-resident loop and large in-browser sparse preprocessing is outside this phase | Reconsider only for arbitrary large user meshes; fixed large scenes should load offline artifacts | Codex implementation agent; reviewer pending |
 | P1-D05 | 2026-07-16 | 1 | Define the current P1-EC-11 parity set as the versioned nonlinear Cubature fixture, require T>K and both Float64/f32 candidate rank >K, and fail stable preprocessing closed above 1% | The material-only single-tet oracle is not a sparse-Cubature fixture, while the 12-tet edge-constrained fixture has rank 12 and nonzero K=6 approximation error; future stable parity scenes cannot silently inherit this result | Every future stable parity scene must be added to the Cubature manifest or carry its own equivalent gate; unsuitable automatic preprocessing throws instead of shipping low-quality weights | Codex implementation agent; independent architecture and gate audits |
 | P1-D06 | 2026-07-17 | 1 | Apply immutable pinned rest targets inside the stable assembled-feasibility candidate and never snap them again during finalization | A post-gate snap could invert canonical storage after diagnostics had certified a reverted feasible source; the hardware regression starts at J=+1 and rejects a pinned target at J=-1 | Rejected targets leave the byte-identical source in canonical storage; future moving or quadratic targets require their own gated or line-searched objective path | Codex implementation agent; independent invariant and evidence audits |
+| P1-D07 | 2026-07-17 | 1 | Represent arbitrary user force as the explicit potential `-f dot x` and a soft handle as isotropic `1/2 k ||x-t||^2`; store both in a 32-byte read-only GPU record, update it with queue-ordered writes, and release by setting `k=0` without snapping | The explicit force is equivalent up to a constant to the paper's Eq. 1 shifted predictor while retaining a separately measurable convergence component. Two vec4 records keep mutable data out of the uniform ABI and preserve a GPU-resident frame loop; isotropic stiffness is sufficient for handle motion and makes release exact | Stable solves use objective binding 6 and uniform binding 7; one `stepFrames` batch sees a constant objective snapshot; pinned conflicts and legacy active objectives fail closed. Public scripted/pointer controls and their semantic release evidence remain required; WASM remains unjustified for this hot loop | Codex implementation agent; exact-tree P1-GATE-06 complete; this milestone commit |
 
 ## Blocker log
 

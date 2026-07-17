@@ -45,8 +45,14 @@ It also freezes pinned-target application as part of the assembled feasibility
 gate, with no post-gate target snap.
 Its objective remains explicitly limited to implicit-Euler inertia, stable
 Neo-Hookean material, and the analytic floor penalty. Composite force/target
-terms, GPU-driven early termination, public stable scenes, and performance
-qualification are marked pending; `qualifiesPhase1Exit` remains false.
+terms were then added by
+[`manifests/phase1-globalization.v3.json`](../manifests/phase1-globalization.v3.json),
+which freezes the explicit-force/predictor equivalence, isotropic soft-target
+objective, 32-byte per-vertex GPU ABI, queue-ordered update/release semantics,
+and three individually selectable hardware cases. Versions 1 and 2 retain
+their exact historical inventories. GPU-driven early termination, public
+stable scenes and controls, and performance qualification remain pending;
+every version keeps `qualifiesPhase1Exit` false.
 
 ## Validation
 
@@ -73,15 +79,17 @@ then independently enforce the all-element dense projection identity,
 nonnegative selection, packed training residual, held-out unregularized update
 RMS, and production WebGPU update parity.
 
-`src/reproducibility/phase1-globalization-manifest.test.ts` keeps the v1
-historical contract executable and rejects unknown fields or drift in v2 source
-manifests, GPU test provenance/selectors, policy values, objective terms,
-reference gates, or case inventory. It binds the frozen values to executable
+`src/reproducibility/phase1-globalization-manifest.test.ts` keeps the v1 and v2
+historical contracts executable and rejects unknown fields or drift in the v3
+source manifests, GPU test provenance/selectors, policy values, objective
+terms, reference gates, ABI/update semantics, or case inventory. It treats the
+schema as a strict V1-or-V2-or-V3 union and binds frozen values to executable
 CPU and GPU constants; the existing source-manifest suites independently
 validate referenced fixtures. Numerical tests independently exercise the
-restricted scalar, shared shift, line search, assembled feasibility/revert,
-and component-aware convergence diagnostics. This is still partial Phase 1
-evidence and does not close the phase exit.
+complete restricted scalar, shared shift, line search, assembled
+feasibility/revert, mutable objective lifecycle, and component-aware
+convergence diagnostics. This is still partial Phase 1 evidence and does not
+close the phase exit.
 
 `scripts/verify-baseline-tests.mjs` independently asks Vitest and Playwright to
 list the tests they actually collect, then matches every frozen source and
@@ -113,13 +121,15 @@ performance evidence:
 npm.cmd run test:e2e:full
 ```
 
-Both commands collect the same 24 tests with zero expected skips. They differ
+Both commands collect the same 27 tests with zero expected skips. They differ
 only in deliberately expensive execution depth:
 
 | Workload | Fast `test:e2e` | Qualification `test:e2e:full` |
 | --- | --- | --- |
+| Base force-free conservation trajectory | 480 steps (four simulated seconds) | Canonical 1,200 steps (10 simulated seconds) |
 | 32-state force-free corpus | All 32 cases run one step; frozen cases `00` and `27` continue to 120 steps (one simulated second) | All 32 cases run the canonical 1,200 steps (10 simulated seconds) |
 | Nonlinear Cubature GPU oracle | Six unique poses, 10 active locals each, all at two nonlinear iterations | All 24 unique poses and exactly 240 active locals; first and last sentinels use two iterations and the remaining 22 use one |
+| Composite-objective GPU oracle | Six unique poses and exactly 60 active local systems cover force-only, target-only, and combined objectives | All 24 unique poses and exactly 240 active local systems cover the same three objective modes |
 | Short visual scene timing | One in-place combined profile after correctness assertions: 0 warm-up + 12 measured frames, no reload | Fresh uncontaminated CPU and GPU profiles, each with 120 warm-up and 600 measured frames |
 | Long drop/stress timing | One 0/12 combined profile continuing the actual settled state | The same 0/12 settled-state combined smoke profile; no frame-zero reload |
 | Isolated stress baseline | One combined CPU/GPU timestamp pass with 30 warm-up and 120 measured frames | Fresh uncontaminated CPU and GPU profiles, each with 120 warm-up and 600 measured frames |
@@ -127,14 +137,18 @@ only in deliberately expensive execution depth:
 The fast corpus still checks breadth by constructing and advancing every frozen
 state on the GPU, while cases `00` and `27` provide one-second depth because
 they are the frozen maximum-angular-speed and maximum-linear-speed sentinels.
-The separate base force-free test remains a full 1,200-step, 10-second
-conservation trajectory in both tiers.
+The separate base force-free fast sentinel still exercises 480 consecutive
+GPU steps, screenshots, momentum diagnostics, follow-camera evidence, and the
+submission policy. The qualification tier owns its canonical 1,200-step,
+10-second conservation evidence.
 
 The six stable-globalization selectors share one hardware page, adapter,
-device, and frozen CPU fixture. They remain individually runnable, but avoid
-repeating shader compilation and precomputation. This preserves every
-assertion while keeping the routine suite below one minute on the nominated
-machine.
+device, and frozen CPU fixture. The three composite-objective selectors share
+a second page/device fixture. All nine remain individually runnable while
+avoiding repeated shader compilation and preprocessing within their files. The
+final exact-tree routine passed 27/27 tests in 57.3 seconds of Playwright time
+and 58.5 seconds of command wall time, remaining below one minute. The
+historical 24-test timing below remains historical.
 
 The list reporter logs the finalized duration of every non-skipped E2E
 attempt. The built-in JSON reporter preserves per-attempt status, start time,
@@ -297,6 +311,26 @@ tests in 50.6 seconds. The complete qualification tier also passed
 120-warm-up/600-measured performance profiles. The stable Cubature qualification
 covered 24 unique poses and exactly 240 active local systems with maximum
 production-update relative error `9.992e-7`.
+
+The additive composite-objective milestone is recorded in
+[`docs/evidence/phase1-composite-objective.md`](evidence/phase1-composite-objective.md).
+Its strict v3 manifest adds three independently selectable E2E cases and raises
+the current Playwright collection from the historical 24 tests to 27. Focused
+CPU tests pass 15/15 and cover 240 composite systems with selected-update RMS
+`1.260195e-3`; the v1/v2/v3 manifest suite passes 9/9 and the production build
+passes. The focused routine and full hardware files each pass 3/3, covering
+exactly 60 and 240 active local systems. Their root selector also isolates the
+analytic total objective gradient/Hessian from a copied-predictor baseline and
+uses one sparse-beam solver to prove source-share subtraction plus neighbor-only
+Cubature projection. The exact-tree aggregate gate passed all 282 unit tests
+across 38 files in 5.59 seconds, the production build, and the frozen baseline
+manifest at 26/282 unit selectors and 7/27 E2E selectors. The routine tier
+passed 27/27 in 57.3 seconds of Playwright time and 58.5 seconds of command wall
+time, below one minute. The full tier passed 27/27 in 5.0 minutes of Playwright
+time and 299 seconds of command wall time, including the 38,400-frame
+force-free corpus and exactly 240 active composite-objective local systems.
+Phase 1 exit is not claimed because its remaining roadmap criteria are still
+open.
 
 The later standard-performance-observability gate passed all 149 unit tests,
 the production build, frozen selector verification at 26/149 unit and 7/17

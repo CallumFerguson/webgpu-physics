@@ -8,6 +8,12 @@ import {
 } from "./jgs2-globalization";
 
 export const JGS2_VERTEX_STATIC_WORDS = 12;
+/** Two vec4 records: external force and isotropic quadratic target. */
+export const JGS2_VERTEX_OBJECTIVE_WORDS = 8;
+export const JGS2_VERTEX_OBJECTIVE_BYTES =
+  JGS2_VERTEX_OBJECTIVE_WORDS * 4;
+export const JGS2_OBJECTIVE_EXTERNAL_FORCE_ACTIVE_BIT = 1 << 0;
+export const JGS2_OBJECTIVE_TARGET_ACTIVE_BIT = 1 << 1;
 export const JGS2_TET_STATIC_WORDS = 20;
 export const JGS2_REST_STIFFNESS_FLOATS = 12 * 12;
 export const JGS2_CUBATURE_BASIS_FLOATS = 4 * 3 * 3;
@@ -16,6 +22,15 @@ export const JGS2_CUBATURE_RECORD_WORDS =
 export const JGS2_UNIFORM_BYTES = 11 * 16;
 export const JGS2_MATERIAL_COROTATED_LINEAR = 0;
 export const JGS2_MATERIAL_STABLE_NEO_HOOKEAN = 1;
+
+export interface JGS2GpuObjectivesInput {
+  /** Three force components per vertex. The potential is -force dot x. */
+  readonly externalForces?: Float32Array;
+  /** Three world-space target coordinates per vertex. */
+  readonly targetPositions?: Float32Array;
+  /** One finite, nonnegative isotropic target stiffness per vertex. */
+  readonly targetStiffnesses?: Float32Array;
+}
 
 export interface JGS2GpuInput {
   readonly vertexCount: number;
@@ -33,6 +48,8 @@ export interface JGS2GpuInput {
   readonly vertexColors: Float32Array;
   /** vec4u per vertex: adjacency start/count, pinned flag, body id. */
   readonly vertexInfo: Uint32Array;
+  /** Optional per-vertex linear forces and soft quadratic targets. */
+  readonly objectives?: JGS2GpuObjectivesInput;
 
   /** Four vertex indices per tetrahedron. */
   readonly tetIndices: Uint32Array;
@@ -116,6 +133,81 @@ function assertFiniteArray(name: string, values: Float32Array): void {
   }
 }
 
+function validateJGS2GpuObjectives(input: JGS2GpuInput): void {
+  const objectives = input.objectives;
+  if (!objectives) return;
+
+  const hasTargetPositions = objectives.targetPositions !== undefined;
+  const hasTargetStiffnesses = objectives.targetStiffnesses !== undefined;
+  if (hasTargetPositions !== hasTargetStiffnesses) {
+    throw new RangeError(
+      "objectives.targetPositions and objectives.targetStiffnesses must be " +
+        "provided together.",
+    );
+  }
+
+  if (objectives.externalForces) {
+    assertLength(
+      "objectives.externalForces",
+      objectives.externalForces,
+      input.vertexCount * 3,
+    );
+    assertFiniteArray(
+      "objectives.externalForces",
+      objectives.externalForces,
+    );
+  }
+  if (objectives.targetPositions && objectives.targetStiffnesses) {
+    assertLength(
+      "objectives.targetPositions",
+      objectives.targetPositions,
+      input.vertexCount * 3,
+    );
+    assertLength(
+      "objectives.targetStiffnesses",
+      objectives.targetStiffnesses,
+      input.vertexCount,
+    );
+    assertFiniteArray(
+      "objectives.targetPositions",
+      objectives.targetPositions,
+    );
+    assertFiniteArray(
+      "objectives.targetStiffnesses",
+      objectives.targetStiffnesses,
+    );
+    for (
+      let vertex = 0;
+      vertex < objectives.targetStiffnesses.length;
+      vertex += 1
+    ) {
+      if (objectives.targetStiffnesses[vertex]! < 0) {
+        throw new RangeError(
+          `objectives.targetStiffnesses[${vertex}] must be nonnegative.`,
+        );
+      }
+    }
+  }
+
+  for (let vertex = 0; vertex < input.vertexCount; vertex += 1) {
+    if (input.vertexInfo[vertex * 4 + 2] === 0) continue;
+    const forceBase = vertex * 3;
+    const hasForce = objectives.externalForces
+      ? objectives.externalForces[forceBase] !== 0 ||
+        objectives.externalForces[forceBase + 1] !== 0 ||
+        objectives.externalForces[forceBase + 2] !== 0
+      : false;
+    const hasTarget =
+      (objectives.targetStiffnesses?.[vertex] ?? 0) !== 0;
+    if (hasForce || hasTarget) {
+      throw new RangeError(
+        `Pinned vertex ${vertex} cannot have a nonzero external force or ` +
+          "quadratic-target stiffness.",
+      );
+    }
+  }
+}
+
 export function validateJGS2GpuInput(input: JGS2GpuInput): void {
   const { vertexCount, tetCount, cubatureK } = input;
   assertInteger("vertexCount", vertexCount, 1);
@@ -129,6 +221,7 @@ export function validateJGS2GpuInput(input: JGS2GpuInput): void {
   assertLength("vertexRest", input.vertexRest, vertexCount * 4);
   assertLength("vertexColors", input.vertexColors, vertexCount * 4);
   assertLength("vertexInfo", input.vertexInfo, vertexCount * 4);
+  validateJGS2GpuObjectives(input);
   inferJGS2BodyCount(input.vertexInfo, vertexCount);
   assertLength("tetIndices", input.tetIndices, tetCount * 4);
   assertLength("tetInverseDm", input.tetInverseDm, tetCount * 12);
@@ -524,6 +617,44 @@ export function packJGS2VertexStatic(input: JGS2GpuInput): Uint8Array {
   }
 
   return new Uint8Array(buffer);
+}
+
+/**
+ * Pack the mutable per-vertex objective ABI consumed by the GPU solver.
+ *
+ * Each 32-byte record contains `vec4(force.xyz, 0)` followed by
+ * `vec4(target.xyz, stiffness)`. An omitted target is initialized at the
+ * uploaded current position with zero stiffness, so it is inert until a
+ * later explicit update.
+ */
+export function packJGS2VertexObjectives(
+  input: JGS2GpuInput,
+): Float32Array {
+  validateJGS2GpuObjectives(input);
+  const packed = new Float32Array(
+    input.vertexCount * JGS2_VERTEX_OBJECTIVE_WORDS,
+  );
+  const forces = input.objectives?.externalForces;
+  const targets = input.objectives?.targetPositions;
+  const stiffnesses = input.objectives?.targetStiffnesses;
+  for (let vertex = 0; vertex < input.vertexCount; vertex += 1) {
+    const destination = vertex * JGS2_VERTEX_OBJECTIVE_WORDS;
+    const xyz = vertex * 3;
+    const position = vertex * 4;
+    if (forces) {
+      packed[destination] = forces[xyz]!;
+      packed[destination + 1] = forces[xyz + 1]!;
+      packed[destination + 2] = forces[xyz + 2]!;
+    }
+    packed[destination + 3] = 0;
+    packed[destination + 4] = targets?.[xyz] ?? input.positions[position]!;
+    packed[destination + 5] =
+      targets?.[xyz + 1] ?? input.positions[position + 1]!;
+    packed[destination + 6] =
+      targets?.[xyz + 2] ?? input.positions[position + 2]!;
+    packed[destination + 7] = stiffnesses?.[vertex] ?? 0;
+  }
+  return packed;
 }
 
 export function packJGS2TetStatic(input: JGS2GpuInput): Uint8Array {

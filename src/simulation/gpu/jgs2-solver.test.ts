@@ -12,8 +12,14 @@ import {
 import {
   computeJGS2DynamicOffsets,
   JGS2_MATERIAL_COROTATED_LINEAR,
+  JGS2_OBJECTIVE_EXTERNAL_FORCE_ACTIVE_BIT,
+  JGS2_OBJECTIVE_TARGET_ACTIVE_BIT,
+  JGS2_UNIFORM_BYTES,
+  JGS2_VERTEX_OBJECTIVE_BYTES,
+  JGS2_VERTEX_OBJECTIVE_WORDS,
   type JGS2GpuInput,
 } from "./layout";
+import { JGS2GpuOracleEvaluator } from "./jgs2-diagnostics";
 
 function createBatchTestSolver(globalizationEnabled = false): {
   readonly solver: JGS2GpuSolver;
@@ -25,6 +31,11 @@ function createBatchTestSolver(globalizationEnabled = false): {
     timestampWriteIndices: number[];
     timestampPassLabels: string[];
     passLabels: string[];
+    objectiveWrites: Array<{
+      readonly offset: number;
+      readonly data: Float32Array;
+    }>;
+    uniformPayloads: Uint8Array[];
   };
 } {
   const counters = {
@@ -35,6 +46,11 @@ function createBatchTestSolver(globalizationEnabled = false): {
     timestampWriteIndices: [] as number[],
     timestampPassLabels: [] as string[],
     passLabels: [] as string[],
+    objectiveWrites: [] as Array<{
+      readonly offset: number;
+      readonly data: Float32Array;
+    }>,
+    uniformPayloads: [] as Uint8Array[],
   };
   const computePass = {
     setPipeline: () => undefined,
@@ -43,6 +59,8 @@ function createBatchTestSolver(globalizationEnabled = false): {
     end: () => undefined,
   } as unknown as GPUComputePassEncoder;
   const commandBuffer = {} as GPUCommandBuffer;
+  const objectiveBuffer = {} as GPUBuffer;
+  const uniformBuffer = {} as GPUBuffer;
   const encoder = {
     beginComputePass: (descriptor?: GPUComputePassDescriptor) => {
       counters.computePasses += 1;
@@ -69,8 +87,26 @@ function createBatchTestSolver(globalizationEnabled = false): {
   const device = {
     createCommandEncoder: () => encoder,
     queue: {
-      writeBuffer: () => {
-        counters.uniformWrites += 1;
+      writeBuffer: (
+        destination: GPUBuffer,
+        offset: number,
+        data: GPUAllowSharedBufferSource,
+      ) => {
+        const view = data as ArrayBufferView;
+        const bytes = new Uint8Array(
+          view.buffer,
+          view.byteOffset,
+          view.byteLength,
+        ).slice();
+        if (destination === objectiveBuffer) {
+          counters.objectiveWrites.push({
+            offset,
+            data: new Float32Array(bytes.buffer),
+          });
+        } else {
+          counters.uniformWrites += 1;
+          counters.uniformPayloads.push(bytes);
+        }
       },
       submit: (commands: readonly GPUCommandBuffer[]) => {
         expect(commands).toEqual([commandBuffer]);
@@ -79,7 +115,6 @@ function createBatchTestSolver(globalizationEnabled = false): {
     },
   } as unknown as GPUDevice;
   const pipeline = {} as GPUComputePipeline;
-  const buffer = {} as GPUBuffer;
   const bindGroup = {} as GPUBindGroup;
   const dynamicOffsets = computeJGS2DynamicOffsets(4, 1, 1);
   const solver = Object.create(JGS2GpuSolver.prototype) as JGS2GpuSolver;
@@ -108,10 +143,14 @@ function createBatchTestSolver(globalizationEnabled = false): {
       applyBodyHorizontalCorrection: pipeline,
       finalize: pipeline,
     },
+    buffers: {
+      dynamic: {} as GPUBuffer,
+      objectives: objectiveBuffer,
+    },
     uniforms: {
-      base: buffer,
-      fromBToA: buffer,
-      fromAToB: buffer,
+      base: uniformBuffer,
+      fromBToA: uniformBuffer,
+      fromAToB: uniformBuffer,
       baseBindGroup: bindGroup,
       fromBToABindGroup: bindGroup,
       fromAToBBindGroup: bindGroup,
@@ -123,6 +162,14 @@ function createBatchTestSolver(globalizationEnabled = false): {
     globalizationEnabled,
     globalizationRecordsAvailable: false,
     submittedIterations: 0,
+    objectiveData: new Float32Array(
+      (globalizationEnabled ? 4 : 1) * JGS2_VERTEX_OBJECTIVE_WORDS,
+    ),
+    pinnedVertices: new Uint8Array(4),
+    objectiveFlagsValue: 0,
+    activeExternalForceCount: 0,
+    activeTargetCount: 0,
+    objectiveRevisionValue: 0,
   });
   return { solver, counters };
 }
@@ -193,6 +240,288 @@ describe("JGS2 convergence scene scale", () => {
     expect(scale).toBe(JGS2_DEGENERATE_DYNAMIC_SCENE_SCALE);
     expect(Number.isFinite(scale)).toBe(true);
     expect(scale).toBeGreaterThan(0);
+  });
+});
+
+describe("JGS2 mutable objective API", () => {
+  it("retains a full stable mirror but only one inert legacy binding record", () => {
+    const { solver: stable } = createBatchTestSolver(true);
+    const { solver: legacy } = createBatchTestSolver(false);
+    const objectiveData = (solver: JGS2GpuSolver) =>
+      (solver as unknown as { readonly objectiveData: Float32Array })
+        .objectiveData;
+
+    expect(objectiveData(stable)).toHaveLength(
+      stable.vertexCount * JGS2_VERTEX_OBJECTIVE_WORDS,
+    );
+    expect(objectiveData(legacy)).toHaveLength(JGS2_VERTEX_OBJECTIVE_WORDS);
+    expect(() => legacy.setExternalForce(0, [0, 0, 0])).toThrow(
+      /stable Neo-Hookean production path/,
+    );
+  });
+
+  it("updates sparse force and target records with O(1) activity bookkeeping", () => {
+    const { solver, counters } = createBatchTestSolver(true);
+
+    expect(solver.objectiveActivity).toEqual({
+      flags: 0,
+      externalForces: false,
+      quadraticTargets: false,
+      externalForceVertexCount: 0,
+      quadraticTargetVertexCount: 0,
+    });
+    expect(solver.objectiveRevision).toBe(0);
+
+    solver.setExternalForce(2, [1, -2, 3]);
+    expect(counters.objectiveWrites.at(-1)).toEqual({
+      offset: 2 * JGS2_VERTEX_OBJECTIVE_BYTES,
+      data: new Float32Array([1, -2, 3, 0]),
+    });
+    expect(solver.objectiveActivity).toEqual({
+      flags: JGS2_OBJECTIVE_EXTERNAL_FORCE_ACTIVE_BIT,
+      externalForces: true,
+      quadraticTargets: false,
+      externalForceVertexCount: 1,
+      quadraticTargetVertexCount: 0,
+    });
+
+    solver.setQuadraticTarget(1, [4, 5, 6], 7);
+    expect(counters.objectiveWrites.at(-1)).toEqual({
+      offset: JGS2_VERTEX_OBJECTIVE_BYTES + 16,
+      data: new Float32Array([4, 5, 6, 7]),
+    });
+    expect(solver.objectiveActivity).toEqual({
+      flags:
+        JGS2_OBJECTIVE_EXTERNAL_FORCE_ACTIVE_BIT |
+        JGS2_OBJECTIVE_TARGET_ACTIVE_BIT,
+      externalForces: true,
+      quadraticTargets: true,
+      externalForceVertexCount: 1,
+      quadraticTargetVertexCount: 1,
+    });
+
+    solver.setExternalForce(2, [0, 0, 0]);
+    solver.releaseQuadraticTarget(1);
+
+    expect(counters.objectiveWrites.at(-1)).toEqual({
+      offset: JGS2_VERTEX_OBJECTIVE_BYTES + 16,
+      data: new Float32Array([4, 5, 6, 0]),
+    });
+    expect(counters.uniformWrites).toBe(0);
+    expect(counters.submissions).toBe(0);
+    expect(solver.objectiveActivity).toEqual({
+      flags: 0,
+      externalForces: false,
+      quadraticTargets: false,
+      externalForceVertexCount: 0,
+      quadraticTargetVertexCount: 0,
+    });
+    expect(solver.objectiveRevision).toBe(4);
+  });
+
+  it("replaces and clears complete force and target fields in single writes", () => {
+    const { solver, counters } = createBatchTestSolver(true);
+    const forces = new Float32Array([
+      1, 0, 0,
+      0, 0, 0,
+      0, 2, 0,
+      0, 0, 0,
+    ]);
+    const targets = new Float32Array([
+      10, 11, 12,
+      20, 21, 22,
+      30, 31, 32,
+      40, 41, 42,
+    ]);
+    const stiffnesses = new Float32Array([0, 3, 4, 0]);
+
+    solver.replaceExternalForces(forces);
+    solver.replaceQuadraticTargets(targets, stiffnesses);
+
+    expect(counters.objectiveWrites).toHaveLength(2);
+    expect(counters.objectiveWrites[0]).toMatchObject({ offset: 0 });
+    expect(counters.objectiveWrites[0]!.data).toHaveLength(
+      4 * JGS2_VERTEX_OBJECTIVE_WORDS,
+    );
+    expect(counters.objectiveWrites[1]).toMatchObject({ offset: 0 });
+    expect(Array.from(counters.objectiveWrites[1]!.data.slice(8, 16))).toEqual([
+      0, 0, 0, 0, 20, 21, 22, 3,
+    ]);
+    expect(solver.objectiveActivity).toMatchObject({
+      externalForceVertexCount: 2,
+      quadraticTargetVertexCount: 2,
+      externalForces: true,
+      quadraticTargets: true,
+    });
+
+    solver.clearExternalForces();
+    solver.releaseAllQuadraticTargets();
+
+    expect(counters.objectiveWrites).toHaveLength(4);
+    expect(counters.objectiveWrites[2]).toMatchObject({ offset: 0 });
+    expect(counters.objectiveWrites[3]).toMatchObject({ offset: 0 });
+    for (let vertex = 0; vertex < 4; vertex += 1) {
+      const base = vertex * JGS2_VERTEX_OBJECTIVE_WORDS;
+      const record = counters.objectiveWrites[3]!.data;
+      expect(Array.from(record.slice(base, base + 4))).toEqual([0, 0, 0, 0]);
+      expect(record[base + 7]).toBe(0);
+    }
+    expect(solver.objectiveActivity).toMatchObject({
+      flags: 0,
+      externalForceVertexCount: 0,
+      quadraticTargetVertexCount: 0,
+    });
+    expect(solver.objectiveRevision).toBe(4);
+  });
+
+  it("validates atomically and rejects active objectives on pinned vertices", () => {
+    const { solver, counters } = createBatchTestSolver(true);
+    (
+      solver as unknown as { readonly pinnedVertices: Uint8Array }
+    ).pinnedVertices[1] = 1;
+
+    const invalidCalls = [
+      () => solver.setExternalForce(1, [1, 0, 0]),
+      () => solver.setQuadraticTarget(1, [0, 0, 0], 1),
+      () => solver.setQuadraticTarget(0, [0, 0, 0], -1),
+      () => solver.setExternalForce(4, [0, 0, 0]),
+      () =>
+        solver.replaceExternalForces(
+          new Float32Array([
+            0, 0, 0,
+            1, 0, 0,
+            0, 0, 0,
+            0, 0, 0,
+          ]),
+        ),
+      () => {
+        const forces = new Float32Array(12);
+        forces[11] = Number.POSITIVE_INFINITY;
+        solver.replaceExternalForces(forces);
+      },
+      () =>
+        solver.replaceQuadraticTargets(
+          new Float32Array(12),
+          new Float32Array([0, 0, -1, 0]),
+        ),
+    ];
+    for (const invoke of invalidCalls) {
+      expect(invoke).toThrow();
+    }
+
+    expect(counters.objectiveWrites).toHaveLength(0);
+    expect(solver.objectiveRevision).toBe(0);
+    expect(solver.objectiveActivity.flags).toBe(0);
+
+    expect(() => solver.setExternalForce(1, [0, 0, 0])).not.toThrow();
+    expect(() =>
+      solver.setQuadraticTarget(1, [8, 9, 10], 0),
+    ).not.toThrow();
+    expect(counters.objectiveWrites).toHaveLength(2);
+    expect(solver.objectiveActivity.flags).toBe(0);
+  });
+
+  it("uploads objective activity through reserved offsets2.w without resizing uniforms", () => {
+    const { solver, counters } = createBatchTestSolver(true);
+    solver.setExternalForce(0, [1, 0, 0]);
+    solver.setQuadraticTarget(3, [1, 2, 3], 5);
+
+    solver.stepExactIterations(1, { horizontalBodyCorrection: false });
+
+    expect(counters.uniformPayloads).toHaveLength(3);
+    for (const payload of counters.uniformPayloads) {
+      expect(payload.byteLength).toBe(JGS2_UNIFORM_BYTES);
+      expect(new Uint32Array(payload.buffer)[15]).toBe(
+        JGS2_OBJECTIVE_EXTERNAL_FORCE_ACTIVE_BIT |
+          JGS2_OBJECTIVE_TARGET_ACTIVE_BIT,
+      );
+    }
+  });
+
+  it("forwards the queue-coherent objective activity to exact diagnostics", async () => {
+    const { solver } = createBatchTestSolver(true);
+    solver.setExternalForce(0, [1, 0, 0]);
+    solver.setQuadraticTarget(3, [1, 2, 3], 5);
+    const diagnostics = { energy: 123 } as Awaited<
+      ReturnType<JGS2GpuSolver["readOracleDiagnostics"]>
+    >;
+    let capturedObjectiveFlags: number | undefined;
+    const evaluate = vi.fn(
+      async (settings: { readonly objectiveFlags?: number }) => {
+        capturedObjectiveFlags = settings.objectiveFlags;
+        return diagnostics;
+      },
+    );
+    const destroy = vi.fn();
+    const create = vi
+      .spyOn(JGS2GpuOracleEvaluator, "create")
+      .mockResolvedValue({ evaluate, destroy } as unknown as JGS2GpuOracleEvaluator);
+    Object.assign(solver, { diagnosticReadbackCount: 0 });
+
+    try {
+      await expect(solver.readOracleDiagnostics()).resolves.toBe(diagnostics);
+
+      expect(create).toHaveBeenCalledTimes(1);
+      const source = create.mock.calls[0]![3];
+      expect(source.objectives).toBe(
+        (
+          solver as unknown as {
+            readonly buffers: { readonly objectives: GPUBuffer };
+          }
+        ).buffers.objectives,
+      );
+      expect(evaluate).toHaveBeenCalledTimes(1);
+      expect(capturedObjectiveFlags).toBe(
+        JGS2_OBJECTIVE_EXTERNAL_FORCE_ACTIVE_BIT |
+          JGS2_OBJECTIVE_TARGET_ACTIVE_BIT,
+      );
+      expect(solver.explicitDiagnosticReadbackCount).toBe(1);
+    } finally {
+      create.mockRestore();
+    }
+  });
+
+  it("rejects every mutation on the legacy path and every access after destroy", () => {
+    const legacy = createBatchTestSolver(false);
+    const legacyCalls = [
+      () => legacy.solver.setExternalForce(0, [0, 0, 0]),
+      () => legacy.solver.replaceExternalForces(new Float32Array(12)),
+      () => legacy.solver.clearExternalForces(),
+      () => legacy.solver.setQuadraticTarget(0, [0, 0, 0], 0),
+      () =>
+        legacy.solver.replaceQuadraticTargets(
+          new Float32Array(12),
+          new Float32Array(4),
+        ),
+      () => legacy.solver.releaseQuadraticTarget(0),
+      () => legacy.solver.releaseAllQuadraticTargets(),
+    ];
+    for (const invoke of legacyCalls) {
+      expect(invoke).toThrow(/stable Neo-Hookean production path/);
+    }
+    expect(legacy.counters.objectiveWrites).toHaveLength(0);
+
+    const destroyed = createBatchTestSolver(true);
+    Object.assign(destroyed.solver, { destroyed: true });
+    const destroyedCalls = [
+      () => destroyed.solver.objectiveActivity,
+      () => destroyed.solver.objectiveRevision,
+      () => destroyed.solver.setExternalForce(0, [0, 0, 0]),
+      () => destroyed.solver.replaceExternalForces(new Float32Array(12)),
+      () => destroyed.solver.clearExternalForces(),
+      () => destroyed.solver.setQuadraticTarget(0, [0, 0, 0], 0),
+      () =>
+        destroyed.solver.replaceQuadraticTargets(
+          new Float32Array(12),
+          new Float32Array(4),
+        ),
+      () => destroyed.solver.releaseQuadraticTarget(0),
+      () => destroyed.solver.releaseAllQuadraticTargets(),
+    ];
+    for (const invoke of destroyedCalls) {
+      expect(invoke).toThrow(/destroyed/);
+    }
+    expect(destroyed.counters.objectiveWrites).toHaveLength(0);
   });
 });
 
@@ -402,6 +731,39 @@ function createMinimalGpuInput(): JGS2GpuInput {
   };
 }
 
+describe("JGS2 objective creation requirements", () => {
+  it("requires seven storage-buffer bindings", async () => {
+    const device = {
+      limits: { maxStorageBuffersPerShaderStage: 6 },
+    } as unknown as GPUDevice;
+
+    await expect(
+      JGS2GpuSolver.create(device, createMinimalGpuInput()),
+    ).rejects.toThrow(/requires seven storage buffers/);
+  });
+
+  it("rejects initially active objectives on the legacy material path", async () => {
+    const input: JGS2GpuInput = {
+      ...createMinimalGpuInput(),
+      objectives: {
+        externalForces: new Float32Array([
+          1, 0, 0,
+          0, 0, 0,
+          0, 0, 0,
+          0, 0, 0,
+        ]),
+      },
+    };
+    const device = {
+      limits: { maxStorageBuffersPerShaderStage: 7 },
+    } as unknown as GPUDevice;
+
+    await expect(JGS2GpuSolver.create(device, input)).rejects.toThrow(
+      /require the stable Neo-Hookean production path/,
+    );
+  });
+});
+
 type CreateFailureStage =
   | "storage"
   | "storage-map"
@@ -412,6 +774,8 @@ type CreateFailureStage =
 function createFailingGpuDevice(stage: CreateFailureStage): {
   readonly device: GPUDevice;
   readonly failure: Error;
+  readonly bindGroupLayoutEntries: GPUBindGroupLayoutEntry[];
+  readonly bindGroupEntries: GPUBindGroupEntry[];
   readonly buffers: ReadonlyArray<{
     readonly label: string;
     readonly destroy: ReturnType<typeof vi.fn>;
@@ -431,6 +795,8 @@ function createFailingGpuDevice(stage: CreateFailureStage): {
     readonly label: string;
     readonly destroy: ReturnType<typeof vi.fn>;
   }> = [];
+  const bindGroupLayoutEntries: GPUBindGroupLayoutEntry[] = [];
+  const bindGroupEntries: GPUBindGroupEntry[] = [];
   let storageCreationCount = 0;
   let uniformCreationCount = 0;
   let pipelineCreationCount = 0;
@@ -462,6 +828,7 @@ function createFailingGpuDevice(stage: CreateFailureStage): {
         storageCreationCount === 3;
       buffers.push({ label, destroy });
       return {
+        label,
         destroy,
         getMappedRange: () => {
           if (failMappedInitialization) {
@@ -472,7 +839,10 @@ function createFailingGpuDevice(stage: CreateFailureStage): {
         unmap: () => undefined,
       } as unknown as GPUBuffer;
     },
-    createBindGroupLayout: () => ({} as GPUBindGroupLayout),
+    createBindGroupLayout: (descriptor: GPUBindGroupLayoutDescriptor) => {
+      bindGroupLayoutEntries.push(...descriptor.entries);
+      return {} as GPUBindGroupLayout;
+    },
     createPipelineLayout: () => ({} as GPUPipelineLayout),
     createShaderModule: () =>
       ({
@@ -485,14 +855,21 @@ function createFailingGpuDevice(stage: CreateFailureStage): {
       }
       return {} as GPUComputePipeline;
     },
-    createBindGroup: () => {
+    createBindGroup: (descriptor: GPUBindGroupDescriptor) => {
+      bindGroupEntries.push(...descriptor.entries);
       if (stage === "bind-group") {
         throw failure;
       }
       return {} as GPUBindGroup;
     },
   } as unknown as GPUDevice;
-  return { device, failure, buffers };
+  return {
+    device,
+    failure,
+    bindGroupLayoutEntries,
+    bindGroupEntries,
+    buffers,
+  };
 }
 
 describe("JGS2 create-time cleanup", () => {
@@ -503,9 +880,9 @@ describe("JGS2 create-time cleanup", () => {
   it.each([
     ["storage", 2],
     ["storage-map", 3],
-    ["pipeline", 6],
-    ["uniform", 7],
-    ["bind-group", 9],
+    ["pipeline", 7],
+    ["uniform", 8],
+    ["bind-group", 10],
   ] as const)(
     "destroys every allocated buffer after a %s creation failure",
     async (stage, expectedBufferCount) => {
@@ -521,6 +898,45 @@ describe("JGS2 create-time cleanup", () => {
       }
     },
   );
+
+  it("binds the objective storage slot at 6 and moves uniforms to 7", async () => {
+    const {
+      device,
+      failure,
+      bindGroupLayoutEntries,
+      bindGroupEntries,
+      buffers,
+    } = createFailingGpuDevice("bind-group");
+
+    await expect(
+      JGS2GpuSolver.create(device, createMinimalGpuInput()),
+    ).rejects.toBe(failure);
+
+    expect(bindGroupLayoutEntries.map((entry) => entry.binding)).toEqual([
+      0, 1, 2, 3, 4, 5, 6, 7,
+    ]);
+    expect(bindGroupLayoutEntries[6]!.buffer?.type).toBe(
+      "read-only-storage",
+    );
+    expect(bindGroupLayoutEntries[7]!.buffer?.type).toBe("uniform");
+    expect(bindGroupLayoutEntries[7]!.buffer?.minBindingSize).toBe(
+      JGS2_UNIFORM_BYTES,
+    );
+
+    const objectiveBinding = bindGroupEntries.find(
+      (entry) => entry.binding === 6,
+    );
+    expect(
+      (
+        (objectiveBinding?.resource as GPUBufferBinding)
+          .buffer as unknown as { readonly label: string }
+      ).label,
+    ).toBe("jgs2-objectives");
+    expect(buffers.some((buffer) => buffer.label === "jgs2-objectives")).toBe(
+      true,
+    );
+    expect(bindGroupEntries.some((entry) => entry.binding === 7)).toBe(true);
+  });
 });
 
 type ReadbackFailureStage = "encoder" | "submit" | "map";

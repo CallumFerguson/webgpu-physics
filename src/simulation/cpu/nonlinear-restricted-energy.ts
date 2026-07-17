@@ -18,6 +18,14 @@ import {
   minimumTetrahedralDeformationDeterminant,
   tetrahedralDeformationDeterminant,
 } from "./stable-neo-hookean";
+import { solveDenseLinearSystem } from "./math";
+import {
+  createNonlinearPerVertexObjective,
+  evaluateNonlinearPerVertexObjective,
+  nonlinearPerVertexObjectiveEnergyDelta,
+  type NonlinearPerVertexObjective,
+  type NonlinearPerVertexObjectiveInput,
+} from "./nonlinear-objective";
 import type {
   CubatureSample,
   LinearMaterial,
@@ -39,6 +47,8 @@ export interface SelectedCubatureRestrictedLocalOptions {
   readonly positions: Float64Array;
   /** Runtime-packed selected records, including their stored Ubar blocks. */
   readonly samples: readonly CubatureSample[];
+  /** Frame-frozen force/target terms; excluded from Cubature training. */
+  readonly objective?: NonlinearPerVertexObjectiveInput;
 }
 
 export interface SelectedCubatureRestrictedLocalModel {
@@ -161,6 +171,209 @@ function quadraticInertiaEnergy(
     squared += difference * difference;
   }
   return 0.5 * inertia * squared;
+}
+
+interface RestrictedObjectiveSystem {
+  readonly sourceGradient: Float64Array;
+  readonly sourceHessian: Float64Array;
+  readonly remainderGradient: Float64Array;
+  readonly remainderHessian: Float64Array;
+}
+
+function addScaledArray(
+  destination: Float64Array,
+  source: ArrayLike<number>,
+  scale: number,
+): void {
+  for (let index = 0; index < destination.length; index += 1) {
+    destination[index] += scale * source[index]!;
+  }
+}
+
+function evaluateObjectiveAtVertex(
+  objective: NonlinearPerVertexObjective,
+  positions: Float64Array,
+  vertex: number,
+) {
+  return evaluateNonlinearPerVertexObjective(
+    objective,
+    vertex,
+    positions.subarray(vertex * 3, vertex * 3 + 3),
+  );
+}
+
+function objectiveEnergyDeltaAtVertex(
+  objective: NonlinearPerVertexObjective,
+  basePositions: Float64Array,
+  vertex: number,
+  displacement: Float64Array,
+): number {
+  const base = vertex * 3;
+  return nonlinearPerVertexObjectiveEnergyDelta(
+    objective,
+    vertex,
+    basePositions.subarray(base, base + 3),
+    displacement,
+  );
+}
+
+function projectedVertexDisplacement(
+  sample: FrozenRestrictedCubatureSample,
+  localVertex: number,
+  localDisplacement: Float64Array,
+): Float64Array {
+  const result = new Float64Array(3);
+  for (let coordinate = 0; coordinate < 3; coordinate += 1) {
+    for (let reduced = 0; reduced < 3; reduced += 1) {
+      result[coordinate] +=
+        sample.currentBasisBlocks[
+          localVertex * 9 + coordinate * 3 + reduced
+        ]! * localDisplacement[reduced]!;
+    }
+  }
+  return result;
+}
+
+function accumulateProjectedObjective(
+  gradient: Float64Array,
+  hessian: Float64Array,
+  evaluation: ReturnType<typeof evaluateNonlinearPerVertexObjective>,
+  basisBlocks: ArrayLike<number>,
+  basisOffset: number,
+  scale: number,
+): void {
+  for (let reducedRow = 0; reducedRow < 3; reducedRow += 1) {
+    let projectedGradient = 0;
+    for (let coordinate = 0; coordinate < 3; coordinate += 1) {
+      projectedGradient +=
+        basisBlocks[basisOffset + coordinate * 3 + reducedRow]! *
+        evaluation.gradient[coordinate]!;
+    }
+    gradient[reducedRow] += scale * projectedGradient;
+    for (let reducedColumn = 0; reducedColumn < 3; reducedColumn += 1) {
+      let projectedHessian = 0;
+      for (let coordinate = 0; coordinate < 3; coordinate += 1) {
+        projectedHessian +=
+          basisBlocks[basisOffset + coordinate * 3 + reducedRow]! *
+          basisBlocks[basisOffset + coordinate * 3 + reducedColumn]!;
+      }
+      hessian[reducedRow * 3 + reducedColumn] +=
+        scale * evaluation.targetStiffness * projectedHessian;
+    }
+  }
+}
+
+/** Assemble the same source-exact/source-subtracted objective as the scalar. */
+function assembleRestrictedObjectiveSystem(
+  context: StableNeoHookeanCubatureContext,
+  basePositions: Float64Array,
+  samples: readonly FrozenRestrictedCubatureSample[],
+  incidentCounts: Uint32Array,
+  objective: NonlinearPerVertexObjective,
+): RestrictedObjectiveSystem {
+  const sourceGradient = new Float64Array(3);
+  const sourceHessian = new Float64Array(9);
+  const sourceEvaluation = evaluateObjectiveAtVertex(
+    objective,
+    basePositions,
+    context.sourceVertex,
+  );
+  sourceGradient.set(sourceEvaluation.gradient);
+  for (let coordinate = 0; coordinate < 3; coordinate += 1) {
+    sourceHessian[coordinate * 3 + coordinate] =
+      sourceEvaluation.targetStiffness;
+  }
+
+  const remainderGradient = new Float64Array(3);
+  const remainderHessian = new Float64Array(9);
+  for (const sample of samples) {
+    const sampleGradient = new Float64Array(3);
+    const sampleHessian = new Float64Array(9);
+    for (let localVertex = 0; localVertex < 4; localVertex += 1) {
+      const vertex =
+        context.mesh.tetrahedra[sample.tetrahedron * 4 + localVertex]!;
+      const incidentShare = 1 / incidentCounts[vertex]!;
+      const evaluation = evaluateObjectiveAtVertex(
+        objective,
+        basePositions,
+        vertex,
+      );
+      accumulateProjectedObjective(
+        sampleGradient,
+        sampleHessian,
+        evaluation,
+        sample.currentBasisBlocks,
+        localVertex * 9,
+        incidentShare,
+      );
+      if (vertex === context.sourceVertex) {
+        addScaledArray(
+          sampleGradient,
+          sourceEvaluation.gradient,
+          -incidentShare,
+        );
+        for (let coordinate = 0; coordinate < 3; coordinate += 1) {
+          sampleHessian[coordinate * 3 + coordinate] -=
+            incidentShare * sourceEvaluation.targetStiffness;
+        }
+      }
+    }
+    addScaledArray(remainderGradient, sampleGradient, sample.weight);
+    addScaledArray(remainderHessian, sampleHessian, sample.weight);
+  }
+
+  for (const values of [
+    sourceGradient,
+    sourceHessian,
+    remainderGradient,
+    remainderHessian,
+  ]) {
+    if (!allFinite(values)) {
+      throw new RangeError(
+        "Restricted per-vertex objective derivatives must be finite.",
+      );
+    }
+  }
+  return {
+    sourceGradient,
+    sourceHessian,
+    remainderGradient,
+    remainderHessian,
+  };
+}
+
+function recomposeLocalSystem(
+  base: StableNeoHookeanJGS2LocalSystem,
+  objective: RestrictedObjectiveSystem | undefined,
+): StableNeoHookeanJGS2LocalSystem {
+  if (!objective) return base;
+  const sourceGradient = base.sourceGradient.slice();
+  const sourceHessian = base.sourceHessian.slice();
+  const remainderGradient = base.remainderGradient.slice();
+  const remainderHessian = base.remainderHessian.slice();
+  addScaledArray(sourceGradient, objective.sourceGradient, 1);
+  addScaledArray(sourceHessian, objective.sourceHessian, 1);
+  addScaledArray(remainderGradient, objective.remainderGradient, 1);
+  addScaledArray(remainderHessian, objective.remainderHessian, 1);
+  const gradient = sourceGradient.slice();
+  const hessian = sourceHessian.slice();
+  addScaledArray(gradient, remainderGradient, 1);
+  addScaledArray(hessian, remainderHessian, 1);
+  return {
+    sourceGradient,
+    sourceHessian,
+    remainderGradient,
+    remainderHessian,
+    gradient,
+    hessian,
+    newtonUpdate: solveDenseLinearSystem(
+      hessian,
+      Float64Array.from(gradient, (value) => -value),
+      3,
+    ),
+    candidates: base.candidates,
+    minimumDeformationDeterminant: base.minimumDeformationDeterminant,
+  };
 }
 
 function snapshotMesh(mesh: TetrahedralMesh): TetrahedralMesh {
@@ -287,6 +500,9 @@ export function createSelectedCubatureRestrictedLocalModel(
     }
   }
   const basePositions = options.positions.slice();
+  const objective = options.objective
+    ? createNonlinearPerVertexObjective(context.mesh, options.objective)
+    : undefined;
   const baseMinimumDeformationDeterminant =
     minimumTetrahedralDeformationDeterminant(
       context.mesh,
@@ -358,10 +574,22 @@ export function createSelectedCubatureRestrictedLocalModel(
   if (!(sourceInertiaScale > 0) || !Number.isFinite(sourceInertiaScale)) {
     throw new RangeError("Restricted local source inertia must be positive.");
   }
-  const initialSystem = assembleStableNeoHookeanJGS2LocalSystem(
+  const materialInertiaSystem = assembleStableNeoHookeanJGS2LocalSystem(
     context,
     basePositions,
     restSamples,
+  );
+  const initialSystem = recomposeLocalSystem(
+    materialInertiaSystem,
+    objective?.active
+      ? assembleRestrictedObjectiveSystem(
+          context,
+          basePositions,
+          frozenSamples,
+          incidentCounts,
+          objective,
+        )
+      : undefined,
   );
 
   const model: SelectedCubatureRestrictedLocalModel = {
@@ -431,6 +659,18 @@ export function createSelectedCubatureRestrictedLocalModel(
         context.sourceVertex,
         sourceInertiaScale,
       );
+      const sourceObjectiveEnergyDelta = objective?.active
+        ? nonlinearPerVertexObjectiveEnergyDelta(
+            objective,
+            context.sourceVertex,
+            basePositions.subarray(
+              context.sourceVertex * 3,
+              context.sourceVertex * 3 + 3,
+            ),
+            localDisplacement,
+          )
+        : 0;
+      energy += sourceObjectiveEnergyDelta;
       const sourceElementEnergy = new Map<number, number>();
       for (const tetrahedron of sourceIncident) {
         const elementEnergy = evaluateStableNeoHookeanTetrahedron(
@@ -474,6 +714,20 @@ export function createSelectedCubatureRestrictedLocalModel(
             vertex,
             distributedInertia,
           );
+          if (objective?.active) {
+            complementaryEnergy +=
+              objectiveEnergyDeltaAtVertex(
+                objective,
+                basePositions,
+                vertex,
+                projectedVertexDisplacement(
+                  sample,
+                  localVertex,
+                  localDisplacement,
+                ),
+              ) /
+              incidentCounts[vertex]!;
+          }
           if (vertex === context.sourceVertex) {
             sourceIsIncident = true;
             complementaryEnergy -= quadraticInertiaEnergy(
@@ -482,6 +736,10 @@ export function createSelectedCubatureRestrictedLocalModel(
               vertex,
               distributedInertia,
             );
+            if (objective?.active) {
+              complementaryEnergy -=
+                sourceObjectiveEnergyDelta / incidentCounts[vertex]!;
+            }
           }
         }
         if (sourceIsIncident) {

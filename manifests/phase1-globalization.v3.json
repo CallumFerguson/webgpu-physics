@@ -1,0 +1,152 @@
+{
+  "schema": "org.jgs2.phase1-globalization",
+  "schemaVersion": 3,
+  "id": "phase1.globalization-composite-objective-cpu-gpu",
+  "sourceFixtures": {
+    "materialManifest": "manifests/phase1-scenes.v1.json",
+    "cubatureManifest": "manifests/phase1-cubature.v1.json",
+    "cubatureFixtureId": "phase1.nonlinear-cubature-beam",
+    "gpuTestFiles": [
+      "tests/e2e/nonlinear-globalization-gpu.spec.ts",
+      "tests/e2e/nonlinear-cubature-gpu.spec.ts",
+      "tests/e2e/nonlinear-objectives-gpu.spec.ts"
+    ]
+  },
+  "positiveDefiniteTreatment": {
+    "f32UnitRoundoff": 5.960464477539063e-8,
+    "eigenvalueFloorMultiplier": 256,
+    "relativeEigenvalueFloor": 0.0000152587890625,
+    "maximumNormalizedShift": 0.001,
+    "positionResolutionMultiplier": 8,
+    "scales": [1e-12, 1, 1e12]
+  },
+  "lineSearch": {
+    "armijoC1": 0.0001,
+    "backtrackFactor": 0.5,
+    "maximumBacktracks": 12,
+    "determinantFloor": 0.0001,
+    "feasibilityBeforeEnergy": true,
+    "energyComparison": "delta-from-frozen-source",
+    "failureUpdate": "zero"
+  },
+  "convergence": {
+    "tinyReferenceResidualTolerance": 0.00001,
+    "maximumRuntimeTolerance": 0.001,
+    "requiresResidualAndUpdate": true,
+    "sceneScale": "initial-dynamic-aabb-diagonal",
+    "gpuHistoryCapacity": 64
+  },
+  "referenceGates": {
+    "restrictedGradientRelativeError": 0.000002,
+    "restrictedHessianRelativeError": 0.0002,
+    "shiftedLinearResidual": 1e-8,
+    "gpuShiftedLinearResidual": 0.00002,
+    "canonicalPackedLocalSystemCount": 240,
+    "assembledRevertDeterminant": -0.2100000000000002,
+    "cpuPredictorEquivalenceTolerance": 1e-12,
+    "gpuCompositeParityRelativeError": 0.001,
+    "selectedUpdateRmsRelativeError": 0.02,
+    "routineActiveLocalSystemCount": 60,
+    "fullActiveLocalSystemCount": 240,
+    "minimumObjectiveDirectionEffect": 0.0001,
+    "maximumEffectRelativeDirectionError": 0.001
+  },
+  "gpuRuntime": {
+    "enabledMaterial": "stable-neo-hookean",
+    "mixedMaterialSolve": "rejected",
+    "uniformBytes": 176,
+    "localDiagnosticVec4s": 4,
+    "tetDiagnosticVec4s": 2,
+    "convergenceComponentVec4s": 5,
+    "controlVec4s": 4,
+    "historyVec4s": 8,
+    "historyCapacity": 64,
+    "steppingReadback": "none",
+    "initializationReadback": "gpu-source-feasibility-once",
+    "explicitDiagnosticReadback": "on-request",
+    "assembledEnergyAcceptance": "diagnostic-only",
+    "pinnedTargetApplication": "assembled-feasibility-gated",
+    "objectiveBytesPerVertex": 32,
+    "objectiveBufferBinding": 6,
+    "objectiveBufferAccess": "read-only-storage",
+    "uniformBinding": 7,
+    "storageBufferBindings": 7,
+    "quadraticTargetApplication": "objective-only-no-snap",
+    "quadraticTargetRelease": "zero-stiffness",
+    "objectiveUpdateOrdering": "queue-ordered-sparse-writes",
+    "stepFramesObjectiveSnapshot": "constant-per-batch",
+    "pinnedObjectiveConflict": "rejected"
+  },
+  "caseIds": [
+    "symmetric-spectrum",
+    "scale-covariance",
+    "shift-cap-boundary",
+    "armijo-zero-one-multiple",
+    "infeasible-before-energy",
+    "nonfinite-determinant-propagation",
+    "selected-packed-restricted-energy",
+    "assembled-jacobi-revert",
+    "component-aware-convergence",
+    "canonical-packed-local-systems",
+    "paper-equivalent-external-force",
+    "composite-restricted-projection",
+    "objective-component-convergence",
+    "mutable-target-release",
+    "objective-input-fail-closed"
+  ],
+  "restrictedObjectiveTerms": [
+    "implicit-euler-inertia",
+    "stable-neo-hookean-material",
+    "analytic-floor-penalty",
+    "linear-per-vertex-external-force",
+    "isotropic-per-vertex-quadratic-target"
+  ],
+  "gpuTestSelectors": [
+    {
+      "source": "tests/e2e/nonlinear-globalization-gpu.spec.ts",
+      "selector": "P1-GPU-GLOBALIZATION: assembled Jacobi feasibility reverts the complete pose"
+    },
+    {
+      "source": "tests/e2e/nonlinear-globalization-gpu.spec.ts",
+      "selector": "P1-GPU-GLOBALIZATION: initial source uses production GPU-f32 feasibility preflight"
+    },
+    {
+      "source": "tests/e2e/nonlinear-globalization-gpu.spec.ts",
+      "selector": "P1-GPU-GLOBALIZATION: local Armijo checks determinant feasibility before energy"
+    },
+    {
+      "source": "tests/e2e/nonlinear-globalization-gpu.spec.ts",
+      "selector": "P1-GPU-GLOBALIZATION: shared production shift solver matches the CPU policy"
+    },
+    {
+      "source": "tests/e2e/nonlinear-globalization-gpu.spec.ts",
+      "selector": "P1-GPU-GLOBALIZATION: stable floor penalty participates in Armijo and convergence"
+    },
+    {
+      "source": "tests/e2e/nonlinear-globalization-gpu.spec.ts",
+      "selector": "P1-GPU-GLOBALIZATION: convergence reduction requires residual, update, feasibility, and no failures"
+    },
+    {
+      "source": "tests/e2e/nonlinear-cubature-gpu.spec.ts",
+      "selector": "P1-EC-12-GPU: production nonlinear Cubature updates match the packed CPU reference"
+    },
+    {
+      "source": "tests/e2e/nonlinear-objectives-gpu.spec.ts",
+      "selector": "P1-COMPOSITE-GPU: force and quadratic-target derivatives match the independent CPU reference"
+    },
+    {
+      "source": "tests/e2e/nonlinear-objectives-gpu.spec.ts",
+      "selector": "P1-COMPOSITE-GPU: complete-objective Armijo, shift, and convergence policies hold"
+    },
+    {
+      "source": "tests/e2e/nonlinear-objectives-gpu.spec.ts",
+      "selector": "P1-COMPOSITE-GPU: mutable objective inputs fail closed and release without hidden state"
+    }
+  ],
+  "runtimeStatus": {
+    "cpuMaterialInertiaReference": "implemented",
+    "compositeForcesAndTargets": "implemented",
+    "gpuProduction": "implemented-composite-objective",
+    "qualifiesPhase1Exit": false
+  }
+}

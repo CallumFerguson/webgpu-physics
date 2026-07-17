@@ -13,6 +13,14 @@ export {
   type QuadraticTargetOptions,
 } from "./energy";
 export {
+  createNonlinearPerVertexObjective,
+  evaluateNonlinearPerVertexObjective,
+  nonlinearPerVertexObjectiveEnergyDelta,
+  type NonlinearPerVertexObjective,
+  type NonlinearPerVertexObjectiveEvaluation,
+  type NonlinearPerVertexObjectiveInput,
+} from "./nonlinear-objective";
+export {
   buildLowFrequencyTrainingPoses,
   fitNonnegativeColumnWeights,
   selectGreedyNonnegativeColumns,

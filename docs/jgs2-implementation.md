@@ -8,10 +8,11 @@ projection. The runtime can evaluate either the original co-rotated linear
 regression material or the paper's stable Neo-Hookean energy and exact current
 tangent. The stable path now trains and validates nonlinear current-pose
 Cubature. Its production WebGPU path now implements the CPU
-material-and-inertia reference's scale-aware solve shift, restricted Armijo
-search, assembled feasibility/revert, and convergence history. Composite
-force/target terms, early termination, public stable scenes, and Phase 1
-performance qualification remain Phase 1 work.
+composite-objective reference's scale-aware solve shift, restricted Armijo
+search, assembled feasibility/revert, and convergence history. Arbitrary
+per-vertex forces and isotropic quadratic targets are implemented in the CPU
+oracle and stable GPU runtime. Early termination, public scripted/pointer
+target scenes, and Phase 1 performance qualification remain Phase 1 work.
 
 ## Algorithm mapping
 
@@ -78,7 +79,8 @@ against a dense CPU oracle on tiny systems.
 | --- | --- | --- |
 | CPU, once per scene | Procedural mesh construction, rest tetrahedral data, lumped masses, dense rest-Hessian Cholesky, equilibrium bases, nonlinear pose generation, Cubature training, and buffer packing | These tasks are irregular, use double precision, and are amortized over the scene. This mirrors the paper's CPU preprocessing. |
 | GPU plus one CPU synchronization, once per stable solver | Evaluate every uploaded tetrahedron with production `f32` determinant arithmetic and read back the reduced minimum/validity mask | This closes the host-versus-GPU arithmetic gap before any stable material solve. It is a creation-time safety gate, not a frame-loop diagnostic. |
-| GPU, every frame | Implicit prediction, polar frames, co-rotated linear or stable Neo-Hookean current gradients and tangent products, Cubature projection, legacy regularized solves or stable shifted/Armijo solves, source and assembled determinant gates (including pinned rest targets), convergence reduction, per-body horizontal COM correction where permitted, floor contact and tangential damping, velocity update, and surface rendering | These are uniform data-parallel kernels. State stays GPU-resident, with no per-frame position readback. Stable finalization retains the assembled gate's accepted candidate or reverted source instead of reapplying a rejected pinned target. |
+| GPU, queue-ordered updates | Validate and upload sparse or bulk per-vertex force/target records through `GPUQueue.writeBuffer` | One 32-byte record per stable vertex keeps mutable objective data out of uniforms. A detached CPU mirror supports validation and activity flags without GPU readback. |
+| GPU, every frame | Implicit prediction, polar frames, co-rotated linear or stable Neo-Hookean current gradients and tangent products, force/target evaluation, Cubature projection, legacy regularized solves or stable shifted/Armijo solves, source and assembled determinant gates (including pinned rest targets), convergence reduction, per-body horizontal COM correction where permitted, floor contact and tangential damping, velocity update, and surface rendering | These are uniform data-parallel kernels. State stays GPU-resident, with no per-frame position readback. Stable finalization retains the assembled gate's accepted candidate or reverted source instead of reapplying a rejected pinned target. Soft quadratic targets are objective-only and never snapped. |
 | CPU, tests only | Requested checkpoint readback and invariant calculation | A deliberate synchronization is useful for correctness but would distort real-time performance. |
 
 WebAssembly is intentionally absent. It cannot improve the GPU-resident frame
@@ -93,6 +95,9 @@ threads. Fixed demo assets would be better precomputed offline.
 
 - Positions and GPU calculations use `f32`; preprocessing uses JavaScript
   numbers and `Float64Array`.
+- Stable objective storage uses two read-only `vec4` records per vertex:
+  `force.xyz` and `(target.xyz, isotropic stiffness)`. Zero stiffness is the
+  canonical released target and changes neither position nor velocity.
 - The rest Hessian includes the timestep inertia term, so a basis is specific
   to its mesh, mass, material, timestep, and fixed boundary conditions.
 - A vertex deformation gradient is the incident-rest-volume-weighted average
@@ -138,15 +143,14 @@ current-pose Cubature preprocessing, held-out local-update oracle, and
 two-iteration production GPU parity path are also complete. The CPU reference
 and stable WebGPU runtime now share solve-only shifting,
 geometry-before-energy Armijo trials, whole-pose feasibility/revert, and
-component-aware convergence normalization for the material-and-inertia
-objective; the GPU also includes the analytic floor term. External-force and
-quadratic-target terms and GPU-driven early termination remain pending. The
+component-aware convergence normalization for the complete material, inertia,
+external-force, and quadratic-target objective; the GPU also includes the
+analytic floor term. GPU-driven early termination remains pending. The
 existing immutable pinned rest constraint is an assembled-gated hard proposal,
-not a populated quadratic-target component or a moving kinematic-target API.
-The
-four public scenes continue to use the legacy co-rotated-linear material until
-explicit labels, stable scenes, force/target controls, screenshots, and the
-Phase 1 performance gate are complete.
+separate from the populated soft quadratic-target component. The four public
+scenes continue to use the legacy co-rotated-linear material until explicit
+labels, stable scenes, scripted/pointer controls, screenshots, and the Phase 1
+performance gate are complete.
 Contact is an implicit quadratic ground penalty with
 simple grounded viscous damping.
 Full incremental potential contact would additionally require broad-phase

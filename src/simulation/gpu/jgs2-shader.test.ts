@@ -13,11 +13,171 @@ function functionBody(name: string): string {
 }
 
 describe("JGS2 stable globalization shader contract", () => {
+  it("binds one guarded read-only composite-objective record per vertex", () => {
+    expect(jgs2Shader).toContain("struct VertexObjective {");
+    expect(jgs2Shader).toContain("externalForce: vec4f");
+    expect(jgs2Shader).toContain("targetPositionStiffness: vec4f");
+    expect(jgs2Shader).toContain(
+      "@group(0) @binding(6)\nvar<storage, read> vertexObjectives: array<VertexObjective>",
+    );
+    expect(jgs2Shader).toContain(
+      "@group(0) @binding(7)\nvar<uniform> params: SimParams",
+    );
+    expect(jgs2Shader).toContain(
+      "const OBJECTIVE_FORCE_ENABLED_BIT: u32 = 1u",
+    );
+    expect(jgs2Shader).toContain(
+      "const OBJECTIVE_TARGET_ENABLED_BIT: u32 = 2u",
+    );
+
+    const force = functionBody("vertexExternalForce");
+    expect(force).toContain("if (objectiveForceEnabled())");
+    expect(force.indexOf("if (objectiveForceEnabled())")).toBeLessThan(
+      force.indexOf("vertexObjectives[vertex].externalForce.xyz"),
+    );
+    const target = functionBody("vertexTargetPositionStiffness");
+    expect(target).toContain("if (objectiveTargetEnabled())");
+    expect(target.indexOf("if (objectiveTargetEnabled())")).toBeLessThan(
+      target.indexOf("vertexObjectives[vertex].targetPositionStiffness"),
+    );
+  });
+
   it("keeps the inertial target separate from the first feasible source pose", () => {
     const predict = functionBody("predict");
     expect(predict).toContain(
       "select(predicted, oldPosition, params.offsets4.w != 0u)",
     );
+    expect(predict).toContain(
+      "params.time.x * params.time.x * params.gravityFloor.xyz",
+    );
+    expect(predict).not.toContain("vertexObjectives");
+    expect(predict).not.toContain("vertexExternalForce");
+    expect(predict).not.toContain("vertexTargetPositionStiffness");
+  });
+
+  it("adds force and target derivatives to both exact and Cubature restrictions", () => {
+    const solve = functionBody("jgs2Solve");
+    expect(solve).toContain("vertexObjectiveGradient(vertex, position)");
+    expect(solve).toContain(
+      "hessian += vertexTargetStiffness(vertex) * identityMat3()",
+    );
+    expect(solve).toContain("distributedObjectiveGradient(indices[local])");
+    expect(solve).toContain("cubatureObjectiveHessian(indices, basis)");
+    expect(solve).toContain("distributedObjectiveGradient(vertex)");
+    expect(solve.match(/distributedTargetStiffness\(vertex\)/g)).toHaveLength(1);
+
+    const objectiveGradient = functionBody("vertexObjectiveGradient");
+    expect(objectiveGradient).toContain("result -= vertexExternalForce(vertex)");
+    expect(objectiveGradient).toContain("if (targetRecord.w > 0.0)");
+    expect(objectiveGradient).toContain(
+      "targetRecord.w * (position - targetRecord.xyz)",
+    );
+    expect(
+      objectiveGradient.indexOf("if (targetRecord.w > 0.0)"),
+    ).toBeLessThan(
+      objectiveGradient.indexOf("position - targetRecord.xyz"),
+    );
+    const objectiveHessian = functionBody("cubatureObjectiveHessian");
+    expect(objectiveHessian).toContain("distributedTargetStiffness(vertex)");
+    expect(objectiveHessian).toContain(
+      "transpose(basis[local]) * basis[local]",
+    );
+  });
+
+  it("uses the complete objective in restricted and assembled energy", () => {
+    const objectiveDelta = functionBody("vertexObjectiveEnergyDelta");
+    expect(objectiveDelta).toContain(
+      "result -= dot(vertexExternalForce(vertex), displacement)",
+    );
+    expect(objectiveDelta).toContain("quadraticEnergyDelta(");
+    expect(objectiveDelta).toContain("targetRecord.w");
+    expect(
+      objectiveDelta.indexOf("if (targetRecord.w > 0.0)"),
+    ).toBeLessThan(
+      objectiveDelta.indexOf("targetRecord.xyz"),
+    );
+
+    const restricted = functionBody("restrictedEnergyDelta");
+    expect(restricted).toContain("vertexObjectiveEnergyDelta(");
+    expect(
+      restricted.match(/distributedVertexObjectiveEnergyDelta\(/g),
+    ).toHaveLength(2);
+
+    const assembled = functionBody("vertexImplicitEnergyAt");
+    expect(assembled).toContain(
+      "energy -= dot(vertexExternalForce(vertex), position)",
+    );
+    expect(assembled).toContain(
+      "0.5 * targetRecord.w * dot(targetResidual, targetResidual)",
+    );
+    expect(assembled.indexOf("if (targetRecord.w > 0.0)")).toBeLessThan(
+      assembled.indexOf("position - targetRecord.xyz"),
+    );
+  });
+
+  it("writes explicit force and target convergence components", () => {
+    const convergence = functionBody("convergenceGradient");
+    expect(convergence).toContain(
+      "externalForce = -vertexExternalForce(vertex)",
+    );
+    expect(convergence).toContain("var targetGradient = vec3f(0.0)");
+    expect(convergence).toContain("if (targetRecord.w > 0.0)");
+    expect(convergence.indexOf("if (targetRecord.w > 0.0)")).toBeLessThan(
+      convergence.indexOf("position - targetRecord.xyz"),
+    );
+    expect(convergence).toContain(
+      "dynamicData[base + 2u] = vec4f(externalForce, 0.0)",
+    );
+    expect(convergence).toContain(
+      "dynamicData[base + 3u] = vec4f(targetGradient, 0.0)",
+    );
+  });
+
+  it("uniformly bypasses objective projection and force-only target work", () => {
+    const solve = functionBody("jgs2Solve");
+    const solveObjectiveGuard = solve.indexOf("if (params.offsets2.w != 0u)");
+    expect(solveObjectiveGuard).toBeGreaterThanOrEqual(0);
+    expect(solveObjectiveGuard).toBeLessThan(
+      solve.indexOf("vertexObjectiveGradient(vertex, position)"),
+    );
+    const cubatureObjective = solve.indexOf(
+      "cubatureObjectiveHessian(indices, basis)",
+    );
+    expect(
+      solve.lastIndexOf("if (objectiveTargetEnabled())", cubatureObjective),
+    ).toBeGreaterThanOrEqual(0);
+    const sourceTarget = solve.indexOf(
+      "distributedTargetStiffness(vertex)",
+    );
+    expect(
+      solve.lastIndexOf("if (objectiveTargetEnabled())", sourceTarget),
+    ).toBeGreaterThanOrEqual(0);
+
+    const restricted = functionBody("restrictedEnergyDelta");
+    expect(restricted.indexOf("if (params.offsets2.w != 0u)")).toBeLessThan(
+      restricted.indexOf("vertexObjectiveEnergyDelta("),
+    );
+
+    const objectiveGradient = functionBody("vertexObjectiveGradient");
+    expect(objectiveGradient.indexOf("if (objectiveTargetEnabled())")).toBeLessThan(
+      objectiveGradient.indexOf("vertexTargetPositionStiffness(vertex)"),
+    );
+    const objectiveDelta = functionBody("vertexObjectiveEnergyDelta");
+    expect(objectiveDelta.indexOf("if (objectiveTargetEnabled())")).toBeLessThan(
+      objectiveDelta.indexOf("vertexTargetPositionStiffness(vertex)"),
+    );
+
+    for (const name of ["vertexImplicitEnergyAt", "convergenceGradient"]) {
+      const body = functionBody(name);
+      const outerGuard = body.indexOf("if (params.offsets2.w != 0u)");
+      expect(outerGuard, name).toBeGreaterThanOrEqual(0);
+      expect(outerGuard, name).toBeLessThan(
+        body.indexOf("vertexExternalForce(vertex)"),
+      );
+      expect(outerGuard, name).toBeLessThan(
+        body.indexOf("vertexTargetPositionStiffness(vertex)"),
+      );
+    }
   });
 
   it("uses the shared frozen shift solver only on the stable path", () => {
@@ -107,7 +267,7 @@ describe("JGS2 stable globalization shader contract", () => {
       "let preflightGeometry = dynamicData[params.offsets4.x]",
     );
     const material = solve.indexOf(
-      "// Exact local restriction: inertia plus every incident tetrahedron.",
+      "// Exact local restriction: inertia, user force, soft target, and every",
     );
     expect(preflight).toBeGreaterThanOrEqual(0);
     expect(material).toBeGreaterThan(preflight);
@@ -280,5 +440,7 @@ describe("JGS2 stable globalization shader contract", () => {
     expect(finalize).toContain(
       "dynamicData[params.offsets0.w + vertex] = vec4f(0.0)",
     );
+    expect(finalize).not.toContain("vertexObjectives");
+    expect(finalize).not.toContain("vertexTargetPositionStiffness");
   });
 });

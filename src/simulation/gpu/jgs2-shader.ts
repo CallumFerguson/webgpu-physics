@@ -20,6 +20,8 @@ const TET_GLOBALIZATION_STRIDE: u32 = 2u;
 const CONVERGENCE_COMPONENT_STRIDE: u32 = 5u;
 const GLOBALIZATION_CONTROL_STRIDE: u32 = 4u;
 const GLOBALIZATION_HISTORY_STRIDE: u32 = 8u;
+const OBJECTIVE_FORCE_ENABLED_BIT: u32 = 1u;
+const OBJECTIVE_TARGET_ENABLED_BIT: u32 = 2u;
 
 const LOCAL_STATUS_ACCEPTED: u32 = 0u;
 const LOCAL_STATUS_PINNED: u32 = 1u;
@@ -63,6 +65,13 @@ struct TetStatic {
   attributes: vec4f,
 }
 
+struct VertexObjective {
+  // xyz is the world-space force; w is reserved.
+  externalForce: vec4f,
+  // xyz is the soft target and w is its isotropic nonnegative stiffness.
+  targetPositionStiffness: vec4f,
+}
+
 struct SimParams {
   // vertex count, tet count, cubature K, body count
   counts: vec4u,
@@ -70,7 +79,7 @@ struct SimParams {
   offsets0: vec4u,
   // old, vertex rotation, tet rotation, iteration source position
   offsets1: vec4u,
-  // iteration target position, per-body correction, final update, reserved
+  // iteration target position, per-body correction, final update, objective flags
   offsets2: vec4u,
   // dt, inverse dt, inverse dt squared, maximum local step
   time: vec4f,
@@ -128,6 +137,9 @@ var<storage, read> adjacency: array<u32>;
 var<storage, read> cubatureWords: array<u32>;
 
 @group(0) @binding(6)
+var<storage, read> vertexObjectives: array<VertexObjective>;
+
+@group(0) @binding(7)
 var<uniform> params: SimParams;
 
 var<workgroup> candidateReductionLanes:
@@ -237,6 +249,28 @@ fn polarRotation(matrix: mat3x3f) -> mat3x3f {
 
 fn loadPosition(offset: u32, vertex: u32) -> vec3f {
   return dynamicData[offset + vertex].xyz;
+}
+
+fn objectiveForceEnabled() -> bool {
+  return (params.offsets2.w & OBJECTIVE_FORCE_ENABLED_BIT) != 0u;
+}
+
+fn objectiveTargetEnabled() -> bool {
+  return (params.offsets2.w & OBJECTIVE_TARGET_ENABLED_BIT) != 0u;
+}
+
+fn vertexExternalForce(vertex: u32) -> vec3f {
+  if (objectiveForceEnabled()) {
+    return vertexObjectives[vertex].externalForce.xyz;
+  }
+  return vec3f(0.0);
+}
+
+fn vertexTargetPositionStiffness(vertex: u32) -> vec4f {
+  if (objectiveTargetEnabled()) {
+    return vertexObjectives[vertex].targetPositionStiffness;
+  }
+  return vec4f(0.0);
 }
 
 fn loadRotation(offset: u32, index: u32) -> mat3x3f {
@@ -512,6 +546,47 @@ fn quadraticEnergyDelta(
   );
 }
 
+fn vertexObjectiveEnergyDelta(
+  vertex: u32,
+  basePosition: vec3f,
+  displacement: vec3f,
+) -> f32 {
+  var result = 0.0;
+  if (objectiveForceEnabled()) {
+    result -= dot(vertexExternalForce(vertex), displacement);
+  }
+  if (objectiveTargetEnabled()) {
+    let targetRecord = vertexTargetPositionStiffness(vertex);
+    if (targetRecord.w > 0.0) {
+      result += quadraticEnergyDelta(
+        basePosition,
+        targetRecord.xyz,
+        displacement,
+        targetRecord.w,
+      );
+    }
+  }
+  return result;
+}
+
+fn vertexObjectiveGradient(vertex: u32, position: vec3f) -> vec3f {
+  var result = vec3f(0.0);
+  if (objectiveForceEnabled()) {
+    result -= vertexExternalForce(vertex);
+  }
+  if (objectiveTargetEnabled()) {
+    let targetRecord = vertexTargetPositionStiffness(vertex);
+    if (targetRecord.w > 0.0) {
+      result += targetRecord.w * (position - targetRecord.xyz);
+    }
+  }
+  return result;
+}
+
+fn vertexTargetStiffness(vertex: u32) -> f32 {
+  return vertexTargetPositionStiffness(vertex).w;
+}
+
 fn floorEnergyDelta(baseY: f32, displacementY: f32) -> f32 {
   if (!(params.solver.x > 0.0)) {
     return 0.0;
@@ -610,6 +685,13 @@ fn restrictedEnergyDelta(
     displacement,
     sourceInertia,
   ) + floorEnergyDelta(sourcePosition.y, displacement.y);
+  if (params.offsets2.w != 0u) {
+    result += vertexObjectiveEnergyDelta(
+      sourceVertex,
+      sourcePosition,
+      displacement,
+    );
+  }
 
   for (var adjacent = 0u; adjacent < sourceItem.info.y; adjacent += 1u) {
     let tet = adjacency[sourceItem.info.x + adjacent];
@@ -653,6 +735,16 @@ fn restrictedEnergyDelta(
         distributedInertiaWeight(vertex),
       );
     }
+    if (params.offsets2.w != 0u) {
+      for (var local = 0u; local < 4u; local += 1u) {
+        let vertex = indices[local];
+        complementary += distributedVertexObjectiveEnergyDelta(
+          vertex,
+          loadPosition(params.offsets1.w, vertex),
+          basis[local] * displacement,
+        );
+      }
+    }
 
     let sourceSlot = localTetSlot(indices, sourceVertex);
     if (sourceSlot < 4u) {
@@ -671,6 +763,13 @@ fn restrictedEnergyDelta(
         displacement,
         distributedInertiaWeight(sourceVertex),
       );
+      if (params.offsets2.w != 0u) {
+        complementary -= distributedVertexObjectiveEnergyDelta(
+          sourceVertex,
+          sourcePosition,
+          displacement,
+        );
+      }
     }
     result += weight * complementary;
   }
@@ -756,6 +855,41 @@ fn distributedInertiaGradient(vertex: u32) -> vec3f {
   );
 }
 
+fn distributedObjectiveGradient(vertex: u32) -> vec3f {
+  let item = vertexData[vertex];
+  if (item.info.z != 0u) {
+    return vec3f(0.0);
+  }
+  let incidentCount = max(item.info.y, 1u);
+  return vertexObjectiveGradient(
+    vertex,
+    loadPosition(params.offsets1.w, vertex),
+  ) / f32(incidentCount);
+}
+
+fn distributedTargetStiffness(vertex: u32) -> f32 {
+  let item = vertexData[vertex];
+  if (item.info.z != 0u) {
+    return 0.0;
+  }
+  let incidentCount = max(item.info.y, 1u);
+  return vertexTargetStiffness(vertex) / f32(incidentCount);
+}
+
+fn distributedVertexObjectiveEnergyDelta(
+  vertex: u32,
+  basePosition: vec3f,
+  displacement: vec3f,
+) -> f32 {
+  let item = vertexData[vertex];
+  if (item.info.z != 0u) {
+    return 0.0;
+  }
+  let incidentCount = max(item.info.y, 1u);
+  return vertexObjectiveEnergyDelta(vertex, basePosition, displacement) /
+    f32(incidentCount);
+}
+
 fn cubatureInertiaHessian(
   indices: vec4u,
   basis: array<mat3x3f, 4>,
@@ -764,6 +898,19 @@ fn cubatureInertiaHessian(
   for (var local = 0u; local < 4u; local += 1u) {
     let vertex = indices[local];
     result += distributedInertiaWeight(vertex) *
+      transpose(basis[local]) * basis[local];
+  }
+  return result;
+}
+
+fn cubatureObjectiveHessian(
+  indices: vec4u,
+  basis: array<mat3x3f, 4>,
+) -> mat3x3f {
+  var result = zeroMat3();
+  for (var local = 0u; local < 4u; local += 1u) {
+    let vertex = indices[local];
+    result += distributedTargetStiffness(vertex) *
       transpose(basis[local]) * basis[local];
   }
   return result;
@@ -856,6 +1003,18 @@ fn vertexImplicitEnergyAt(positionOffset: u32, vertex: u32) -> f32 {
   let inertia = vertexData[vertex].restMass.w * params.time.z;
   let residual = position - predicted;
   var energy = 0.5 * inertia * dot(residual, residual);
+  if (params.offsets2.w != 0u) {
+    if (objectiveForceEnabled()) {
+      energy -= dot(vertexExternalForce(vertex), position);
+    }
+    if (objectiveTargetEnabled()) {
+      let targetRecord = vertexTargetPositionStiffness(vertex);
+      if (targetRecord.w > 0.0) {
+        let targetResidual = position - targetRecord.xyz;
+        energy += 0.5 * targetRecord.w * dot(targetResidual, targetResidual);
+      }
+    }
+  }
   if (params.solver.x > 0.0) {
     let penetration = min(0.0, position.y - params.gravityFloor.w);
     energy += 0.5 * params.solver.x * penetration * penetration;
@@ -1044,8 +1203,16 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
   let inertia = vertexItem.restMass.w * params.time.z;
   var gradient = inertia * (position - predicted);
   var hessian = inertia * identityMat3();
+  if (params.offsets2.w != 0u) {
+    gradient += vertexObjectiveGradient(vertex, position);
+  }
+  if (objectiveTargetEnabled()) {
+    hessian += vertexTargetStiffness(vertex) * identityMat3();
+  }
 
-  // Exact local restriction: inertia plus every incident tetrahedron.
+  // Exact local restriction: inertia, user force, soft target, and every
+  // incident tetrahedron. Force is the explicit potential -f dot x; it is
+  // deliberately not folded into the gravity-only predictor.
   for (var adjacent = 0u; adjacent < vertexItem.info.y; adjacent += 1u) {
     let tet = adjacency[vertexItem.info.x + adjacent];
     let slot = localTetSlot(tetData[tet].indices, vertex);
@@ -1089,8 +1256,18 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
         distributedInertiaGradient(indices[local]);
       projectedGradient += transpose(basis[local]) * sampleGradient;
     }
+    if (params.offsets2.w != 0u) {
+      for (var local = 0u; local < 4u; local += 1u) {
+        projectedGradient += transpose(basis[local]) *
+          distributedObjectiveGradient(indices[local]);
+      }
+    }
     var projectedHessian =
-      cubatureHessian(tet, basis) + cubatureInertiaHessian(indices, basis);
+      cubatureHessian(tet, basis) +
+      cubatureInertiaHessian(indices, basis);
+    if (objectiveTargetEnabled()) {
+      projectedHessian += cubatureObjectiveHessian(indices, basis);
+    }
 
     // Cubature is trained on the remainder after the exact local restriction.
     // If this sample is incident to the source vertex, its full projection
@@ -1104,6 +1281,9 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
       let elementRotation = loadRotation(params.offsets1.z, tet);
       projectedGradient -= tetGradients[sourceSlot] +
         distributedInertiaGradient(vertex);
+      if (params.offsets2.w != 0u) {
+        projectedGradient -= distributedObjectiveGradient(vertex);
+      }
       if (usesStableNeoHookean(tet)) {
         projectedHessian -=
           stableTetrahedronLocalHessian(tet, sourceSlot) +
@@ -1113,6 +1293,10 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
           elementRotation * stiffnessBlock(tet, sourceSlot, sourceSlot) *
             transpose(elementRotation) +
           distributedInertiaWeight(vertex) * identityMat3();
+      }
+      if (objectiveTargetEnabled()) {
+        projectedHessian -=
+          distributedTargetStiffness(vertex) * identityMat3();
       }
     }
 
@@ -1788,6 +1972,19 @@ fn convergenceGradient(@builtin(global_invocation_id) globalId: vec3u) {
   let predicted = loadPosition(params.offsets0.z, vertex);
   let inertia = vertexData[vertex].restMass.w * params.time.z *
     (position - predicted);
+  var externalForce = vec3f(0.0);
+  var targetGradient = vec3f(0.0);
+  if (params.offsets2.w != 0u) {
+    if (objectiveForceEnabled()) {
+      externalForce = -vertexExternalForce(vertex);
+    }
+    if (objectiveTargetEnabled()) {
+      let targetRecord = vertexTargetPositionStiffness(vertex);
+      if (targetRecord.w > 0.0) {
+        targetGradient = targetRecord.w * (position - targetRecord.xyz);
+      }
+    }
+  }
   var material = vec3f(0.0);
   let info = vertexData[vertex].info;
   for (var adjacent = 0u; adjacent < info.y; adjacent += 1u) {
@@ -1806,8 +2003,8 @@ fn convergenceGradient(@builtin(global_invocation_id) globalId: vec3u) {
   }
   dynamicData[base] = vec4f(inertia, 0.0);
   dynamicData[base + 1u] = vec4f(material, 0.0);
-  dynamicData[base + 2u] = vec4f(0.0);
-  dynamicData[base + 3u] = vec4f(0.0);
+  dynamicData[base + 2u] = vec4f(externalForce, 0.0);
+  dynamicData[base + 3u] = vec4f(targetGradient, 0.0);
   dynamicData[base + 4u] = vec4f(contact, 0.0);
 }
 

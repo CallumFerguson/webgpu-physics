@@ -1,52 +1,75 @@
 export const PHASE1_GLOBALIZATION_MANIFEST_SCHEMA =
   "org.jgs2.phase1-globalization" as const;
 export const PHASE1_GLOBALIZATION_LEGACY_MANIFEST_VERSION = 1 as const;
-export const PHASE1_GLOBALIZATION_MANIFEST_VERSION = 2 as const;
+export const PHASE1_GLOBALIZATION_GPU_MANIFEST_VERSION = 2 as const;
+export const PHASE1_GLOBALIZATION_MANIFEST_VERSION = 3 as const;
 
 const EXPECTED_CPU_SOURCE_FIXTURES = Object.freeze({
   materialManifest: "manifests/phase1-scenes.v1.json",
   cubatureManifest: "manifests/phase1-cubature.v1.json",
   cubatureFixtureId: "phase1.nonlinear-cubature-beam",
 });
-const EXPECTED_GPU_TEST_FILES = Object.freeze([
+const EXPECTED_V2_GPU_TEST_FILES = Object.freeze([
   "tests/e2e/nonlinear-globalization-gpu.spec.ts",
   "tests/e2e/nonlinear-cubature-gpu.spec.ts",
 ] as const);
-const EXPECTED_GPU_TEST_SELECTORS = Object.freeze([
+const EXPECTED_V3_GPU_TEST_FILES = Object.freeze([
+  ...EXPECTED_V2_GPU_TEST_FILES,
+  "tests/e2e/nonlinear-objectives-gpu.spec.ts",
+] as const);
+const EXPECTED_V2_GPU_TEST_SELECTORS = Object.freeze([
   {
-    source: EXPECTED_GPU_TEST_FILES[0],
+    source: EXPECTED_V2_GPU_TEST_FILES[0],
     selector:
       "P1-GPU-GLOBALIZATION: assembled Jacobi feasibility reverts the complete pose",
   },
   {
-    source: EXPECTED_GPU_TEST_FILES[0],
+    source: EXPECTED_V2_GPU_TEST_FILES[0],
     selector:
       "P1-GPU-GLOBALIZATION: initial source uses production GPU-f32 feasibility preflight",
   },
   {
-    source: EXPECTED_GPU_TEST_FILES[0],
+    source: EXPECTED_V2_GPU_TEST_FILES[0],
     selector:
       "P1-GPU-GLOBALIZATION: local Armijo checks determinant feasibility before energy",
   },
   {
-    source: EXPECTED_GPU_TEST_FILES[0],
+    source: EXPECTED_V2_GPU_TEST_FILES[0],
     selector:
       "P1-GPU-GLOBALIZATION: shared production shift solver matches the CPU policy",
   },
   {
-    source: EXPECTED_GPU_TEST_FILES[0],
+    source: EXPECTED_V2_GPU_TEST_FILES[0],
     selector:
       "P1-GPU-GLOBALIZATION: stable floor penalty participates in Armijo and convergence",
   },
   {
-    source: EXPECTED_GPU_TEST_FILES[0],
+    source: EXPECTED_V2_GPU_TEST_FILES[0],
     selector:
       "P1-GPU-GLOBALIZATION: convergence reduction requires residual, update, feasibility, and no failures",
   },
   {
-    source: EXPECTED_GPU_TEST_FILES[1],
+    source: EXPECTED_V2_GPU_TEST_FILES[1],
     selector:
       "P1-EC-12-GPU: production nonlinear Cubature updates match the packed CPU reference",
+  },
+] as const);
+const EXPECTED_V3_GPU_TEST_SELECTORS = Object.freeze([
+  ...EXPECTED_V2_GPU_TEST_SELECTORS,
+  {
+    source: EXPECTED_V3_GPU_TEST_FILES[2],
+    selector:
+      "P1-COMPOSITE-GPU: force and quadratic-target derivatives match the independent CPU reference",
+  },
+  {
+    source: EXPECTED_V3_GPU_TEST_FILES[2],
+    selector:
+      "P1-COMPOSITE-GPU: complete-objective Armijo, shift, and convergence policies hold",
+  },
+  {
+    source: EXPECTED_V3_GPU_TEST_FILES[2],
+    selector:
+      "P1-COMPOSITE-GPU: mutable objective inputs fail closed and release without hidden state",
   },
 ] as const);
 const EXPECTED_CASE_IDS = Object.freeze([
@@ -61,6 +84,14 @@ const EXPECTED_CASE_IDS = Object.freeze([
   "component-aware-convergence",
   "canonical-packed-local-systems",
 ] as const);
+const EXPECTED_V3_CASE_IDS = Object.freeze([
+  ...EXPECTED_CASE_IDS,
+  "paper-equivalent-external-force",
+  "composite-restricted-projection",
+  "objective-component-convergence",
+  "mutable-target-release",
+  "objective-input-fail-closed",
+] as const);
 const EXPECTED_V1_RESTRICTED_OBJECTIVE_TERMS = Object.freeze([
   "implicit-euler-inertia",
   "stable-neo-hookean-material",
@@ -69,6 +100,11 @@ const EXPECTED_V2_RESTRICTED_OBJECTIVE_TERMS = Object.freeze([
   "implicit-euler-inertia",
   "stable-neo-hookean-material",
   "analytic-floor-penalty",
+] as const);
+const EXPECTED_V3_RESTRICTED_OBJECTIVE_TERMS = Object.freeze([
+  ...EXPECTED_V2_RESTRICTED_OBJECTIVE_TERMS,
+  "linear-per-vertex-external-force",
+  "isotropic-per-vertex-quadratic-target",
 ] as const);
 
 interface Phase1GlobalizationManifestCommon {
@@ -126,7 +162,7 @@ export interface Phase1GlobalizationManifestV1
 }
 
 export type Phase1GlobalizationGpuTestFile =
-  (typeof EXPECTED_GPU_TEST_FILES)[number];
+  (typeof EXPECTED_V3_GPU_TEST_FILES)[number];
 
 export interface Phase1GlobalizationGpuTestSelector {
   readonly source: Phase1GlobalizationGpuTestFile;
@@ -135,7 +171,7 @@ export interface Phase1GlobalizationGpuTestSelector {
 
 export interface Phase1GlobalizationManifestV2
   extends Phase1GlobalizationManifestCommon {
-  readonly schemaVersion: typeof PHASE1_GLOBALIZATION_MANIFEST_VERSION;
+  readonly schemaVersion: typeof PHASE1_GLOBALIZATION_GPU_MANIFEST_VERSION;
   readonly id: "phase1.globalization-material-inertia-cpu-gpu";
   readonly sourceFixtures: {
     readonly materialManifest: string;
@@ -208,9 +244,69 @@ export interface Phase1GlobalizationManifestV2
   };
 }
 
+export interface Phase1GlobalizationManifestV3
+  extends Omit<
+    Phase1GlobalizationManifestV2,
+    | "schemaVersion"
+    | "id"
+    | "sourceFixtures"
+    | "referenceGates"
+    | "gpuRuntime"
+    | "restrictedObjectiveTerms"
+    | "runtimeStatus"
+  > {
+  readonly schemaVersion: typeof PHASE1_GLOBALIZATION_MANIFEST_VERSION;
+  readonly id: "phase1.globalization-composite-objective-cpu-gpu";
+  readonly sourceFixtures: {
+    readonly materialManifest: string;
+    readonly cubatureManifest: string;
+    readonly cubatureFixtureId: string;
+    readonly gpuTestFiles: readonly [
+      "tests/e2e/nonlinear-globalization-gpu.spec.ts",
+      "tests/e2e/nonlinear-cubature-gpu.spec.ts",
+      "tests/e2e/nonlinear-objectives-gpu.spec.ts",
+    ];
+  };
+  readonly referenceGates: Phase1GlobalizationManifestV2["referenceGates"] & {
+    readonly cpuPredictorEquivalenceTolerance: number;
+    readonly gpuCompositeParityRelativeError: number;
+    readonly selectedUpdateRmsRelativeError: number;
+    readonly routineActiveLocalSystemCount: number;
+    readonly fullActiveLocalSystemCount: number;
+    readonly minimumObjectiveDirectionEffect: number;
+    readonly maximumEffectRelativeDirectionError: number;
+  };
+  readonly gpuRuntime: Phase1GlobalizationManifestV2["gpuRuntime"] & {
+    readonly objectiveBytesPerVertex: number;
+    readonly objectiveBufferBinding: number;
+    readonly objectiveBufferAccess: "read-only-storage";
+    readonly uniformBinding: number;
+    readonly storageBufferBindings: number;
+    readonly quadraticTargetApplication: "objective-only-no-snap";
+    readonly quadraticTargetRelease: "zero-stiffness";
+    readonly objectiveUpdateOrdering: "queue-ordered-sparse-writes";
+    readonly stepFramesObjectiveSnapshot: "constant-per-batch";
+    readonly pinnedObjectiveConflict: "rejected";
+  };
+  readonly restrictedObjectiveTerms: readonly [
+    "implicit-euler-inertia",
+    "stable-neo-hookean-material",
+    "analytic-floor-penalty",
+    "linear-per-vertex-external-force",
+    "isotropic-per-vertex-quadratic-target",
+  ];
+  readonly runtimeStatus: {
+    readonly cpuMaterialInertiaReference: "implemented";
+    readonly compositeForcesAndTargets: "implemented";
+    readonly gpuProduction: "implemented-composite-objective";
+    readonly qualifiesPhase1Exit: false;
+  };
+}
+
 export type Phase1GlobalizationManifest =
   | Phase1GlobalizationManifestV1
-  | Phase1GlobalizationManifestV2;
+  | Phase1GlobalizationManifestV2
+  | Phase1GlobalizationManifestV3;
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -272,15 +368,20 @@ export function validatePhase1GlobalizationManifest(
   const schemaVersion = finite(root.schemaVersion, "schemaVersion");
   if (
     schemaVersion !== PHASE1_GLOBALIZATION_LEGACY_MANIFEST_VERSION &&
+    schemaVersion !== PHASE1_GLOBALIZATION_GPU_MANIFEST_VERSION &&
     schemaVersion !== PHASE1_GLOBALIZATION_MANIFEST_VERSION
   ) {
     throw new Error(
       `schemaVersion must equal ` +
-        `${PHASE1_GLOBALIZATION_LEGACY_MANIFEST_VERSION} or ` +
+        `${PHASE1_GLOBALIZATION_LEGACY_MANIFEST_VERSION}, ` +
+        `${PHASE1_GLOBALIZATION_GPU_MANIFEST_VERSION}, or ` +
         `${PHASE1_GLOBALIZATION_MANIFEST_VERSION}.`,
     );
   }
-  const isV2 = schemaVersion === PHASE1_GLOBALIZATION_MANIFEST_VERSION;
+  const hasGpuContract =
+    schemaVersion === PHASE1_GLOBALIZATION_GPU_MANIFEST_VERSION ||
+    schemaVersion === PHASE1_GLOBALIZATION_MANIFEST_VERSION;
+  const isV3 = schemaVersion === PHASE1_GLOBALIZATION_MANIFEST_VERSION;
   exactKeys(
     root,
     [
@@ -292,7 +393,7 @@ export function validatePhase1GlobalizationManifest(
       "lineSearch",
       "convergence",
       "referenceGates",
-      ...(isV2 ? ["gpuRuntime", "gpuTestSelectors"] : []),
+      ...(hasGpuContract ? ["gpuRuntime", "gpuTestSelectors"] : []),
       "caseIds",
       "restrictedObjectiveTerms",
       "runtimeStatus",
@@ -301,9 +402,11 @@ export function validatePhase1GlobalizationManifest(
   );
   literal(
     root.id,
-    isV2
-      ? "phase1.globalization-material-inertia-cpu-gpu"
-      : "phase1.globalization-material-inertia-reference",
+    isV3
+      ? "phase1.globalization-composite-objective-cpu-gpu"
+      : hasGpuContract
+        ? "phase1.globalization-material-inertia-cpu-gpu"
+        : "phase1.globalization-material-inertia-reference",
     "id",
   );
 
@@ -312,7 +415,7 @@ export function validatePhase1GlobalizationManifest(
     sources,
     [
       ...Object.keys(EXPECTED_CPU_SOURCE_FIXTURES),
-      ...(isV2 ? ["gpuTestFiles"] : []),
+      ...(hasGpuContract ? ["gpuTestFiles"] : []),
     ],
     "sourceFixtures",
   );
@@ -321,12 +424,15 @@ export function validatePhase1GlobalizationManifest(
   )) {
     literal(sources[key], expected, `sourceFixtures.${key}`);
   }
-  if (isV2) {
+  if (hasGpuContract) {
+    const expectedGpuTestFiles = isV3
+      ? EXPECTED_V3_GPU_TEST_FILES
+      : EXPECTED_V2_GPU_TEST_FILES;
     if (
       !Array.isArray(sources.gpuTestFiles) ||
-      sources.gpuTestFiles.length !== EXPECTED_GPU_TEST_FILES.length ||
+      sources.gpuTestFiles.length !== expectedGpuTestFiles.length ||
       sources.gpuTestFiles.some(
-        (entry, index) => entry !== EXPECTED_GPU_TEST_FILES[index],
+        (entry, index) => entry !== expectedGpuTestFiles[index],
       )
     ) {
       throw new Error(
@@ -343,7 +449,7 @@ export function validatePhase1GlobalizationManifest(
       "eigenvalueFloorMultiplier",
       "relativeEigenvalueFloor",
       "maximumNormalizedShift",
-      ...(isV2 ? ["positionResolutionMultiplier"] : []),
+      ...(hasGpuContract ? ["positionResolutionMultiplier"] : []),
       "scales",
     ],
     "positiveDefiniteTreatment",
@@ -379,7 +485,7 @@ export function validatePhase1GlobalizationManifest(
     1e-3,
     "positiveDefiniteTreatment.maximumNormalizedShift",
   );
-  if (isV2) {
+  if (hasGpuContract) {
     literal(
       positive(
         pd.positionResolutionMultiplier,
@@ -410,7 +516,7 @@ export function validatePhase1GlobalizationManifest(
       "maximumBacktracks",
       "determinantFloor",
       "feasibilityBeforeEnergy",
-      ...(isV2 ? ["energyComparison"] : []),
+      ...(hasGpuContract ? ["energyComparison"] : []),
       "failureUpdate",
     ],
     "lineSearch",
@@ -432,7 +538,7 @@ export function validatePhase1GlobalizationManifest(
   );
   literal(determinantFloor, 1e-4, "lineSearch.determinantFloor");
   literal(lineSearch.feasibilityBeforeEnergy, true, "lineSearch.feasibilityBeforeEnergy");
-  if (isV2) {
+  if (hasGpuContract) {
     literal(
       lineSearch.energyComparison,
       "delta-from-frozen-source",
@@ -449,7 +555,7 @@ export function validatePhase1GlobalizationManifest(
       "maximumRuntimeTolerance",
       "requiresResidualAndUpdate",
       "sceneScale",
-      ...(isV2 ? ["gpuHistoryCapacity"] : []),
+      ...(hasGpuContract ? ["gpuHistoryCapacity"] : []),
     ],
     "convergence",
   );
@@ -468,7 +574,7 @@ export function validatePhase1GlobalizationManifest(
   }
   literal(convergence.requiresResidualAndUpdate, true, "convergence.requiresResidualAndUpdate");
   literal(convergence.sceneScale, "initial-dynamic-aabb-diagonal", "convergence.sceneScale");
-  if (isV2) {
+  if (hasGpuContract) {
     literal(
       positive(
         convergence.gpuHistoryCapacity,
@@ -486,9 +592,20 @@ export function validatePhase1GlobalizationManifest(
       "restrictedGradientRelativeError",
       "restrictedHessianRelativeError",
       "shiftedLinearResidual",
-      ...(isV2 ? ["gpuShiftedLinearResidual"] : []),
+      ...(hasGpuContract ? ["gpuShiftedLinearResidual"] : []),
       "canonicalPackedLocalSystemCount",
       "assembledRevertDeterminant",
+      ...(isV3
+        ? [
+            "cpuPredictorEquivalenceTolerance",
+            "gpuCompositeParityRelativeError",
+            "selectedUpdateRmsRelativeError",
+            "routineActiveLocalSystemCount",
+            "fullActiveLocalSystemCount",
+            "minimumObjectiveDirectionEffect",
+            "maximumEffectRelativeDirectionError",
+          ]
+        : []),
     ],
     "referenceGates",
   );
@@ -513,7 +630,7 @@ export function validatePhase1GlobalizationManifest(
     1e-8,
     "referenceGates.shiftedLinearResidual",
   );
-  if (isV2) {
+  if (hasGpuContract) {
     literal(
       positive(
         gates.gpuShiftedLinearResidual,
@@ -544,7 +661,66 @@ export function validatePhase1GlobalizationManifest(
     throw new Error("The assembled revert fixture must violate the determinant floor.");
   }
 
-  if (isV2) {
+  if (isV3) {
+    literal(
+      positive(
+        gates.cpuPredictorEquivalenceTolerance,
+        "referenceGates.cpuPredictorEquivalenceTolerance",
+      ),
+      1e-12,
+      "referenceGates.cpuPredictorEquivalenceTolerance",
+    );
+    literal(
+      positive(
+        gates.gpuCompositeParityRelativeError,
+        "referenceGates.gpuCompositeParityRelativeError",
+      ),
+      1e-3,
+      "referenceGates.gpuCompositeParityRelativeError",
+    );
+    literal(
+      positive(
+        gates.selectedUpdateRmsRelativeError,
+        "referenceGates.selectedUpdateRmsRelativeError",
+      ),
+      0.02,
+      "referenceGates.selectedUpdateRmsRelativeError",
+    );
+    literal(
+      positive(
+        gates.routineActiveLocalSystemCount,
+        "referenceGates.routineActiveLocalSystemCount",
+      ),
+      60,
+      "referenceGates.routineActiveLocalSystemCount",
+    );
+    literal(
+      positive(
+        gates.fullActiveLocalSystemCount,
+        "referenceGates.fullActiveLocalSystemCount",
+      ),
+      240,
+      "referenceGates.fullActiveLocalSystemCount",
+    );
+    literal(
+      positive(
+        gates.minimumObjectiveDirectionEffect,
+        "referenceGates.minimumObjectiveDirectionEffect",
+      ),
+      1e-4,
+      "referenceGates.minimumObjectiveDirectionEffect",
+    );
+    literal(
+      positive(
+        gates.maximumEffectRelativeDirectionError,
+        "referenceGates.maximumEffectRelativeDirectionError",
+      ),
+      1e-3,
+      "referenceGates.maximumEffectRelativeDirectionError",
+    );
+  }
+
+  if (hasGpuContract) {
     const gpuRuntime = record(root.gpuRuntime, "gpuRuntime");
     exactKeys(
       gpuRuntime,
@@ -563,6 +739,20 @@ export function validatePhase1GlobalizationManifest(
         "explicitDiagnosticReadback",
         "assembledEnergyAcceptance",
         "pinnedTargetApplication",
+        ...(isV3
+          ? [
+              "objectiveBytesPerVertex",
+              "objectiveBufferBinding",
+              "objectiveBufferAccess",
+              "uniformBinding",
+              "storageBufferBindings",
+              "quadraticTargetApplication",
+              "quadraticTargetRelease",
+              "objectiveUpdateOrdering",
+              "stepFramesObjectiveSnapshot",
+              "pinnedObjectiveConflict",
+            ]
+          : []),
       ],
       "gpuRuntime",
     );
@@ -645,6 +835,67 @@ export function validatePhase1GlobalizationManifest(
       "assembled-feasibility-gated",
       "gpuRuntime.pinnedTargetApplication",
     );
+    if (isV3) {
+      literal(
+        positive(
+          gpuRuntime.objectiveBytesPerVertex,
+          "gpuRuntime.objectiveBytesPerVertex",
+        ),
+        32,
+        "gpuRuntime.objectiveBytesPerVertex",
+      );
+      literal(
+        finite(
+          gpuRuntime.objectiveBufferBinding,
+          "gpuRuntime.objectiveBufferBinding",
+        ),
+        6,
+        "gpuRuntime.objectiveBufferBinding",
+      );
+      literal(
+        gpuRuntime.objectiveBufferAccess,
+        "read-only-storage",
+        "gpuRuntime.objectiveBufferAccess",
+      );
+      literal(
+        finite(gpuRuntime.uniformBinding, "gpuRuntime.uniformBinding"),
+        7,
+        "gpuRuntime.uniformBinding",
+      );
+      literal(
+        positive(
+          gpuRuntime.storageBufferBindings,
+          "gpuRuntime.storageBufferBindings",
+        ),
+        7,
+        "gpuRuntime.storageBufferBindings",
+      );
+      literal(
+        gpuRuntime.quadraticTargetApplication,
+        "objective-only-no-snap",
+        "gpuRuntime.quadraticTargetApplication",
+      );
+      literal(
+        gpuRuntime.quadraticTargetRelease,
+        "zero-stiffness",
+        "gpuRuntime.quadraticTargetRelease",
+      );
+      literal(
+        gpuRuntime.objectiveUpdateOrdering,
+        "queue-ordered-sparse-writes",
+        "gpuRuntime.objectiveUpdateOrdering",
+      );
+      literal(
+        gpuRuntime.stepFramesObjectiveSnapshot,
+        "constant-per-batch",
+        "gpuRuntime.stepFramesObjectiveSnapshot",
+      );
+      literal(
+        gpuRuntime.pinnedObjectiveConflict,
+        "rejected",
+        "gpuRuntime.pinnedObjectiveConflict",
+      );
+    }
   }
 
   if (!Array.isArray(root.caseIds) || root.caseIds.length === 0) {
@@ -656,16 +907,19 @@ export function validatePhase1GlobalizationManifest(
   if (new Set(caseIds).size !== caseIds.length) {
     throw new Error("caseIds must be unique.");
   }
+  const expectedCaseIds = isV3 ? EXPECTED_V3_CASE_IDS : EXPECTED_CASE_IDS;
   if (
-    caseIds.length !== EXPECTED_CASE_IDS.length ||
-    caseIds.some((entry, index) => entry !== EXPECTED_CASE_IDS[index])
+    caseIds.length !== expectedCaseIds.length ||
+    caseIds.some((entry, index) => entry !== expectedCaseIds[index])
   ) {
     throw new Error("caseIds must exactly match the frozen case inventory.");
   }
 
-  const expectedRestrictedObjectiveTerms = isV2
-    ? EXPECTED_V2_RESTRICTED_OBJECTIVE_TERMS
-    : EXPECTED_V1_RESTRICTED_OBJECTIVE_TERMS;
+  const expectedRestrictedObjectiveTerms = isV3
+    ? EXPECTED_V3_RESTRICTED_OBJECTIVE_TERMS
+    : hasGpuContract
+      ? EXPECTED_V2_RESTRICTED_OBJECTIVE_TERMS
+      : EXPECTED_V1_RESTRICTED_OBJECTIVE_TERMS;
   if (
     !Array.isArray(root.restrictedObjectiveTerms) ||
     root.restrictedObjectiveTerms.length !==
@@ -675,14 +929,17 @@ export function validatePhase1GlobalizationManifest(
     )
   ) {
     throw new Error(
-      "restrictedObjectiveTerms must exactly describe the partial reference scope.",
+      "restrictedObjectiveTerms must exactly describe the frozen objective scope.",
     );
   }
 
-  if (isV2) {
+  if (hasGpuContract) {
+    const expectedGpuTestSelectors = isV3
+      ? EXPECTED_V3_GPU_TEST_SELECTORS
+      : EXPECTED_V2_GPU_TEST_SELECTORS;
     if (
       !Array.isArray(root.gpuTestSelectors) ||
-      root.gpuTestSelectors.length !== EXPECTED_GPU_TEST_SELECTORS.length
+      root.gpuTestSelectors.length !== expectedGpuTestSelectors.length
     ) {
       throw new Error(
         "gpuTestSelectors must exactly match the frozen Phase 1 GPU selector inventory.",
@@ -691,7 +948,7 @@ export function validatePhase1GlobalizationManifest(
     root.gpuTestSelectors.forEach((value, index) => {
       const selector = record(value, `gpuTestSelectors[${index}]`);
       exactKeys(selector, ["source", "selector"], `gpuTestSelectors[${index}]`);
-      const expected = EXPECTED_GPU_TEST_SELECTORS[index]!;
+      const expected = expectedGpuTestSelectors[index]!;
       literal(
         selector.source,
         expected.source,
@@ -723,12 +980,16 @@ export function validatePhase1GlobalizationManifest(
   );
   literal(
     status.compositeForcesAndTargets,
-    "pending",
+    isV3 ? "implemented" : "pending",
     "runtimeStatus.compositeForcesAndTargets",
   );
   literal(
     status.gpuProduction,
-    isV2 ? "implemented-material-inertia-floor" : "pending",
+    isV3
+      ? "implemented-composite-objective"
+      : hasGpuContract
+        ? "implemented-material-inertia-floor"
+        : "pending",
     "runtimeStatus.gpuProduction",
   );
   literal(status.qualifiesPhase1Exit, false, "runtimeStatus.qualifiesPhase1Exit");

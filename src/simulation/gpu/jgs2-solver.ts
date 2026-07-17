@@ -1,5 +1,9 @@
 import {
   JGS2_UNIFORM_BYTES,
+  JGS2_OBJECTIVE_EXTERNAL_FORCE_ACTIVE_BIT,
+  JGS2_OBJECTIVE_TARGET_ACTIVE_BIT,
+  JGS2_VERTEX_OBJECTIVE_BYTES,
+  JGS2_VERTEX_OBJECTIVE_WORDS,
   computeJGS2DynamicOffsets,
   inferJGS2BodyCount,
   inferJGS2MaterialMode,
@@ -9,6 +13,7 @@ import {
   packJGS2Cubature,
   packJGS2InitialDynamic,
   packJGS2TetStatic,
+  packJGS2VertexObjectives,
   packJGS2VertexStatic,
   validateJGS2ContactParameters,
   validateJGS2GpuInput,
@@ -70,6 +75,14 @@ export interface JGS2PositionBufferView {
   readonly offset: number;
   readonly size: number;
   readonly stride: 16;
+}
+
+export interface JGS2ObjectiveActivity {
+  readonly flags: number;
+  readonly externalForces: boolean;
+  readonly quadraticTargets: boolean;
+  readonly externalForceVertexCount: number;
+  readonly quadraticTargetVertexCount: number;
 }
 
 export interface JGS2GlobalizationDiagnostics {
@@ -142,6 +155,7 @@ interface JGS2GpuBuffers {
   readonly stiffness: GPUBuffer;
   readonly adjacency: GPUBuffer;
   readonly cubature: GPUBuffer;
+  readonly objectives: GPUBuffer;
 }
 
 interface JGS2Pipelines {
@@ -173,6 +187,72 @@ interface JGS2UniformState {
 
 function alignTo4(value: number): number {
   return Math.ceil(value / 4) * 4;
+}
+
+interface PackedObjectiveActivity {
+  readonly flags: number;
+  readonly externalForceVertexCount: number;
+  readonly quadraticTargetVertexCount: number;
+}
+
+function computePackedObjectiveActivity(
+  packed: Float32Array,
+  vertexCount: number,
+): PackedObjectiveActivity {
+  let externalForceVertexCount = 0;
+  let quadraticTargetVertexCount = 0;
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const base = vertex * JGS2_VERTEX_OBJECTIVE_WORDS;
+    if (
+      packed[base] !== 0 ||
+      packed[base + 1] !== 0 ||
+      packed[base + 2] !== 0
+    ) {
+      externalForceVertexCount += 1;
+    }
+    if (packed[base + 7]! > 0) {
+      quadraticTargetVertexCount += 1;
+    }
+  }
+  return {
+    flags:
+      (externalForceVertexCount > 0
+        ? JGS2_OBJECTIVE_EXTERNAL_FORCE_ACTIVE_BIT
+        : 0) |
+      (quadraticTargetVertexCount > 0
+        ? JGS2_OBJECTIVE_TARGET_ACTIVE_BIT
+        : 0),
+    externalForceVertexCount,
+    quadraticTargetVertexCount,
+  };
+}
+
+function packPinnedVertexMask(input: JGS2GpuInput): Uint8Array {
+  const pinned = new Uint8Array(input.vertexCount);
+  for (let vertex = 0; vertex < input.vertexCount; vertex += 1) {
+    pinned[vertex] = Number(input.vertexInfo[vertex * 4 + 2] !== 0);
+  }
+  return pinned;
+}
+
+function finiteF32(value: number, label: string): number {
+  const rounded = Math.fround(value);
+  if (!Number.isFinite(value) || !Number.isFinite(rounded)) {
+    throw new RangeError(`${label} must be finite after f32 conversion.`);
+  }
+  return rounded;
+}
+
+function validateObjectiveArrayLength(
+  values: Float32Array,
+  expectedLength: number,
+  label: string,
+): void {
+  if (values.length !== expectedLength) {
+    throw new RangeError(
+      `${label} must contain ${expectedLength} values; got ${values.length}.`,
+    );
+  }
 }
 
 function createInitializedBuffer(
@@ -365,6 +445,7 @@ function packUniforms(
   targetPosition: number,
   globalizationEnabled: boolean,
   sceneScale: number,
+  objectiveFlags: number,
 ): Uint8Array {
   const buffer = new ArrayBuffer(JGS2_UNIFORM_BYTES);
   const integers = new Uint32Array(buffer);
@@ -383,7 +464,12 @@ function packUniforms(
     8,
   );
   integers.set(
-    [targetPosition, offsets.bodyCorrection, offsets.finalUpdate, 0],
+    [
+      targetPosition,
+      offsets.bodyCorrection,
+      offsets.finalUpdate,
+      objectiveFlags,
+    ],
     12,
   );
 
@@ -511,7 +597,8 @@ function createBindGroup(
       { binding: 3, resource: { buffer: buffers.stiffness } },
       { binding: 4, resource: { buffer: buffers.adjacency } },
       { binding: 5, resource: { buffer: buffers.cubature } },
-      { binding: 6, resource: { buffer: uniforms } },
+      { binding: 6, resource: { buffer: buffers.objectives } },
+      { binding: 7, resource: { buffer: uniforms } },
     ],
   });
 }
@@ -639,6 +726,10 @@ export class JGS2GpuSolver {
   private readonly timestampTimer: GpuTimestampFrameTimer;
   private diagnosticReadbackCount = 0;
   private globalizationRecordsAvailable = false;
+  private objectiveFlagsValue: number;
+  private activeExternalForceCount: number;
+  private activeTargetCount: number;
+  private objectiveRevisionValue = 0;
 
   private constructor(
     private readonly device: GPUDevice,
@@ -652,6 +743,9 @@ export class JGS2GpuSolver {
     private readonly defaultSettings: JGS2StepSettings,
     private readonly preprocessingTimestep: number,
     private readonly sceneScale: number,
+    private readonly objectiveData: Float32Array,
+    private readonly pinnedVertices: Uint8Array,
+    initialObjectiveActivity: PackedObjectiveActivity,
     globalizationEnabled: boolean,
     offsets: JGS2DynamicOffsets,
   ) {
@@ -661,6 +755,11 @@ export class JGS2GpuSolver {
     this.bodyCount = inputShape.bodyCount;
     this.dynamicOffsets = offsets;
     this.globalizationEnabled = globalizationEnabled;
+    this.objectiveFlagsValue = initialObjectiveActivity.flags;
+    this.activeExternalForceCount =
+      initialObjectiveActivity.externalForceVertexCount;
+    this.activeTargetCount =
+      initialObjectiveActivity.quadraticTargetVertexCount;
     this.submittedSettings = defaultSettings;
     this.timestampTimer = new GpuTimestampFrameTimer(device, "jgs2-step");
   }
@@ -671,15 +770,32 @@ export class JGS2GpuSolver {
     settings: Partial<JGS2StepSettings> = {},
   ): Promise<JGS2GpuSolver> {
     validateJGS2GpuInput(input);
-    if (device.limits.maxStorageBuffersPerShaderStage < 6) {
+    if (device.limits.maxStorageBuffersPerShaderStage < 7) {
       throw new Error(
-        "JGS2 requires six storage buffers in the compute stage, but this " +
+        "JGS2 requires seven storage buffers in the compute stage, but this " +
           `adapter supports ${device.limits.maxStorageBuffersPerShaderStage}.`,
       );
     }
 
     const materialMode = inferJGS2MaterialMode(input);
     const globalizationEnabled = materialMode === "stable-neo-hookean";
+    const packedObjectives = packJGS2VertexObjectives(input);
+    const initialObjectiveActivity = computePackedObjectiveActivity(
+      packedObjectives,
+      input.vertexCount,
+    );
+    if (!globalizationEnabled && initialObjectiveActivity.flags !== 0) {
+      throw new RangeError(
+        "Active external forces and quadratic targets require the stable " +
+          "Neo-Hookean production path.",
+      );
+    }
+    const pinnedVertices = packPinnedVertexMask(input);
+    // Legacy regression shaders still bind the objective slot, but inactive
+    // scenes should not pay for a full per-vertex allocation they never read.
+    const uploadedObjectives = globalizationEnabled
+      ? packedObjectives
+      : new Float32Array(JGS2_VERTEX_OBJECTIVE_WORDS);
     let resolvedSettings = resolveJGS2StepSettings(
       DEFAULT_JGS2_STEP_SETTINGS,
       settings,
@@ -724,6 +840,7 @@ export class JGS2GpuSolver {
       ["JGS2 stiffness buffer", input.tetRestStiffness.byteLength],
       ["JGS2 adjacency buffer", Math.max(4, input.adjacency.byteLength)],
       ["JGS2 cubature buffer", Math.max(4, cubature.byteLength)],
+      ["JGS2 objective buffer", uploadedObjectives.byteLength],
     ];
     for (const [label, byteLength] of storageSizes) {
       assertStorageBufferFits(device, label, byteLength);
@@ -778,6 +895,13 @@ export class JGS2GpuSolver {
           cubature,
           storageBuffers,
         ),
+        objectives: createInitializedBuffer(
+          device,
+          "jgs2-objectives",
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          uploadedObjectives,
+          storageBuffers,
+        ),
       };
       const bindGroupLayout = device.createBindGroupLayout({
         label: "jgs2-bind-group-layout",
@@ -787,13 +911,13 @@ export class JGS2GpuSolver {
             visibility: GPUShaderStage.COMPUTE,
             buffer: { type: "storage" },
           },
-          ...[1, 2, 3, 4, 5].map<GPUBindGroupLayoutEntry>((binding) => ({
+          ...[1, 2, 3, 4, 5, 6].map<GPUBindGroupLayoutEntry>((binding) => ({
             binding,
             visibility: GPUShaderStage.COMPUTE,
             buffer: { type: "read-only-storage" },
           })),
           {
-            binding: 6,
+            binding: 7,
             visibility: GPUShaderStage.COMPUTE,
             buffer: { type: "uniform", minBindingSize: JGS2_UNIFORM_BYTES },
           },
@@ -945,6 +1069,7 @@ export class JGS2GpuSolver {
             offsets.posA,
             true,
             sceneScale,
+            initialObjectiveActivity.flags,
           ),
         );
         await validateGpuInitialStableSource(
@@ -969,6 +1094,9 @@ export class JGS2GpuSolver {
         resolvedSettings,
         resolvedSettings.timestep,
         sceneScale,
+        uploadedObjectives,
+        pinnedVertices,
+        initialObjectiveActivity,
         globalizationEnabled,
         offsets,
       );
@@ -1030,6 +1158,214 @@ export class JGS2GpuSolver {
 
   get lastSubmittedSettings(): JGS2StepSettings {
     return this.submittedSettings;
+  }
+
+  /** Current CPU-mirrored activity bits uploaded with the next frame. */
+  get objectiveActivity(): JGS2ObjectiveActivity {
+    this.assertUsable();
+    const flags = this.objectiveFlagsValue;
+    return Object.freeze({
+      flags,
+      externalForces:
+        (flags & JGS2_OBJECTIVE_EXTERNAL_FORCE_ACTIVE_BIT) !== 0,
+      quadraticTargets:
+        (flags & JGS2_OBJECTIVE_TARGET_ACTIVE_BIT) !== 0,
+      externalForceVertexCount: this.activeExternalForceCount,
+      quadraticTargetVertexCount: this.activeTargetCount,
+    });
+  }
+
+  /** Number of successful objective-buffer writes since solver creation. */
+  get objectiveRevision(): number {
+    this.assertUsable();
+    return this.objectiveRevisionValue;
+  }
+
+  /** Replace one vertex's constant external-force vector. */
+  setExternalForce(
+    vertex: number,
+    force: readonly [number, number, number],
+  ): void {
+    this.assertObjectiveUpdatesSupported();
+    this.assertObjectiveVertex(vertex);
+    const packed = new Float32Array(4);
+    for (let coordinate = 0; coordinate < 3; coordinate += 1) {
+      packed[coordinate] = finiteF32(
+        force[coordinate],
+        `External force ${coordinate} for vertex ${vertex}`,
+      );
+    }
+    if (
+      this.pinnedVertices[vertex] !== 0 &&
+      (packed[0] !== 0 || packed[1] !== 0 || packed[2] !== 0)
+    ) {
+      throw new RangeError(
+        `Pinned vertex ${vertex} cannot have a nonzero external force.`,
+      );
+    }
+    const base = vertex * JGS2_VERTEX_OBJECTIVE_WORDS;
+    const wasActive =
+      this.objectiveData[base] !== 0 ||
+      this.objectiveData[base + 1] !== 0 ||
+      this.objectiveData[base + 2] !== 0;
+    const isActive = packed[0] !== 0 || packed[1] !== 0 || packed[2] !== 0;
+    this.device.queue.writeBuffer(
+      this.buffers.objectives,
+      vertex * JGS2_VERTEX_OBJECTIVE_BYTES,
+      packed,
+    );
+    this.objectiveData.set(packed, base);
+    this.activeExternalForceCount += Number(isActive) - Number(wasActive);
+    this.finishObjectiveWrite();
+  }
+
+  /** Replace every external force in one validated, queue-ordered write. */
+  replaceExternalForces(forces: Float32Array): void {
+    this.assertObjectiveUpdatesSupported();
+    validateObjectiveArrayLength(
+      forces,
+      this.vertexCount * 3,
+      "External forces",
+    );
+    const next = this.objectiveData.slice();
+    for (let vertex = 0; vertex < this.vertexCount; vertex += 1) {
+      const source = vertex * 3;
+      const destination = vertex * JGS2_VERTEX_OBJECTIVE_WORDS;
+      let nonzero = false;
+      for (let coordinate = 0; coordinate < 3; coordinate += 1) {
+        const value = finiteF32(
+          forces[source + coordinate]!,
+          `External forces[${source + coordinate}]`,
+        );
+        next[destination + coordinate] = value;
+        nonzero ||= value !== 0;
+      }
+      next[destination + 3] = 0;
+      if (this.pinnedVertices[vertex] !== 0 && nonzero) {
+        throw new RangeError(
+          `Pinned vertex ${vertex} cannot have a nonzero external force.`,
+        );
+      }
+    }
+    this.writeCompleteObjectiveState(next);
+  }
+
+  clearExternalForces(): void {
+    this.replaceExternalForces(new Float32Array(this.vertexCount * 3));
+  }
+
+  /** Set one soft isotropic target; stiffness zero is an inactive target. */
+  setQuadraticTarget(
+    vertex: number,
+    target: readonly [number, number, number],
+    stiffness: number,
+  ): void {
+    this.assertObjectiveUpdatesSupported();
+    this.assertObjectiveVertex(vertex);
+    const packed = new Float32Array(4);
+    for (let coordinate = 0; coordinate < 3; coordinate += 1) {
+      packed[coordinate] = finiteF32(
+        target[coordinate],
+        `Quadratic target ${coordinate} for vertex ${vertex}`,
+      );
+    }
+    packed[3] = finiteF32(
+      stiffness,
+      `Quadratic-target stiffness for vertex ${vertex}`,
+    );
+    if (packed[3] < 0) {
+      throw new RangeError(
+        `Quadratic-target stiffness for vertex ${vertex} must be nonnegative.`,
+      );
+    }
+    if (this.pinnedVertices[vertex] !== 0 && packed[3] !== 0) {
+      throw new RangeError(
+        `Pinned vertex ${vertex} cannot have a nonzero quadratic-target stiffness.`,
+      );
+    }
+    const base = vertex * JGS2_VERTEX_OBJECTIVE_WORDS + 4;
+    const wasActive = this.objectiveData[base + 3]! > 0;
+    const isActive = packed[3]! > 0;
+    this.device.queue.writeBuffer(
+      this.buffers.objectives,
+      vertex * JGS2_VERTEX_OBJECTIVE_BYTES + 16,
+      packed,
+    );
+    this.objectiveData.set(packed, base);
+    this.activeTargetCount += Number(isActive) - Number(wasActive);
+    this.finishObjectiveWrite();
+  }
+
+  /** Replace every soft target in one validated, queue-ordered write. */
+  replaceQuadraticTargets(
+    targetPositions: Float32Array,
+    targetStiffnesses: Float32Array,
+  ): void {
+    this.assertObjectiveUpdatesSupported();
+    validateObjectiveArrayLength(
+      targetPositions,
+      this.vertexCount * 3,
+      "Quadratic target positions",
+    );
+    validateObjectiveArrayLength(
+      targetStiffnesses,
+      this.vertexCount,
+      "Quadratic target stiffnesses",
+    );
+    const next = this.objectiveData.slice();
+    for (let vertex = 0; vertex < this.vertexCount; vertex += 1) {
+      const source = vertex * 3;
+      const destination = vertex * JGS2_VERTEX_OBJECTIVE_WORDS + 4;
+      for (let coordinate = 0; coordinate < 3; coordinate += 1) {
+        next[destination + coordinate] = finiteF32(
+          targetPositions[source + coordinate]!,
+          `Quadratic target positions[${source + coordinate}]`,
+        );
+      }
+      const stiffness = finiteF32(
+        targetStiffnesses[vertex]!,
+        `Quadratic target stiffnesses[${vertex}]`,
+      );
+      if (stiffness < 0) {
+        throw new RangeError(
+          `Quadratic target stiffnesses[${vertex}] must be nonnegative.`,
+        );
+      }
+      if (this.pinnedVertices[vertex] !== 0 && stiffness !== 0) {
+        throw new RangeError(
+          `Pinned vertex ${vertex} cannot have a nonzero quadratic-target stiffness.`,
+        );
+      }
+      next[destination + 3] = stiffness;
+    }
+    this.writeCompleteObjectiveState(next);
+  }
+
+  /** Atomically release one target without changing position or velocity. */
+  releaseQuadraticTarget(vertex: number): void {
+    this.assertObjectiveUpdatesSupported();
+    this.assertObjectiveVertex(vertex);
+    const base = vertex * JGS2_VERTEX_OBJECTIVE_WORDS + 4;
+    const wasActive = this.objectiveData[base + 3]! > 0;
+    const released = this.objectiveData.slice(base, base + 4);
+    released[3] = 0;
+    this.device.queue.writeBuffer(
+      this.buffers.objectives,
+      vertex * JGS2_VERTEX_OBJECTIVE_BYTES + 16,
+      released,
+    );
+    this.objectiveData.set(released, base);
+    this.activeTargetCount -= Number(wasActive);
+    this.finishObjectiveWrite();
+  }
+
+  releaseAllQuadraticTargets(): void {
+    this.assertObjectiveUpdatesSupported();
+    const next = this.objectiveData.slice();
+    for (let vertex = 0; vertex < this.vertexCount; vertex += 1) {
+      next[vertex * JGS2_VERTEX_OBJECTIVE_WORDS + 7] = 0;
+    }
+    this.writeCompleteObjectiveState(next);
   }
 
   /** Number of explicit state/oracle diagnostic readbacks requested by tests. */
@@ -1293,6 +1629,7 @@ export class JGS2GpuSolver {
         this.dynamicOffsets.posA,
         this.globalizationEnabled,
         this.sceneScale,
+        this.objectiveFlagsValue,
       ),
     );
     this.device.queue.writeBuffer(
@@ -1306,6 +1643,7 @@ export class JGS2GpuSolver {
         this.dynamicOffsets.posA,
         this.globalizationEnabled,
         this.sceneScale,
+        this.objectiveFlagsValue,
       ),
     );
     this.device.queue.writeBuffer(
@@ -1319,6 +1657,7 @@ export class JGS2GpuSolver {
         this.dynamicOffsets.posB,
         this.globalizationEnabled,
         this.sceneScale,
+        this.objectiveFlagsValue,
       ),
     );
   }
@@ -1794,6 +2133,7 @@ export class JGS2GpuSolver {
           this.dynamicOffsets.posA,
           true,
           this.sceneScale,
+          this.objectiveFlagsValue,
         ),
       );
     }
@@ -1869,6 +2209,7 @@ export class JGS2GpuSolver {
       floorHeight: settings.floorHeight,
       floorStiffness: settings.floorStiffness,
       rotationEpsilon: settings.rotationEpsilon,
+      objectiveFlags: this.objectiveFlagsValue,
     });
   }
 
@@ -1887,6 +2228,7 @@ export class JGS2GpuSolver {
           tets: this.buffers.tets,
           stiffness: this.buffers.stiffness,
           adjacency: this.buffers.adjacency,
+          objectives: this.buffers.objectives,
         },
       )
         .then((evaluator) => {
@@ -1903,6 +2245,50 @@ export class JGS2GpuSolver {
         });
     }
     return this.oracleEvaluatorCreation;
+  }
+
+  private assertObjectiveUpdatesSupported(): void {
+    this.assertUsable();
+    if (!this.globalizationEnabled) {
+      throw new Error(
+        "Dynamic external forces and quadratic targets require the stable " +
+          "Neo-Hookean production path.",
+      );
+    }
+  }
+
+  private assertObjectiveVertex(vertex: number): void {
+    if (
+      !Number.isSafeInteger(vertex) ||
+      vertex < 0 ||
+      vertex >= this.vertexCount
+    ) {
+      throw new RangeError(
+        `Objective vertex must be an integer from 0 through ` +
+          `${this.vertexCount - 1}; got ${vertex}.`,
+      );
+    }
+  }
+
+  private writeCompleteObjectiveState(next: Float32Array): void {
+    const activity = computePackedObjectiveActivity(next, this.vertexCount);
+    this.device.queue.writeBuffer(this.buffers.objectives, 0, next);
+    this.objectiveData.set(next);
+    this.activeExternalForceCount = activity.externalForceVertexCount;
+    this.activeTargetCount = activity.quadraticTargetVertexCount;
+    this.objectiveFlagsValue = activity.flags;
+    this.objectiveRevisionValue += 1;
+  }
+
+  private finishObjectiveWrite(): void {
+    this.objectiveFlagsValue =
+      (this.activeExternalForceCount > 0
+        ? JGS2_OBJECTIVE_EXTERNAL_FORCE_ACTIVE_BIT
+        : 0) |
+      (this.activeTargetCount > 0
+        ? JGS2_OBJECTIVE_TARGET_ACTIVE_BIT
+        : 0);
+    this.objectiveRevisionValue += 1;
   }
 
   private positionView(vec4Offset: number): JGS2PositionBufferView {

@@ -26,6 +26,13 @@ type Vec3 = readonly [number, number, number];
 const FULL_E2E_QUALIFICATION =
   process.env.JGS2_FULL_E2E === "1" ||
   process.env.npm_lifecycle_event === "test:e2e:full";
+const FORCE_FREE_TRAJECTORY_SECONDS = FULL_E2E_QUALIFICATION ? 10 : 4;
+const FORCE_FREE_TRAJECTORY_TIER = FULL_E2E_QUALIFICATION
+  ? "qualification trajectory"
+  : "fast sentinel";
+const FORCE_FREE_TRAJECTORY_TEST_TITLE =
+  `P0-EC-10/11: a force-free body conserves momentum over the ` +
+  `${FORCE_FREE_TRAJECTORY_SECONDS}-second ${FORCE_FREE_TRAJECTORY_TIER}`;
 const QUICK_CORPUS_DEFAULT_FRAME_COUNT = 1;
 const QUICK_CORPUS_SENTINEL_FRAME_COUNT = 120;
 const QUICK_SCENE_TELEMETRY_OPTIONS = {
@@ -460,7 +467,7 @@ test("parity mode disables project stabilizers and accepts an even exact iterati
   await expect(deterministicHud).toHaveAttribute("data-update-sequence", "0");
 });
 
-test("P0-EC-10/11: a force-free body conserves momentum for 10 seconds", async ({
+test(FORCE_FREE_TRAJECTORY_TEST_TITLE, async ({
   page,
 }, testInfo) => {
   const sceneId = "phase0.force-free-cuboid";
@@ -495,7 +502,11 @@ test("P0-EC-10/11: a force-free body conserves momentum for 10 seconds", async (
   expect(vectorNorm(initial.bodies[0]!.angularMomentum)).toBeGreaterThan(0);
   const start = await captureCanvas(page, testInfo, "start.png");
 
-  const finalFrame = frameAtSeconds(initial.timestep, 10, sceneId);
+  const finalFrame = frameAtSeconds(
+    initial.timestep,
+    FORCE_FREE_TRAJECTORY_SECONDS,
+    sceneId,
+  );
   await stepToFrame(page, 0, finalFrame);
   await page.evaluate(async () => window.__jgs2Test!.waitForGpu());
   await waitForCanvasPresentation(page);
@@ -544,17 +555,18 @@ test("P0-EC-10/11: a force-free body conserves momentum for 10 seconds", async (
   );
 
   console.log(
-    `${sceneId}: normalized linear momentum error=${linearError.toExponential(6)}, ` +
+    `${sceneId} ${FORCE_FREE_TRAJECTORY_SECONDS}-second ${FORCE_FREE_TRAJECTORY_TIER}: ` +
+      `normalized linear momentum error=${linearError.toExponential(6)}, ` +
       `angular momentum error=${angularError.toExponential(6)}, ` +
       `minimum determinant=${final.minTetDeterminant.toExponential(6)}`,
   );
   expect(
     linearError,
-    "force-free normalized total linear-momentum error after 10 seconds",
+    `force-free normalized total linear-momentum error after ${FORCE_FREE_TRAJECTORY_SECONDS} seconds`,
   ).toBeLessThan(0.005);
   expect(
     angularError,
-    "force-free normalized total angular-momentum error after 10 seconds",
+    `force-free normalized total angular-momentum error after ${FORCE_FREE_TRAJECTORY_SECONDS} seconds`,
   ).toBeLessThan(0.005);
   expect(
     comparePngs(start, end).changedPixelRatio,
