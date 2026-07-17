@@ -55,12 +55,19 @@ interface JGS2TestHarness {
   profileGpuFrames(
     options: JGS2PerformanceProfileOptions,
   ): Promise<JGS2GpuFrameProfile>;
+  /** Profile CPU and GPU timings together from the current simulation state. */
+  profileCombinedFrames(options: JGS2PerformanceProfileOptions): Promise<{
+    readonly cpuProfile: JGS2CpuFrameProfile;
+    readonly gpuProfile: JGS2GpuFrameProfile;
+  }>;
   waitForGpu(): Promise<void>;
   diagnostics(): Promise<JGS2Diagnostics>;
   diagnosticReadbackCount(): number;
   configuration(): JGS2TestConfiguration;
   submissionPolicy(): JGS2SubmissionPolicy;
-  runForceFreeCorpus(): Promise<readonly Phase0ForceFreeCorpusResult[]>;
+  runForceFreeCorpus(
+    options?: Phase0ForceFreeCorpusOptions,
+  ): Promise<readonly Phase0ForceFreeCorpusResult[]>;
   /** Test-only camera follow used to make a translated final pose visible. */
   focusOnPrimaryBody(): Promise<readonly [number, number, number]>;
 }
@@ -88,10 +95,18 @@ interface JGS2SubmissionPolicy {
 
 interface Phase0ForceFreeCorpusResult {
   readonly id: string;
+  readonly frameCount: number;
   readonly finite: boolean;
   readonly minimumDeterminant: number;
   readonly linearMomentumError: number;
   readonly angularMomentumError: number;
+}
+
+interface Phase0ForceFreeCorpusOptions {
+  /** Frames used by cases without an explicit override. Defaults to 1,200. */
+  readonly defaultFrameCount?: number;
+  /** Per-case endpoints keyed by the frozen corpus state ID. */
+  readonly frameCountByCaseId?: Readonly<Record<string, number>>;
 }
 
 const TEST_BATCH_FRAME_LIMIT = 120;
@@ -561,7 +576,9 @@ export function App() {
             : scene.settings.solverIterations,
         });
 
-        const runForceFreeCorpus = async (): Promise<
+        const runForceFreeCorpus = async (
+          options?: Phase0ForceFreeCorpusOptions,
+        ): Promise<
           readonly Phase0ForceFreeCorpusResult[]
         > => {
           if (!conservationFixture) {
@@ -573,8 +590,36 @@ export function App() {
           if (states.length !== PHASE0_FORCE_FREE_CORPUS_CASE_COUNT) {
             throw new Error("The frozen force-free corpus is incomplete.");
           }
+          const validateFrameCount = (value: number, label: string): number => {
+            if (
+              !Number.isSafeInteger(value) ||
+              value <= 0 ||
+              value > PHASE0_FORCE_FREE_FRAME_COUNT
+            ) {
+              throw new RangeError(
+                `${label} must be a positive integer no greater than ${PHASE0_FORCE_FREE_FRAME_COUNT}.`,
+              );
+            }
+            return value;
+          };
+          const defaultFrameCount = validateFrameCount(
+            options?.defaultFrameCount ?? PHASE0_FORCE_FREE_FRAME_COUNT,
+            "defaultFrameCount",
+          );
+          const frameCountByCaseId = options?.frameCountByCaseId ?? {};
+          const stateIds = new Set(states.map((state) => state.id));
+          for (const [caseId, frameCount] of Object.entries(
+            frameCountByCaseId,
+          )) {
+            if (!stateIds.has(caseId)) {
+              throw new RangeError(`Unknown force-free corpus case: ${caseId}.`);
+            }
+            validateFrameCount(frameCount, `Frame count for ${caseId}`);
+          }
           const results: Phase0ForceFreeCorpusResult[] = [];
           for (const state of states) {
+            const frameCount =
+              frameCountByCaseId[state.id] ?? defaultFrameCount;
             const corpusInput = toForceFreeConservationGpuInput(scene, state);
             const initial = diagnosticsFromState(
               scene,
@@ -602,11 +647,11 @@ export function App() {
             try {
               for (
                 let completedFrames = 0;
-                completedFrames < PHASE0_FORCE_FREE_FRAME_COUNT;
+                completedFrames < frameCount;
               ) {
                 const batchFrames = Math.min(
                   TEST_BATCH_FRAME_LIMIT,
-                  PHASE0_FORCE_FREE_FRAME_COUNT - completedFrames,
+                  frameCount - completedFrames,
                 );
                 corpusSolver.stepFramesExactIterations(
                   batchFrames,
@@ -617,7 +662,7 @@ export function App() {
                 await corpusSolver.awaitIdle();
                 recordQueueDrained();
 
-                if (completedFrames === PHASE0_FORCE_FREE_FRAME_COUNT) {
+                if (completedFrames === frameCount) {
                   recordSubmission("readback");
                   const positionsPromise = corpusSolver.readPositions();
                   recordSubmission("readback");
@@ -686,6 +731,7 @@ export function App() {
             const sceneScale = boundsDiagonal(initial);
             results.push({
               id: state.id,
+              frameCount,
               finite,
               minimumDeterminant,
               linearMomentumError:
@@ -905,6 +951,133 @@ export function App() {
                   measurement.gpuRenderMilliseconds ?? [],
               },
             } satisfies JGS2GpuFrameProfile;
+          },
+          profileCombinedFrames: async (options) => {
+            if (!submissionsEnabled) {
+              throw new Error("The WebGPU device is no longer available.");
+            }
+            validateJGS2PerformanceProfileOptions(options);
+            const initialSimulationFrame = simulationFrame;
+            const diagnosticReadbacksBefore =
+              solver!.explicitDiagnosticReadbackCount;
+            for (
+              let frameIndex = 0;
+              frameIndex < options.warmupFrameCount;
+              frameIndex += 1
+            ) {
+              await advanceSerializedFrame();
+            }
+
+            const endToEndFrameMilliseconds: number[] = [];
+            const cpuSimulationSubmissionMilliseconds: number[] = [];
+            const cpuRenderSubmissionMilliseconds: number[] = [];
+            const cpuFrameSubmissionMilliseconds: number[] = [];
+            const measurement = await frameProfiler!.measureFrames(
+              options.measuredFrameCount,
+              async (writes) => {
+                const frameStart = performance.now();
+                const simulationStart = performance.now();
+                // These CPU submission samples intentionally include the
+                // timestamp-write instrumentation used by this same pass.
+                if (writes) {
+                  if (conservationFixture) {
+                    solver!.stepExactIterationsWithGpuTimestampWrites(
+                      PHASE0_FORCE_FREE_ITERATIONS,
+                      writes.simulation,
+                    );
+                  } else {
+                    solver!.stepWithGpuTimestampWrites(writes.simulation);
+                  }
+                } else {
+                  submitOneSimulationStep();
+                }
+                const cpuSimulationSubmissionMillisecondsForFrame =
+                  performance.now() - simulationStart;
+                recordSubmission("solver");
+                simulationFrame += 1;
+
+                const renderStart = performance.now();
+                renderer!.render(simulationFrame, writes?.render);
+                const cpuRenderSubmissionMillisecondsForFrame =
+                  performance.now() - renderStart;
+                recordSubmission("render");
+                await solver!.awaitIdle();
+                recordQueueDrained();
+
+                endToEndFrameMilliseconds.push(
+                  performance.now() - frameStart,
+                );
+                cpuSimulationSubmissionMilliseconds.push(
+                  cpuSimulationSubmissionMillisecondsForFrame,
+                );
+                cpuRenderSubmissionMilliseconds.push(
+                  cpuRenderSubmissionMillisecondsForFrame,
+                );
+                cpuFrameSubmissionMilliseconds.push(
+                  cpuSimulationSubmissionMillisecondsForFrame +
+                    cpuRenderSubmissionMillisecondsForFrame,
+                );
+              },
+            );
+            recordQueueDrained();
+            setFrame(simulationFrame);
+            if (
+              solver!.explicitDiagnosticReadbackCount !==
+              diagnosticReadbacksBefore
+            ) {
+              throw new Error(
+                "Combined performance interval performed an unexpected diagnostic readback.",
+              );
+            }
+            const finalState = await readPerformanceState();
+            const diagnosticReadbacksAfter =
+              solver!.explicitDiagnosticReadbackCount;
+            if (
+              diagnosticReadbacksAfter - diagnosticReadbacksBefore !==
+              2
+            ) {
+              throw new Error(
+                "Combined performance profile must perform exactly two final state readbacks.",
+              );
+            }
+            const commonProfileFields = {
+              ...profileIdentity(),
+              initialSimulationFrame,
+              finalSimulationFrame: simulationFrame,
+              warmupFrameCount: options.warmupFrameCount,
+              measuredFrameCount: options.measuredFrameCount,
+              diagnosticReadbacksBefore,
+              diagnosticReadbacksAfter,
+              finalState,
+            };
+            const cpuProfile = {
+              ...commonProfileFields,
+              samples: {
+                endToEndFrameMilliseconds,
+                cpuSimulationSubmissionMilliseconds,
+                cpuRenderSubmissionMilliseconds,
+                cpuFrameSubmissionMilliseconds,
+              },
+            } satisfies JGS2CpuFrameProfile;
+            const gpuProfile = {
+              ...commonProfileFields,
+              timestamp: {
+                feature: measurement.feature,
+                supported: measurement.supported,
+                featureEnabled: measurement.featureEnabled,
+                reason: measurement.reason,
+                timestampMapCount: measurement.timestampMapCount,
+              },
+              samples: {
+                gpuFrameMilliseconds:
+                  measurement.gpuFrameMilliseconds ?? [],
+                gpuSimulationStepMilliseconds:
+                  measurement.gpuSimulationStepMilliseconds ?? [],
+                gpuRenderMilliseconds:
+                  measurement.gpuRenderMilliseconds ?? [],
+              },
+            } satisfies JGS2GpuFrameProfile;
+            return { cpuProfile, gpuProfile };
           },
           waitForGpu: async () => {
             if (!submissionsEnabled) {

@@ -16,6 +16,16 @@ export const DEFAULT_JGS2_E2E_PERFORMANCE_OPTIONS = {
   measuredFrameCount: 600,
 } as const satisfies JGS2PerformanceProfileOptions;
 
+/**
+ * Short, informational telemetry for individual scene E2E tests. Formal
+ * performance baselines should continue to use
+ * DEFAULT_JGS2_E2E_PERFORMANCE_OPTIONS.
+ */
+export const LIGHTWEIGHT_JGS2_E2E_TELEMETRY_OPTIONS = {
+  warmupFrameCount: 30,
+  measuredFrameCount: 120,
+} as const satisfies JGS2PerformanceProfileOptions;
+
 export interface JGS2PerformanceState {
   readonly positions: readonly number[];
   readonly velocities: readonly number[];

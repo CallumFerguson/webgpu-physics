@@ -87,8 +87,12 @@ These definitions apply unless a phase explicitly overrides them.
 - Angular-momentum error uses
   norm(L - L-reference) divided by max(norm(L-reference),
   total-mass times scene-scale squared per second).
-- Performance measurements use at least 120 warm-up frames followed by at
-  least 600 measured frames.
+- Formal qualification performance measurements use at least 120 warm-up
+  frames followed by at least 600 measured frames. The fast isolated baseline
+  may use one combined 30-warm-up/120-measured CPU/GPU timestamp pass, and fast
+  screenshot tests may use a 0/12 in-place combined interval for smoke
+  telemetry. Neither shorter interval can be recorded as formal performance
+  evidence.
 - Performance measurements exclude screenshots, diagnostics readbacks, test
   traces, and preprocessing.
 - Average FPS is `1000 / mean(frame milliseconds)`. The 1% low is
@@ -115,6 +119,31 @@ These definitions apply unless a phase explicitly overrides them.
 - A diagnostic over an empty set must expose a finite value and a separate
   validity flag. Tests must assert that the flag is false rather than treating
   the finite sentinel as a measurement.
+
+## E2E execution tiers
+
+- `npm.cmd run test:e2e` is the under-one-minute routine hardware-WebGPU
+  feedback gate on the nominated machine. It runs every collected
+  test, advances all 32 frozen force-free states by one step, and continues
+  frozen cases `00` and `27` through 120 steps (one simulated second). The base
+  force-free trajectory remains 1,200 steps (10 seconds).
+- Every fast screenshot test continues its current state in place for one
+  0-warm-up/12-measured combined telemetry interval with simultaneous wall/CPU
+  and GPU timestamp instrumentation when supported. It logs and attaches FPS,
+  1% low, wall, CPU, and GPU metrics without reloading. CPU timing includes the
+  timestamp instrumentation only when supported, and the 12-frame tail metrics
+  are smoke-only. The isolated
+  stress baseline separately records one combined 30/120 CPU/GPU timestamp
+  pass as smoke telemetry.
+- `npm.cmd run test:e2e:full` is the qualification gate. It restores all 32
+  force-free cases to the canonical 1,200-step trajectory and records formal
+  120-warm-up/600-measured CPU/GPU profiles for the isolated baseline and each
+  unique short visual workload. Long drop/stress tests retain the combined
+  0/12 smoke interval, continuing their actual settled state rather than
+  reloading frame zero.
+- The fast policy does not modify the canonical scene/corpus manifest or
+  historical evidence. Criteria requiring the complete 32-by-1,200 corpus or
+  formal performance samples must use `test:e2e:full`.
 
 ## Reproducibility and criterion evidence
 
@@ -269,7 +298,7 @@ nonlinear energy gradient and Hessian.
 | Completion date | TBD |
 | Branch or PR | main; Phase 0 gate ce478e6; Phase 1 material/runtime gate c0f5456 |
 | Design records | docs/phase1-stable-neo-hookean.md; docs/jgs2-implementation.md; docs/evidence/phase1-nonlinear-cubature.md; manifests/phase1-scenes.v1.json; manifests/phase1-cubature.v1.json |
-| Primary test command | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e |
+| Primary test command | Routine: npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e. Qualification: npm.cmd run test:e2e:full |
 | Performance result | TBD |
 | Known limitations | CPU/WGSL material derivatives, exact diagnostics, material dispatch, affine-exact frames, nonlinear current-pose Cubature, packed-f32 quality gates, and production update parity are implemented. Dense TypeScript preprocessing is intentionally limited to small fixtures and fails closed when K=6 misses the 1% gate. The shared ABI still carries legacy rest stiffness for stable-only meshes. Globalization and assembled-pose feasibility, explicit public-scene material labels, forces/handles, scenes, and performance evidence remain. |
 | Exit sign-off | TBD |
@@ -1008,6 +1037,7 @@ and accepted limitations.
 
 | ID | Date | Phase | Decision | Reason and evidence | Downstream effect | Approver |
 | --- | --- | --- | --- | --- | --- | --- |
+| P0-D01 | 2026-07-16 | 0-1 | Split hardware E2E into an under-one-minute fast tier and a full qualification tier; use one-step breadth plus one-second sentinels for the quick 32-state corpus, in-place combined 0/12 smoke telemetry for screenshot tests, a combined 30/120 pass for the quick isolated baseline, and retain canonical 32-by-1,200 plus fresh 120/600 profiles in the full tier | The prior exhaustive corpus and repeated fresh scene profiles dominated feedback time. The selected quick workloads preserve GPU-path breadth, sentinel depth, per-scene observability, and settled-state timing while the full command preserves exhaustive and statistically meaningful evidence | Quick combined CPU timings include timestamp instrumentation when supported and short-sample tails are smoke-only; release, roadmap-exit, exhaustive-corpus, and formal performance evidence must use `test:e2e:full`; canonical manifests and historical evidence remain unchanged | Codex implementation agent; user-directed runtime target; independent review completed |
 | P1-D01 | 2026-07-16 | 1 | Cap solve-only normalized local diagonal shift at 1e-3; target f32 eigenvalue floor is 256 times unit roundoff | Keeps the exact material oracle unmodified and turns excessive regularization into a visible failure; nonlinear corpus must leave fourfold headroom or trigger projection/Cubature diagnosis | GPU local solve must expose raw minimum eigenvalue, shift, normalized ratio, and descent; threshold changes require a new decision | Codex implementation agent; reviewer pending |
 | P1-D02 | 2026-07-16 | 1 | Preserve raw stable Neo-Hookean behavior for all finite J, but require accepted runtime poses to satisfy J>1e-4 and revert an infeasible assembled Jacobi iteration | Matches the source material's collapse/inversion robustness while enforcing the roadmap's positive dynamic checkpoint policy | Line search and feasibility reductions must reject before acceptance; world-space clamping cannot substitute | Codex implementation agent; reviewer pending |
 | P1-D03 | 2026-07-16 | 1 | Use a 4,800-tetrahedron non-contact solid at p95<=16.7 ms as the Phase 1 development gate; retain the final 20,000-30,000-tet Phase 7 target | Current dense browser preprocessing is intentionally a tiny-system oracle; the smaller gate validates the nonlinear hot loop without weakening final capability parity | Phase 1 manifest must freeze the exact interval; Phase 7 still requires scalable offline artifacts and the larger target | Codex implementation agent; reviewer pending |

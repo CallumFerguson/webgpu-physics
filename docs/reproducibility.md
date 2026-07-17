@@ -81,6 +81,31 @@ npm.cmd run build
 npm.cmd run test:e2e
 ```
 
+The default `test:e2e` command is the under-one-minute fast feedback tier on
+the nominated hardware. Run the qualification
+tier before recording release, roadmap-exit, exhaustive-corpus, or formal
+performance evidence:
+
+```powershell
+npm.cmd run test:e2e:full
+```
+
+Both commands collect the same 18 tests with zero expected skips. They differ
+only in deliberately expensive execution depth:
+
+| Workload | Fast `test:e2e` | Qualification `test:e2e:full` |
+| --- | --- | --- |
+| 32-state force-free corpus | All 32 cases run one step; frozen cases `00` and `27` continue to 120 steps (one simulated second) | All 32 cases run the canonical 1,200 steps (10 simulated seconds) |
+| Short visual scene timing | One in-place combined profile after correctness assertions: 0 warm-up + 12 measured frames, no reload | Fresh uncontaminated CPU and GPU profiles, each with 120 warm-up and 600 measured frames |
+| Long drop/stress timing | One 0/12 combined profile continuing the actual settled state | The same 0/12 settled-state combined smoke profile; no frame-zero reload |
+| Isolated stress baseline | One combined CPU/GPU timestamp pass with 30 warm-up and 120 measured frames | Fresh uncontaminated CPU and GPU profiles, each with 120 warm-up and 600 measured frames |
+
+The fast corpus still checks breadth by constructing and advancing every frozen
+state on the GPU, while cases `00` and `27` provide one-second depth because
+they are the frozen maximum-angular-speed and maximum-linear-speed sentinels.
+The separate base force-free test remains a full 1,200-step, 10-second
+conservation trajectory in both tiers.
+
 The list reporter logs the finalized duration of every non-skipped E2E
 attempt. The built-in JSON reporter preserves per-attempt status, start time,
 duration, retry, errors, and whole-run duration in
@@ -89,21 +114,44 @@ values are milliseconds. Discovery-only `--list` runs use only the list
 reporter, so they do not overwrite the last executed test report.
 
 Each of the seven screenshot-producing scene tests additionally attaches
-`scene-performance.json`. It profiles two fresh deterministic replays: 120
-warm-up and 600 measured serialized frames for wall/CPU submission timing,
-then the same frames with GPU simulation/render timestamps. The GPU replay
-resolves 2,400 timestamps with one map and must end with byte-identical f32
-positions and velocities. Average FPS is reciprocal mean wall time; 1% low is
-the reciprocal mean of the slowest `ceil(1%)` wall samples. CPU values are
-explicitly submission time, not wall time minus GPU time. `timestamp-query` is
-optional: unavailable devices still record wall/CPU metrics and explicitly
-report GPU metrics as unavailable rather than failing screenshot correctness.
-The scene tests disable Playwright tracing so trace collection cannot enter the
-timing distribution. Their per-scene budget assessments are logged and stored
-but are informational: shared desktop load must not turn screenshot or physics
-correctness into a performance failure. The isolated
-`performance-baseline.spec.ts` workload owns the enforced hardware compute
-budget.
+`scene-performance.json`. In the fast tier each test advances its current state
+through one post-assertion combined telemetry continuation with zero warm-up and
+12 measured serialized frames. There is no page reload: wall and CPU submission
+samples and GPU simulation/render timestamps come from the same frames. The
+artifact and console log include average FPS, 1% low, wall-frame, CPU-submit,
+GPU frame/step/render metrics when available, and elapsed test time before the
+telemetry continuation. Because timestamp writes occur in the combined pass,
+its CPU submission values include that instrumentation. Its 12-sample p95 and
+1% low each describe a very small tail and are smoke indicators only.
+
+The two long-running settled-body tests keep this combined 0/12 path in both
+tiers. Their samples continue the actual state after the 20-second assertions,
+so they observe settled-state work rather than reloading and profiling frame
+zero.
+
+In the qualification tier, the base force-free and four short public-scene
+tests each profile two fresh deterministic replays: 120 warm-up and 600 measured
+serialized frames for wall/CPU submission timing, then the same frames with GPU
+simulation/render timestamps. The GPU replay resolves 2,400 timestamps with one
+map and must end with byte-identical f32 positions and velocities. The isolated
+stress baseline uses the same 120/600 formal interval. These fresh profiles are
+uncontaminated by the combined timestamp pass and own the formal scene
+distributions. In the fast tier the isolated baseline instead uses one combined
+CPU/GPU timestamp pass with the lighter 30/120 interval as smoke telemetry and
+an immediate hardware-budget check; it is not a replacement for a formal
+qualification measurement.
+
+Average FPS is reciprocal mean wall time; 1% low is the reciprocal mean of the
+slowest `ceil(1%)` wall samples. CPU values are explicitly submission time, not
+wall time minus GPU time; when `timestamp-query` is supported, only the quick
+combined path includes timestamp-write instrumentation in that CPU interval. `timestamp-query` is optional: unavailable devices
+still record wall/CPU metrics and explicitly report GPU metrics as unavailable
+rather than failing screenshot correctness. The scene tests disable Playwright
+tracing so trace collection cannot enter the timing distribution. Their
+per-scene budget assessments are logged and stored but are informational:
+shared desktop load must not turn screenshot or physics correctness into a
+performance failure. The isolated `performance-baseline.spec.ts` workload owns
+the enforced hardware compute budget.
 
 FPS in these artifacts is serialized benchmark throughput: one simulation
 step, one render, and a queue drain per measured sample. The necessary compute
@@ -147,8 +195,10 @@ The canonical Phase 0 corpora are executable rather than descriptive only.
 single-tetrahedron poses. The P0-EC-03 hardware oracle evaluates ten
 representative canonical poses plus a floor-active state. The P0-EC-04 GPU
 equilibrium oracle evaluates all 64 poses and three active vertex blocks. The
-conservation suite runs the frozen 2-by-2-by-2 force-free fixture and all 32
-seeded rigid-velocity states for 1,200 frames each. GPU oracle tests reuse the
+qualification conservation suite runs the frozen 2-by-2-by-2 force-free fixture
+and all 32 seeded rigid-velocity states for 1,200 frames each. The fast tier's
+one-step breadth plus one-second cases `00` and `27` is an execution policy, not
+a change to the canonical 32-by-1,200 definition. GPU oracle tests reuse the
 same fixture/corpus IDs and generators.
 
 The checked-in Phase 0 timing summary is

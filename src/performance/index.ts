@@ -1,5 +1,6 @@
 export {
   DEFAULT_JGS2_E2E_PERFORMANCE_OPTIONS,
+  LIGHTWEIGHT_JGS2_E2E_TELEMETRY_OPTIONS,
   assessJGS2ComputeBudget,
   buildJGS2PerformanceBenchmark,
   validateJGS2PerformanceProfileOptions,

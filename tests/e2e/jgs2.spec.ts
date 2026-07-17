@@ -16,8 +16,38 @@ import {
   type JGS2GpuFrameProfile,
   type JGS2PerformanceProfileOptions,
 } from "../../src/performance";
+import {
+  PHASE0_FORCE_FREE_FRAME_COUNT,
+  generatePhase0ForceFreeInitialStateCorpus,
+} from "../../src/scenes";
 
 type Vec3 = readonly [number, number, number];
+
+const FULL_E2E_QUALIFICATION =
+  process.env.JGS2_FULL_E2E === "1" ||
+  process.env.npm_lifecycle_event === "test:e2e:full";
+const QUICK_CORPUS_DEFAULT_FRAME_COUNT = 1;
+const QUICK_CORPUS_SENTINEL_FRAME_COUNT = 120;
+const QUICK_SCENE_TELEMETRY_OPTIONS = {
+  warmupFrameCount: 0,
+  measuredFrameCount: 12,
+} as const satisfies JGS2PerformanceProfileOptions;
+// The maximum-angular-speed and maximum-linear-speed frozen cases provide
+// one-second depth while all 32 cases still execute the GPU path once.
+const QUICK_CORPUS_SENTINEL_INDICES = [0, 27] as const;
+const FROZEN_FORCE_FREE_CORPUS = generatePhase0ForceFreeInitialStateCorpus();
+const QUICK_CORPUS_SENTINEL_IDS = QUICK_CORPUS_SENTINEL_INDICES.map((index) => {
+  const state = FROZEN_FORCE_FREE_CORPUS[index];
+  if (!state) {
+    throw new Error(`Missing frozen force-free corpus case ${index}.`);
+  }
+  return state.id;
+});
+
+interface Phase0ForceFreeCorpusOptions {
+  readonly defaultFrameCount?: number;
+  readonly frameCountByCaseId?: Readonly<Record<string, number>>;
+}
 
 interface JGS2BodyDiagnostics {
   readonly bodyId: number;
@@ -79,6 +109,10 @@ interface JGS2TestHarness {
   profileGpuFrames(
     options: JGS2PerformanceProfileOptions,
   ): Promise<JGS2GpuFrameProfile>;
+  profileCombinedFrames(options: JGS2PerformanceProfileOptions): Promise<{
+    readonly cpuProfile: JGS2CpuFrameProfile;
+    readonly gpuProfile: JGS2GpuFrameProfile;
+  }>;
   waitForGpu(): Promise<void>;
   diagnostics(): Promise<JGS2Diagnostics>;
   configuration(): {
@@ -101,9 +135,10 @@ interface JGS2TestHarness {
     readonly productionStepsPerSubmission: 1;
   };
   focusOnPrimaryBody(): Promise<Vec3>;
-  runForceFreeCorpus(): Promise<
+  runForceFreeCorpus(options?: Phase0ForceFreeCorpusOptions): Promise<
     readonly {
       readonly id: string;
+      readonly frameCount: number;
       readonly finite: boolean;
       readonly minimumDeterminant: number;
       readonly linearMomentumError: number;
@@ -169,10 +204,13 @@ const longRunScenes = [
   { id: "stress", expectedBodyCount: 6 },
 ] as const;
 
+const testStartedAtMilliseconds = new Map<string, number>();
+
 const test = base.extend<{ pageErrorGuard: void }>({
   pageErrorGuard: [
-    async ({ page }, use) => {
+    async ({ page }, use, testInfo) => {
       const errors: string[] = [];
+      testStartedAtMilliseconds.set(testInfo.testId, Date.now());
 
       page.on("pageerror", (error) => {
         errors.push(`Page error: ${error.message}`);
@@ -183,9 +221,12 @@ const test = base.extend<{ pageErrorGuard: void }>({
         }
       });
 
-      await use();
-
-      expect(errors, "The page reported browser errors").toEqual([]);
+      try {
+        await use();
+        expect(errors, "The page reported browser errors").toEqual([]);
+      } finally {
+        testStartedAtMilliseconds.delete(testInfo.testId);
+      }
     },
     { auto: true },
   ],
@@ -533,10 +574,10 @@ test("P0-EC-10/11: a force-free body conserves momentum for 10 seconds", async (
   await recordScenePerformance(page, testInfo, sceneId);
 });
 
-test("P0-CORPUS-01: all 32 frozen force-free states conserve momentum on hardware", async ({
+test("P0-CORPUS-01: frozen force-free states conserve momentum at scheduled endpoints", async ({
   page,
 }, testInfo) => {
-  test.setTimeout(600_000);
+  test.setTimeout(FULL_E2E_QUALIFICATION ? 600_000 : 60_000);
   const sceneId = "phase0.force-free-cuboid";
   await page.goto(`/?test=1&fixture=${sceneId}`, {
     waitUntil: "domcontentloaded",
@@ -544,9 +585,22 @@ test("P0-CORPUS-01: all 32 frozen force-free states conserve momentum on hardwar
   await requireHardwareWebGPU(page, testInfo);
   await waitForTestHarness(page);
 
+  const corpusOptions: Phase0ForceFreeCorpusOptions | undefined =
+    FULL_E2E_QUALIFICATION
+      ? undefined
+      : {
+          defaultFrameCount: QUICK_CORPUS_DEFAULT_FRAME_COUNT,
+          frameCountByCaseId: Object.fromEntries(
+            QUICK_CORPUS_SENTINEL_IDS.map((id) => [
+              id,
+              QUICK_CORPUS_SENTINEL_FRAME_COUNT,
+            ]),
+          ),
+        };
   const started = Date.now();
-  const results = await page.evaluate(async () =>
-    window.__jgs2Test!.runForceFreeCorpus(),
+  const results = await page.evaluate(
+    async (options) => window.__jgs2Test!.runForceFreeCorpus(options),
+    corpusOptions,
   );
   const elapsedMilliseconds = Date.now() - started;
   expect(results).toHaveLength(32);
@@ -556,10 +610,18 @@ test("P0-CORPUS-01: all 32 frozen force-free states conserve momentum on hardwar
   let worstAngular = results[0]!;
   let minimumDeterminant = Infinity;
   for (const result of results) {
+    const expectedFrameCount = FULL_E2E_QUALIFICATION
+      ? PHASE0_FORCE_FREE_FRAME_COUNT
+      : QUICK_CORPUS_SENTINEL_IDS.includes(result.id)
+        ? QUICK_CORPUS_SENTINEL_FRAME_COUNT
+        : QUICK_CORPUS_DEFAULT_FRAME_COUNT;
+    expect(result.frameCount, `${result.id} scheduled frame count`).toBe(
+      expectedFrameCount,
+    );
     expect(result.finite, `${result.id} must remain finite`).toBe(true);
     expect(
       result.minimumDeterminant,
-      `${result.id} must not invert at one-second checkpoints`,
+      `${result.id} must not invert at its scheduled endpoint`,
     ).toBeGreaterThan(0);
     expect(
       result.linearMomentumError,
@@ -587,7 +649,8 @@ test("P0-CORPUS-01: all 32 frozen force-free states conserve momentum on hardwar
   expect(submissionPolicy.maximumOutstanding).toBeLessThanOrEqual(2);
   expect(submissionPolicy.currentOutstanding).toBe(0);
   console.log(
-    `Phase 0 force-free corpus: 32 cases x 1200 frames in ` +
+    `Phase 0 force-free corpus (${FULL_E2E_QUALIFICATION ? "qualification" : "quick breadth-plus-sentinels"}): ` +
+      `${results.reduce((sum, result) => sum + result.frameCount, 0)} total frames in ` +
       `${elapsedMilliseconds} ms; worst linear=${worstLinear.linearMomentumError.toExponential(6)} ` +
       `(${worstLinear.id}), worst angular=${worstAngular.angularMomentumError.toExponential(6)} ` +
       `(${worstAngular.id}), minimum determinant=${minimumDeterminant.toExponential(6)}`,
@@ -595,7 +658,13 @@ test("P0-CORPUS-01: all 32 frozen force-free states conserve momentum on hardwar
   await testInfo.attach("phase0-force-free-corpus.json", {
     body: Buffer.from(
       JSON.stringify(
-        { elapsedMilliseconds, submissionPolicy, results },
+        {
+          mode: FULL_E2E_QUALIFICATION ? "qualification" : "quick",
+          elapsedMilliseconds,
+          corpusOptions,
+          submissionPolicy,
+          results,
+        },
         null,
         2,
       ),
@@ -840,7 +909,15 @@ test.describe("long-run settled body stability", () => {
             finalSpeed.toFixed(5),
         );
       }
-      await recordScenePerformance(page, testInfo, scene.id);
+      // The short deterministic test already records this scene's frame-zero
+      // telemetry. Repeating it here would not measure the settled state,
+      // because recordScenePerformance deliberately reloads from frame zero.
+      await recordQuickSceneTelemetry(
+        page,
+        testInfo,
+        `${scene.id}.long-run`,
+        "The corresponding short-scene test owns frame-zero CPU/GPU telemetry.",
+      );
     });
   }
 });
@@ -936,6 +1013,7 @@ async function waitForTestHarness(page: Page): Promise<void> {
       typeof window.__jgs2Test?.stepFrames === "function" &&
       typeof window.__jgs2Test?.profileCpuFrames === "function" &&
       typeof window.__jgs2Test?.profileGpuFrames === "function" &&
+      typeof window.__jgs2Test?.profileCombinedFrames === "function" &&
       typeof window.__jgs2Test?.diagnostics === "function",
   );
   await page.evaluate(async () => {
@@ -948,7 +1026,13 @@ async function recordScenePerformance(
   testInfo: TestInfo,
   workloadId: string,
 ): Promise<void> {
+  if (!FULL_E2E_QUALIFICATION) {
+    await recordQuickSceneTelemetry(page, testInfo, workloadId);
+    return;
+  }
+
   const options = DEFAULT_JGS2_E2E_PERFORMANCE_OPTIONS;
+  const measurementTier = "qualification";
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await waitForTestHarness(page);
@@ -982,6 +1066,7 @@ async function recordScenePerformance(
   const computeBudget = assessJGS2ComputeBudget(report);
   const artifact = {
     ...report,
+    measurementTier,
     budgetAssessment: {
       ...computeBudget,
       enforcement:
@@ -1001,7 +1086,7 @@ async function recordScenePerformance(
       `${report.gpuRender!.meanMilliseconds.toFixed(3)} ms/render`
     : `GPU timestamp-query unavailable (${report.gpuTimestamp.reason})`;
   console.log(
-    `[scene-performance] ${workloadId}: ` +
+    `[scene-performance:${measurementTier}] ${workloadId}: ` +
       `serialized ${report.endToEndFrame.averageFramesPerSecond!.toFixed(1)} FPS average, ` +
       `${report.endToEndFrame.onePercentLowFramesPerSecond!.toFixed(1)} FPS 1% low; ` +
       `wall ${report.endToEndFrame.meanMilliseconds.toFixed(3)} ms/frame ` +
@@ -1013,6 +1098,76 @@ async function recordScenePerformance(
       `(assessment ${computeBudget.passesNecessaryComputeBudget ? "PASS" : "FAIL"}; ` +
       `wall mean ${computeBudget.meetsSerializedWallMeanBudget ? "PASS" : "FAIL"}, ` +
       `GPU p95 ${computeBudget.meetsGpuFrameP95Budget === null ? "N/A" : computeBudget.meetsGpuFrameP95Budget ? "PASS" : "FAIL"})`,
+  );
+}
+
+async function recordQuickSceneTelemetry(
+  page: Page,
+  testInfo: TestInfo,
+  workloadId: string,
+  note?: string,
+): Promise<void> {
+  const startedAtMilliseconds = testStartedAtMilliseconds.get(testInfo.testId);
+  if (startedAtMilliseconds === undefined) {
+    throw new Error(`Missing start time for ${testInfo.title}.`);
+  }
+  const elapsedMilliseconds = Date.now() - startedAtMilliseconds;
+  const profiles = await page.evaluate(
+    async (options) => window.__jgs2Test!.profileCombinedFrames(options),
+    QUICK_SCENE_TELEMETRY_OPTIONS,
+  );
+  const report = buildJGS2PerformanceBenchmark(
+    profiles.cpuProfile,
+    profiles.gpuProfile,
+  );
+  const expectedReportWorkloadId = workloadId.endsWith(".long-run")
+    ? workloadId.slice(0, -".long-run".length)
+    : workloadId;
+  expect(report.workloadId).toBe(expectedReportWorkloadId);
+  expect(report.measuredFrameCount).toBe(
+    QUICK_SCENE_TELEMETRY_OPTIONS.measuredFrameCount,
+  );
+  expect(report.gpuTimestamp.timestampMapCount).toBe(
+    report.gpuTimestamp.supported ? 1 : 0,
+  );
+
+  const computeBudget = assessJGS2ComputeBudget(report);
+  const artifact = {
+    ...report,
+    requestedWorkloadId: workloadId,
+    measurementTier: "quick-combined-smoke",
+    samplingMode:
+      "single post-assertion continuation with simultaneous CPU and GPU timestamp instrumentation",
+    cpuTimingIncludesTimestampInstrumentation: report.gpuTimestamp.supported,
+    stateEquivalenceMeaning:
+      "CPU and GPU views share one combined pass and one final state readback; this is not independent replay equivalence.",
+    elapsedMillisecondsBeforeTelemetry: elapsedMilliseconds,
+    detailedCpuGpuCommand: "npm run test:e2e:full",
+    note: note ?? null,
+    budgetAssessment: {
+      ...computeBudget,
+      enforcement:
+        "informational-smoke; the isolated baseline owns the quick hardware gate and test:e2e:full owns formal scene distributions",
+    },
+  };
+  await testInfo.attach("scene-performance.json", {
+    body: Buffer.from(`${JSON.stringify(artifact, null, 2)}\n`),
+    contentType: "application/json",
+  });
+
+  const gpuSummary = report.gpuFrame
+    ? `GPU ${report.gpuFrame.meanMilliseconds.toFixed(3)} ms/frame, ` +
+      `${report.gpuSimulationStep!.meanMilliseconds.toFixed(3)} ms/step, ` +
+      `${report.gpuRender!.meanMilliseconds.toFixed(3)} ms/render`
+    : `GPU timestamp-query unavailable (${report.gpuTimestamp.reason})`;
+  console.log(
+    `[scene-performance:quick-combined-smoke] ${workloadId}: ` +
+      `${report.endToEndFrame.averageFramesPerSecond!.toFixed(1)} FPS average, ` +
+      `${report.endToEndFrame.onePercentLowFramesPerSecond!.toFixed(1)} FPS 1% low; ` +
+      `wall ${report.endToEndFrame.meanMilliseconds.toFixed(3)} ms/frame; ` +
+      `CPU ${report.cpuFrameSubmission.meanMilliseconds.toFixed(3)} ms/frame, ` +
+      `${report.cpuSimulationSubmission.meanMilliseconds.toFixed(3)} ms/step; ` +
+      `${gpuSummary}; ${elapsedMilliseconds} ms elapsed before telemetry`,
   );
 }
 

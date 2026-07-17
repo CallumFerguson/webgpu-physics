@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_JGS2_E2E_PERFORMANCE_OPTIONS,
+  LIGHTWEIGHT_JGS2_E2E_TELEMETRY_OPTIONS,
   assessJGS2ComputeBudget,
   buildJGS2PerformanceBenchmark,
   validateJGS2PerformanceProfileOptions,
@@ -55,6 +57,22 @@ function gpuProfile(): JGS2GpuFrameProfile {
 }
 
 describe("JGS2 E2E performance benchmark schema", () => {
+  it("keeps formal benchmark sampling separate from lightweight scene telemetry", () => {
+    expect(DEFAULT_JGS2_E2E_PERFORMANCE_OPTIONS).toEqual({
+      warmupFrameCount: 120,
+      measuredFrameCount: 600,
+    });
+    expect(LIGHTWEIGHT_JGS2_E2E_TELEMETRY_OPTIONS).toEqual({
+      warmupFrameCount: 30,
+      measuredFrameCount: 120,
+    });
+    expect(() =>
+      validateJGS2PerformanceProfileOptions(
+        LIGHTWEIGHT_JGS2_E2E_TELEMETRY_OPTIONS,
+      ),
+    ).not.toThrow();
+  });
+
   it("keeps wall, CPU, and GPU timing domains separate", () => {
     const report = buildJGS2PerformanceBenchmark(cpuProfile(), gpuProfile());
 

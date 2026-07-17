@@ -35,24 +35,49 @@ metrics. Deterministic `?test=1` pages intentionally pause this live collector.
 npm run build             # strict TypeScript + production bundle
 npm run test:unit         # FEM, basis, Cubature, and renderer tests
 npm run test:baseline-manifest # verify every frozen test selector still exists
-npm run test:e2e          # full hardware-WebGPU E2E, oracle, visual, and timing suite
+npm run test:e2e          # fast hardware-WebGPU E2E tier (under 1 minute on nominated hardware)
+npm run test:e2e:full     # exhaustive corpus and formal performance qualification
 ```
 
 Software WebGPU adapters, including SwiftShader, are deliberately rejected.
 The real-time and hardware E2E tests must exercise a hardware adapter.
-The E2E run prints Playwright's finalized duration for every non-skipped test
+Both E2E tiers collect the same correctness, oracle, visual, and live-HUD tests.
+The fast tier executes every one of the 32 frozen force-free corpus states for
+one step and continues cases `00` and `27` through one simulated second. The
+separate base force-free test still runs its complete 10-second trajectory.
+The full tier restores all 32 corpus cases to the canonical 1,200-step,
+10-second trajectory.
+
+Each run prints Playwright's finalized duration for every non-skipped test
 and writes every result, including skips, to the machine-readable
 `test-results/playwright-results.json`, with per-attempt and total durations in
 milliseconds. Listing tests does not overwrite the last real run report. Every
-visual scene test also logs and attaches 600-sample serialized average FPS, 1%
-low, wall-frame, CPU-submit, and (when `timestamp-query` is available) GPU
-frame/step/render metrics. Serialized throughput is a necessary compute check;
-it is not a measurement of production animation scheduling or simulation time
-rate. Scene budget assessments are informational so unrelated correctness tests
-do not become load-sensitive; the isolated performance-baseline test owns the
-enforced hardware budget using sustained serialized wall throughput and GPU
-frame p95 when timestamps are available. Wall p95 and 1% low remain visible
-diagnostics.
+fast screenshot test continues its existing simulation in place for one
+combined telemetry interval: zero warm-up and 12 measured frames, with wall/CPU
+and GPU timestamp instrumentation collected simultaneously and no reload. It
+logs and attaches FPS, 1% low, wall, CPU, and GPU metrics plus the elapsed test
+time before telemetry. The long drop/stress tests therefore measure an actual
+continuation of their settled 20-second state.
+
+The fast isolated stress baseline likewise uses one combined CPU/GPU timestamp
+pass, with 30 warm-up and 120 measured frames. `test:e2e:full` raises the
+baseline and the base force-free plus four short public-scene profiles to the
+formal 120-warm-up/600-measured interval. Those formal profiles use separate
+fresh uncontaminated replays;
+the long drop/stress tests retain their in-place 12-frame settled-state smoke
+telemetry rather than reloading frame zero.
+
+The detailed reports include serialized average FPS, 1% low, wall-frame,
+CPU-submit, and (when `timestamp-query` is available) GPU frame/step/render
+metrics. Serialized throughput is a necessary compute check; it is not a
+measurement of production animation scheduling or simulation time rate. Scene
+budget assessments are informational so unrelated correctness tests do not
+become load-sensitive; the isolated performance-baseline test owns the enforced
+hardware budget using sustained serialized wall throughput and GPU frame p95
+when timestamps are available. Wall p95 and 1% low remain visible diagnostics.
+When `timestamp-query` is supported, the combined fast-scene CPU samples include
+timestamp instrumentation. Its 12-sample p95 and 1% low are smoke indicators
+only, not formal tail estimates.
 
 ## Demo scenes
 
@@ -164,7 +189,10 @@ The 18-test Playwright gate covers all four public scenes, long-running
 drop/stress behavior, and the visible WebGPU-unavailable path. It also exercises
 the canonical GPU oracles, the base and 32-case force-free conservation corpus,
 submission/readback invariants, the timestamped performance baseline, and the
-production live-performance HUD.
+production live-performance HUD. `npm run test:e2e` is the fast breadth-plus-
+sentinels tier; run `npm run test:e2e:full` before recording qualification or
+release evidence. The tier selection changes execution depth only: it does not
+alter the frozen canonical manifest or prior evidence.
 Start/end PNGs and generated JSON reports are retained under `test-results` for
 inspection.
 

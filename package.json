@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:unit": "vitest run",
     "test:baseline-manifest": "node scripts/verify-baseline-tests.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:full": "playwright test"
   },
   "dependencies": {
     "react": "^19.2.7",

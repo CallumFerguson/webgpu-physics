@@ -4,6 +4,8 @@ import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
 import { buildSceneDefinition } from "../../src/scenes";
 import {
+  DEFAULT_JGS2_E2E_PERFORMANCE_OPTIONS,
+  LIGHTWEIGHT_JGS2_E2E_TELEMETRY_OPTIONS,
   assessJGS2ComputeBudget,
   buildJGS2PerformanceBenchmark,
   type JGS2CpuFrameProfile,
@@ -13,8 +15,14 @@ import {
 import { extractBoundarySurface } from "../../src/simulation/cpu";
 
 const SCENE_ID = "stress";
-const WARMUP_FRAME_COUNT = 120;
-const MEASURED_FRAME_COUNT = 600;
+const FULL_E2E_QUALIFICATION =
+  process.env.JGS2_FULL_E2E === "1" ||
+  process.env.npm_lifecycle_event === "test:e2e:full";
+const PROFILE_OPTIONS = FULL_E2E_QUALIFICATION
+  ? DEFAULT_JGS2_E2E_PERFORMANCE_OPTIONS
+  : LIGHTWEIGHT_JGS2_E2E_TELEMETRY_OPTIONS;
+const WARMUP_FRAME_COUNT = PROFILE_OPTIONS.warmupFrameCount;
+const MEASURED_FRAME_COUNT = PROFILE_OPTIONS.measuredFrameCount;
 
 interface PerformanceHarness {
   readonly ready: Promise<void>;
@@ -24,6 +32,10 @@ interface PerformanceHarness {
   profileGpuFrames(
     options: JGS2PerformanceProfileOptions,
   ): Promise<JGS2GpuFrameProfile>;
+  profileCombinedFrames(options: JGS2PerformanceProfileOptions): Promise<{
+    readonly cpuProfile: JGS2CpuFrameProfile;
+    readonly gpuProfile: JGS2GpuFrameProfile;
+  }>;
   diagnostics(): Promise<{
     readonly frame: number;
     readonly finite: boolean;
@@ -60,7 +72,7 @@ interface BrowserEnvironment {
 
 test.use({ trace: "off" });
 
-test("Phase 0 stress-scene baseline records 600 complete hardware frames", async ({
+test("Phase 0 stress-scene baseline records complete hardware frames", async ({
   page,
   browserName,
 }, testInfo) => {
@@ -104,11 +116,33 @@ test("Phase 0 stress-scene baseline records 600 complete hardware frames", async
     warmupFrameCount: WARMUP_FRAME_COUNT,
     measuredFrameCount: MEASURED_FRAME_COUNT,
   } as const satisfies JGS2PerformanceProfileOptions;
-  const cpuProfile = await page.evaluate(
-    async (options) =>
-      (window as HarnessWindow).__jgs2Test!.profileCpuFrames(options),
-    profileOptions,
-  );
+  let cpuProfile: JGS2CpuFrameProfile;
+  let gpuProfile: JGS2GpuFrameProfile;
+  if (FULL_E2E_QUALIFICATION) {
+    cpuProfile = await page.evaluate(
+      async (options) =>
+        (window as HarnessWindow).__jgs2Test!.profileCpuFrames(options),
+      profileOptions,
+    );
+
+    // Replay from an identical fresh state so timestamp passes cannot perturb
+    // or contaminate the formal wall/CPU sample interval.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await waitForTestHarness(page);
+    gpuProfile = await page.evaluate(
+      async (options) =>
+        (window as HarnessWindow).__jgs2Test!.profileGpuFrames(options),
+      profileOptions,
+    );
+  } else {
+    const profiles = await page.evaluate(
+      async (options) =>
+        (window as HarnessWindow).__jgs2Test!.profileCombinedFrames(options),
+      profileOptions,
+    );
+    cpuProfile = profiles.cpuProfile;
+    gpuProfile = profiles.gpuProfile;
+  }
   expect(cpuProfile.diagnosticReadbacksBefore).toBe(
     readbacksAfterInitialDiagnostics,
   );
@@ -116,20 +150,14 @@ test("Phase 0 stress-scene baseline records 600 complete hardware frames", async
     readbacksAfterInitialDiagnostics + 2,
   );
 
-  // Replay from an identical fresh state so timestamp passes cannot perturb
-  // or contaminate the wall/CPU sample interval.
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await waitForTestHarness(page);
-  const gpuProfile = await page.evaluate(
-    async (options) =>
-      (window as HarnessWindow).__jgs2Test!.profileGpuFrames(options),
-    profileOptions,
-  );
   const benchmark = buildJGS2PerformanceBenchmark(cpuProfile, gpuProfile);
 
-  expect(benchmark.stateEquivalent, "timestamp replay must be byte-identical").toBe(
-    true,
-  );
+  expect(
+    benchmark.stateEquivalent,
+    FULL_E2E_QUALIFICATION
+      ? "timestamp replay must be byte-identical"
+      : "combined smoke views must share the same final state",
+  ).toBe(true);
   expect(browserErrors, "the baseline run must not report browser errors").toEqual([]);
   const adapterAdvertisedTimestampQuery =
     environment.adapter.features.includes("timestamp-query");
@@ -155,6 +183,18 @@ test("Phase 0 stress-scene baseline records 600 complete hardware frames", async
     schema: "org.jgs2.phase0-performance-baseline",
     schemaVersion: 3,
     criterion: "P0-EC-13",
+    measurementTier: FULL_E2E_QUALIFICATION
+      ? "qualification"
+      : "quick-smoke",
+    formalQualification: FULL_E2E_QUALIFICATION,
+    samplingMode: FULL_E2E_QUALIFICATION
+      ? "separate uninstrumented CPU/wall and GPU timestamp replays"
+      : "single combined CPU/wall and GPU timestamp pass",
+    cpuTimingIncludesTimestampInstrumentation:
+      !FULL_E2E_QUALIFICATION && benchmark.gpuTimestamp.supported,
+    stateEquivalenceMeaning: FULL_E2E_QUALIFICATION
+      ? "Independent CPU/wall and GPU timestamp replays ended byte-identically."
+      : "CPU and GPU views share one combined pass and one final state readback; this is not independent replay equivalence.",
     recordedAtUtc: new Date().toISOString(),
     project: {
       playwrightProject: testInfo.project.name,
@@ -212,7 +252,8 @@ test("Phase 0 stress-scene baseline records 600 complete hardware frames", async
   });
 
   console.log(
-    `Phase 0 ${SCENE_ID} baseline (${MEASURED_FRAME_COUNT} frames): ` +
+    `Phase 0 ${SCENE_ID} ${FULL_E2E_QUALIFICATION ? "qualification" : "quick-smoke"} baseline ` +
+      `(${MEASURED_FRAME_COUNT} frames): ` +
       `serialized ${benchmark.endToEndFrame.averageFramesPerSecond!.toFixed(1)} FPS average, ` +
       `${benchmark.endToEndFrame.onePercentLowFramesPerSecond!.toFixed(1)} FPS 1% low; ` +
       `wall ${benchmark.endToEndFrame.meanMilliseconds.toFixed(3)} ms/frame ` +
@@ -244,6 +285,7 @@ async function waitForTestHarness(page: Page): Promise<void> {
     return (
       typeof harness?.profileCpuFrames === "function" &&
       typeof harness?.profileGpuFrames === "function" &&
+      typeof harness?.profileCombinedFrames === "function" &&
       typeof harness?.diagnostics === "function" &&
       typeof harness?.diagnosticReadbackCount === "function"
     );
