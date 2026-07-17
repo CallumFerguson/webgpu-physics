@@ -1,10 +1,19 @@
+import {
+  JGS2_GLOBALIZATION_CONTROL_VEC4S,
+  JGS2_GLOBALIZATION_HISTORY_CAPACITY,
+  JGS2_GLOBALIZATION_HISTORY_VEC4S,
+  JGS2_GLOBALIZATION_LOCAL_DIAGNOSTIC_VEC4S,
+  JGS2_GLOBALIZATION_TET_DIAGNOSTIC_VEC4S,
+  JGS2_CONVERGENCE_COMPONENT_VEC4S,
+} from "./jgs2-globalization";
+
 export const JGS2_VERTEX_STATIC_WORDS = 12;
 export const JGS2_TET_STATIC_WORDS = 20;
 export const JGS2_REST_STIFFNESS_FLOATS = 12 * 12;
 export const JGS2_CUBATURE_BASIS_FLOATS = 4 * 3 * 3;
 export const JGS2_CUBATURE_RECORD_WORDS =
   2 + JGS2_CUBATURE_BASIS_FLOATS;
-export const JGS2_UNIFORM_BYTES = 8 * 16;
+export const JGS2_UNIFORM_BYTES = 11 * 16;
 export const JGS2_MATERIAL_COROTATED_LINEAR = 0;
 export const JGS2_MATERIAL_STABLE_NEO_HOOKEAN = 1;
 
@@ -65,8 +74,22 @@ export interface JGS2DynamicOffsets {
   readonly bodyCorrection: number;
   /** Per-vertex final nonlinear update magnitude and validity flag. */
   readonly finalUpdate: number;
+  /** Four vec4 globalization diagnostics per vertex. */
+  readonly localGlobalization: number;
+  /** Two vec4 assembled-candidate diagnostics per tetrahedron. */
+  readonly tetGlobalization: number;
+  /** Per-vertex source/candidate implicit-energy contributions. */
+  readonly assembledVertexEnergy: number;
+  /** Five vec4 gradient-component records per vertex. */
+  readonly convergenceGradient: number;
+  /** Four vec4 GPU-resident assembled/reduction control records. */
+  readonly globalizationControl: number;
+  /** Fixed-capacity, eight-vec4 records for each nonlinear iteration. */
+  readonly globalizationHistory: number;
   readonly vec4Count: number;
 }
+
+export type JGS2MaterialMode = "corotated-linear" | "stable-neo-hookean";
 
 function assertInteger(name: string, value: number, minimum: number): void {
   if (!Number.isSafeInteger(value) || value < minimum) {
@@ -145,6 +168,19 @@ export function validateJGS2GpuInput(input: JGS2GpuInput): void {
       );
     }
   }
+  const expectedIncidentTetrahedra = Array.from(
+    { length: vertexCount },
+    () => [] as number[],
+  );
+  for (let tet = 0; tet < tetCount; tet += 1) {
+    for (let localVertex = 0; localVertex < 4; localVertex += 1) {
+      const vertex = input.tetIndices[tet * 4 + localVertex]!;
+      const incident = expectedIncidentTetrahedra[vertex]!;
+      if (incident.at(-1) !== tet) {
+        incident.push(tet);
+      }
+    }
+  }
 
   for (let tet = 0; tet < tetCount; tet += 1) {
     const base = tet * 4;
@@ -192,21 +228,52 @@ export function validateJGS2GpuInput(input: JGS2GpuInput): void {
     }
   }
 
+  let canonicalAdjacencyOffset = 0;
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
     const info = vertex * 4;
-    const start = input.vertexInfo[info];
-    const count = input.vertexInfo[info + 1];
+    const start = input.vertexInfo[info]!;
+    const count = input.vertexInfo[info + 1]!;
     if (start + count > input.adjacency.length) {
       throw new RangeError(
         `vertexInfo for vertex ${vertex} addresses adjacency range ` +
           `[${start}, ${start + count}), beyond ${input.adjacency.length}.`,
       );
     }
+    if (start !== canonicalAdjacencyOffset) {
+      throw new RangeError(
+        `vertexInfo for vertex ${vertex} must start at canonical adjacency ` +
+          `offset ${canonicalAdjacencyOffset}; got ${start}.`,
+      );
+    }
+    const expected = expectedIncidentTetrahedra[vertex]!;
+    if (count !== expected.length) {
+      throw new RangeError(
+        `vertexInfo for vertex ${vertex} must list exactly ` +
+          `${expected.length} unique incident tetrahedra; got ${count}.`,
+      );
+    }
+    for (let adjacent = 0; adjacent < expected.length; adjacent += 1) {
+      const actualTet = input.adjacency[start + adjacent]!;
+      const expectedTet = expected[adjacent]!;
+      if (actualTet !== expectedTet) {
+        throw new RangeError(
+          `adjacency[${start + adjacent}] for vertex ${vertex} must equal ` +
+            `incident tetrahedron ${expectedTet}; got ${actualTet}.`,
+        );
+      }
+    }
+    canonicalAdjacencyOffset += expected.length;
     const mass = input.vertexRest[vertex * 4 + 3];
     const pinned = input.vertexInfo[info + 2] !== 0;
     if (!pinned && !(mass > 0)) {
       throw new RangeError(`Unpinned vertex ${vertex} must have positive mass.`);
     }
+  }
+  if (canonicalAdjacencyOffset !== input.adjacency.length) {
+    throw new RangeError(
+      `adjacency contains ${input.adjacency.length - canonicalAdjacencyOffset} ` +
+        `unused entr${input.adjacency.length - canonicalAdjacencyOffset === 1 ? "y" : "ies"}.`,
+    );
   }
 
   for (let record = 0; record < recordCount; record += 1) {
@@ -228,6 +295,7 @@ export function computeJGS2DynamicOffsets(
   vertexCount: number,
   tetCount: number,
   bodyCount = 0,
+  globalizationEnabled = true,
 ): JGS2DynamicOffsets {
   assertInteger("vertexCount", vertexCount, 1);
   assertInteger("tetCount", tetCount, 1);
@@ -243,6 +311,41 @@ export function computeJGS2DynamicOffsets(
   const bodyCorrection = tetRotation + tetCount * 3;
   // Keep the existing position/rotation/body ABI stable and append diagnostics.
   const finalUpdate = bodyCorrection + bodyCount;
+  const localGlobalization = finalUpdate + vertexCount;
+  if (!globalizationEnabled) {
+    // Disabled regions use an inert one-past-the-buffer offset. Legacy
+    // co-rotated shaders never dereference them because offsets4.w is zero.
+    // This preserves the historical hot-state footprint instead of charging
+    // every regression scene for stable-material diagnostics and 64 histories.
+    return {
+      posA,
+      posB,
+      predicted,
+      velocity,
+      old,
+      vertexRotation,
+      tetRotation,
+      bodyCorrection,
+      finalUpdate,
+      localGlobalization,
+      tetGlobalization: localGlobalization,
+      assembledVertexEnergy: localGlobalization,
+      convergenceGradient: localGlobalization,
+      globalizationControl: localGlobalization,
+      globalizationHistory: localGlobalization,
+      vec4Count: localGlobalization,
+    };
+  }
+  const tetGlobalization =
+    localGlobalization +
+    vertexCount * JGS2_GLOBALIZATION_LOCAL_DIAGNOSTIC_VEC4S;
+  const assembledVertexEnergy =
+    tetGlobalization + tetCount * JGS2_GLOBALIZATION_TET_DIAGNOSTIC_VEC4S;
+  const convergenceGradient = assembledVertexEnergy + vertexCount;
+  const globalizationControl =
+    convergenceGradient + vertexCount * JGS2_CONVERGENCE_COMPONENT_VEC4S;
+  const globalizationHistory =
+    globalizationControl + JGS2_GLOBALIZATION_CONTROL_VEC4S;
 
   return {
     posA,
@@ -254,8 +357,95 @@ export function computeJGS2DynamicOffsets(
     tetRotation,
     bodyCorrection,
     finalUpdate,
-    vec4Count: finalUpdate + vertexCount,
+    localGlobalization,
+    tetGlobalization,
+    assembledVertexEnergy,
+    convergenceGradient,
+    globalizationControl,
+    globalizationHistory,
+    vec4Count:
+      globalizationHistory +
+      JGS2_GLOBALIZATION_HISTORY_CAPACITY *
+        JGS2_GLOBALIZATION_HISTORY_VEC4S,
   };
+}
+
+/**
+ * Production currently supports either the paper's stable material or the
+ * explicitly retained co-rotated regression material, never a mixed solve.
+ */
+export function inferJGS2MaterialMode(input: JGS2GpuInput): JGS2MaterialMode {
+  let stableCount = 0;
+  for (let tet = 0; tet < input.tetCount; tet += 1) {
+    stableCount += Number(
+      input.tetMeta[tet * 4 + 3] === JGS2_MATERIAL_STABLE_NEO_HOOKEAN,
+    );
+  }
+  if (stableCount === 0) return "corotated-linear";
+  if (stableCount === input.tetCount) return "stable-neo-hookean";
+  throw new RangeError(
+    "A production JGS2 solve cannot mix stable Neo-Hookean and co-rotated " +
+      "regression tetrahedra in one precomputation.",
+  );
+}
+
+function determinantColumns(
+  c0x: number,
+  c0y: number,
+  c0z: number,
+  c1x: number,
+  c1y: number,
+  c1z: number,
+  c2x: number,
+  c2y: number,
+  c2z: number,
+): number {
+  return (
+    c0x * (c1y * c2z - c1z * c2y) -
+    c1x * (c0y * c2z - c0z * c2y) +
+    c2x * (c0y * c1z - c0z * c1y)
+  );
+}
+
+/** Minimum det(Ds Dm^-1) of the uploaded f32 source pose. */
+export function minimumJGS2InputDeformationDeterminant(
+  input: JGS2GpuInput,
+): number {
+  let minimum = Number.POSITIVE_INFINITY;
+  for (let tet = 0; tet < input.tetCount; tet += 1) {
+    const indexBase = tet * 4;
+    const i0 = input.tetIndices[indexBase]! * 4;
+    const i1 = input.tetIndices[indexBase + 1]! * 4;
+    const i2 = input.tetIndices[indexBase + 2]! * 4;
+    const i3 = input.tetIndices[indexBase + 3]! * 4;
+    const dsDeterminant = determinantColumns(
+      input.positions[i1]! - input.positions[i0]!,
+      input.positions[i1 + 1]! - input.positions[i0 + 1]!,
+      input.positions[i1 + 2]! - input.positions[i0 + 2]!,
+      input.positions[i2]! - input.positions[i0]!,
+      input.positions[i2 + 1]! - input.positions[i0 + 1]!,
+      input.positions[i2 + 2]! - input.positions[i0 + 2]!,
+      input.positions[i3]! - input.positions[i0]!,
+      input.positions[i3 + 1]! - input.positions[i0 + 1]!,
+      input.positions[i3 + 2]! - input.positions[i0 + 2]!,
+    );
+    const inverseBase = tet * 12;
+    const inverseDeterminant = determinantColumns(
+      input.tetInverseDm[inverseBase]!,
+      input.tetInverseDm[inverseBase + 1]!,
+      input.tetInverseDm[inverseBase + 2]!,
+      input.tetInverseDm[inverseBase + 4]!,
+      input.tetInverseDm[inverseBase + 5]!,
+      input.tetInverseDm[inverseBase + 6]!,
+      input.tetInverseDm[inverseBase + 8]!,
+      input.tetInverseDm[inverseBase + 9]!,
+      input.tetInverseDm[inverseBase + 10]!,
+    );
+    const determinant = dsDeterminant * inverseDeterminant;
+    if (!Number.isFinite(determinant)) return determinant;
+    minimum = Math.min(minimum, determinant);
+  }
+  return minimum;
 }
 
 /**

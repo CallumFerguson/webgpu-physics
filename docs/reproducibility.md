@@ -35,13 +35,18 @@ and the expected selected tetrahedra and packed weights for every active
 source. This small fixture establishes algorithm and CPU/GPU data-path parity;
 it is not a large-scene performance artifact.
 
-Phase 1 globalization adds
+Phase 1 globalization first added the historical CPU-reference contract in
 [`manifests/phase1-globalization.v1.json`](../manifests/phase1-globalization.v1.json).
-It freezes the CPU solve-shift, feasibility-first Armijo, assembled-revert, and
-convergence-metric reference protocol. Its scope is explicitly limited to
-implicit-Euler inertia and stable Neo-Hookean material: composite force/target
-terms and production WebGPU integration are marked pending, and
-`qualifiesPhase1Exit` is false.
+The additive
+[`manifests/phase1-globalization.v2.json`](../manifests/phase1-globalization.v2.json)
+binds the same solve-shift, feasibility-first Armijo, assembled-revert, and
+convergence protocol to the stable production WebGPU ABI and hardware cases.
+It also freezes pinned-target application as part of the assembled feasibility
+gate, with no post-gate target snap.
+Its objective remains explicitly limited to implicit-Euler inertia, stable
+Neo-Hookean material, and the analytic floor penalty. Composite force/target
+terms, GPU-driven early termination, public stable scenes, and performance
+qualification are marked pending; `qualifiesPhase1Exit` remains false.
 
 ## Validation
 
@@ -68,14 +73,15 @@ then independently enforce the all-element dense projection identity,
 nonnegative selection, packed training residual, held-out unregularized update
 RMS, and production WebGPU update parity.
 
-`src/reproducibility/phase1-globalization-manifest.test.ts` rejects unknown
-fields and drift in source-manifest references, policy values, objective terms,
-reference gates, or the exact case inventory. It binds the frozen policy values
-to executable CPU constants; the existing source-manifest suites independently
-validate the referenced manifests. Numerical tests independently exercise the
-restricted scalar, solve-only shift, line search, assembled feasibility, and
-convergence diagnostics; this validation is partial reference evidence and
-does not close a Phase 1 exit criterion.
+`src/reproducibility/phase1-globalization-manifest.test.ts` keeps the v1
+historical contract executable and rejects unknown fields or drift in v2 source
+manifests, GPU test provenance/selectors, policy values, objective terms,
+reference gates, or case inventory. It binds the frozen values to executable
+CPU and GPU constants; the existing source-manifest suites independently
+validate referenced fixtures. Numerical tests independently exercise the
+restricted scalar, shared shift, line search, assembled feasibility/revert,
+and component-aware convergence diagnostics. This is still partial Phase 1
+evidence and does not close the phase exit.
 
 `scripts/verify-baseline-tests.mjs` independently asks Vitest and Playwright to
 list the tests they actually collect, then matches every frozen source and
@@ -107,12 +113,13 @@ performance evidence:
 npm.cmd run test:e2e:full
 ```
 
-Both commands collect the same 18 tests with zero expected skips. They differ
+Both commands collect the same 24 tests with zero expected skips. They differ
 only in deliberately expensive execution depth:
 
 | Workload | Fast `test:e2e` | Qualification `test:e2e:full` |
 | --- | --- | --- |
 | 32-state force-free corpus | All 32 cases run one step; frozen cases `00` and `27` continue to 120 steps (one simulated second) | All 32 cases run the canonical 1,200 steps (10 simulated seconds) |
+| Nonlinear Cubature GPU oracle | Six unique poses, 10 active locals each, all at two nonlinear iterations | All 24 unique poses and exactly 240 active locals; first and last sentinels use two iterations and the remaining 22 use one |
 | Short visual scene timing | One in-place combined profile after correctness assertions: 0 warm-up + 12 measured frames, no reload | Fresh uncontaminated CPU and GPU profiles, each with 120 warm-up and 600 measured frames |
 | Long drop/stress timing | One 0/12 combined profile continuing the actual settled state | The same 0/12 settled-state combined smoke profile; no frame-zero reload |
 | Isolated stress baseline | One combined CPU/GPU timestamp pass with 30 warm-up and 120 measured frames | Fresh uncontaminated CPU and GPU profiles, each with 120 warm-up and 600 measured frames |
@@ -122,6 +129,12 @@ state on the GPU, while cases `00` and `27` provide one-second depth because
 they are the frozen maximum-angular-speed and maximum-linear-speed sentinels.
 The separate base force-free test remains a full 1,200-step, 10-second
 conservation trajectory in both tiers.
+
+The six stable-globalization selectors share one hardware page, adapter,
+device, and frozen CPU fixture. They remain individually runnable, but avoid
+repeating shader compilation and precomputation. This preserves every
+assertion while keeping the routine suite below one minute on the nominated
+machine.
 
 The list reporter logs the finalized duration of every non-skipped E2E
 attempt. The built-in JSON reporter preserves per-attempt status, start time,
@@ -248,8 +261,11 @@ and all 16 hardware E2E tests with zero skips.
 The nonlinear Cubature capability evidence is recorded in
 [`docs/evidence/phase1-nonlinear-cubature.md`](evidence/phase1-nonlinear-cubature.md).
 Its focused production WebGPU run covers six training/held-out shapes and uses
-two explicit test-only readbacks per shape (predicted and solved positions);
-normal simulation retains the no-readback GPU-resident contract.
+four explicit test-only readbacks per shape (predicted and solved positions,
+globalization history, and the exact assembled oracle); normal stepping retains
+the no-diagnostic-readback GPU-resident contract. Stable solver creation uses
+one separate synchronized readback to certify source feasibility under the
+production f32 determinant arithmetic.
 The completion gate passed 134 unit tests, the production build, frozen
 selector verification at 26/134 unit and 7/17 E2E, and all 17 hardware E2E
 tests with zero skips. The corrected two-iteration Cubature oracle reported
@@ -266,6 +282,21 @@ The exact-tree routine gate passed 189 unit tests, the production build,
 frozen selector verification at 26/189 unit and 7/18 E2E, and all 18 hardware
 E2E tests in 46,802.453 ms with zero skips or retries. The full qualification
 tier remains reserved for a roadmap exit or formal performance result.
+
+The production GPU continuation is recorded in
+[`docs/evidence/phase1-gpu-globalization.md`](evidence/phase1-gpu-globalization.md).
+It adds hardware shift, effective-`f32` Armijo, all-tetrahedron source and
+assembled feasibility, byte-exact whole-pose revert, exact component
+reductions, deterministic 128-lane reduction trees, floor-active objective
+coverage, and GPU-resident history evidence while deliberately leaving the
+composite force/target objective and Phase 1 exit open.
+The exact-tree gate passed 248 unit tests and the production build, verified
+frozen selectors at 26/248 unit and 7/24 E2E, and passed all 24 routine E2E
+tests in 50.6 seconds. The complete qualification tier also passed
+24/24 in 4.0 minutes, including the 38,400-frame force-free corpus and formal
+120-warm-up/600-measured performance profiles. The stable Cubature qualification
+covered 24 unique poses and exactly 240 active local systems with maximum
+production-update relative error `9.992e-7`.
 
 The later standard-performance-observability gate passed all 149 unit tests,
 the production build, frozen selector verification at 26/149 unit and 7/17

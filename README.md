@@ -8,8 +8,10 @@ The app builds a tetrahedral implicit-Euler problem, precomputes the paper's
 globally aware local perturbation bases and nonnegative Cubature weights, then
 runs vertex solves entirely in WebGPU compute shaders. The runtime includes
 co-rotated linear regression material and a CPU/GPU-validated stable
-Neo-Hookean current material path with nonlinear current-pose Cubature. The
-same GPU position buffer is rendered directly with no per-frame readback.
+Neo-Hookean current material path with nonlinear current-pose Cubature,
+scale-aware local shifting, feasibility-first Armijo search, whole-pose
+assembled reversion, and GPU-resident convergence histories. The same GPU
+position buffer is rendered directly with no per-frame readback.
 
 ## Run it
 
@@ -46,7 +48,10 @@ The fast tier executes every one of the 32 frozen force-free corpus states for
 one step and continues cases `00` and `27` through one simulated second. The
 separate base force-free test still runs its complete 10-second trajectory.
 The full tier restores all 32 corpus cases to the canonical 1,200-step,
-10-second trajectory.
+10-second trajectory. The nonlinear Cubature oracle uses six two-iteration
+sentinels in the fast tier; the full tier covers all 24 frozen poses and all
+240 active local systems, retaining two iterations at the first and last
+sentinels.
 
 Each run prints Playwright's finalized duration for every non-skipped test
 and writes every result, including skips, to the machine-readable
@@ -116,10 +121,13 @@ Each runtime Jacobi invocation owns one vertex and solves equation 15:
 (H_ii + Htilde_ii) delta_i = -(g_i + gtilde_i).
 ```
 
-WGSL gathers exact incident-element terms, co-rotates each selected basis,
+WGSL gathers exact incident-element terms, co-rotates each selected basis, and
 evaluates either co-rotated linear or stable Neo-Hookean current gradients and
-Hessian-vector products, performs a regularized `3 x 3` Cholesky solve, and
-writes to the opposite ping-pong region.
+Hessian-vector products. The legacy regression material retains its regularized
+and optionally clamped `3 x 3` solve. The stable path instead applies the
+frozen scale-aware solve-only shift, tests the exact stored `f32` update with a
+restricted Armijo search, and writes to the opposite ping-pong region only
+after local feasibility succeeds.
 No floating-point atomics or materialized `12 x 12` runtime Hessians are needed.
 Incident samples retain their neighbor/cross response while subtracting the
 source block already included by the exact local gather. Non-parity demos may
@@ -155,11 +163,17 @@ scale of the paper's large examples.
   equilibrium solves, NNLS Cubature, and GPU buffer packing.
 - GPU every frame: implicit prediction, polar frames, co-rotated linear or
   stable Neo-Hookean current elasticity, Cubature projection, local solves,
-  optional non-parity demo stabilization, floor penalty, optional non-parity
-  grounded damping, velocity update, and rendering.
+  stable-material Armijo search, assembled determinant and convergence
+  reductions, optional non-parity demo stabilization, floor penalty, optional
+  non-parity grounded damping, velocity update, and rendering.
 - CPU in tests only: explicitly requested synchronized diagnostic checkpoints
   for numeric invariants; normal production and benchmark stepping performs no
   synchronous per-frame readback.
+
+Stable solver creation performs one GPU determinant pass and synchronized
+readback to reject a source pose that is feasible under host arithmetic but
+not under the production GPU's exact `f32` calculation. This one-time safety
+check is not part of the frame loop.
 
 WebAssembly is not used. It would not improve the GPU-resident hot loop and
 would introduce another memory boundary. WASM becomes sensible only for
@@ -185,14 +199,16 @@ fixed-step test harness that:
    fixed vertices, positive tetrahedron determinants, bounds, landmarks,
    momentum, and visible pixel change.
 
-The 18-test Playwright gate covers all four public scenes, long-running
+The 24-test Playwright gate covers all four public scenes, long-running
 drop/stress behavior, and the visible WebGPU-unavailable path. It also exercises
 the canonical GPU oracles, the base and 32-case force-free conservation corpus,
 submission/readback invariants, the timestamped performance baseline, and the
-production live-performance HUD. `npm run test:e2e` is the fast breadth-plus-
-sentinels tier; run `npm run test:e2e:full` before recording qualification or
-release evidence. The tier selection changes execution depth only: it does not
-alter the frozen canonical manifest or prior evidence.
+production live-performance HUD. Six independently selectable stable
+globalization cases share one browser/device fixture while retaining separate
+assertions. `npm run test:e2e` is the fast breadth-plus-sentinels tier; run
+`npm run test:e2e:full` before recording qualification or release evidence.
+The tier selection changes execution depth only: it does not alter the frozen
+canonical manifest or prior evidence.
 Start/end PNGs and generated JSON reports are retained under `test-results` for
 inspection.
 
@@ -208,14 +224,19 @@ local-solve design. Its corrected stable Neo-Hookean CPU reference and WGSL
 energy, stress, exact current tangent, material dispatch, and deformation-frame
 construction pass the Phase 1 CPU/GPU oracle corpus. Nonlinear current-pose
 Cubature training, held-out update validation, `f32` packing, and production
-GPU update parity also pass on the private capability fixture. A Float64 CPU
-material-and-inertia reference now covers the documented solve shift,
-feasibility-first Armijo search, whole-pose assembled revert, and convergence
-metric. It is not the production solver: external-force and quadratic-target
-terms, WebGPU globalization/reduction, and convergence histories remain. The
-four visible demos still use the legacy co-rotated-linear path. Explicit in-app
-material labels, forces/handles, and stable-material demo gates also remain
-before the project claims the paper's complete nonlinear solid capability.
+GPU update parity also pass on the private capability fixture. The stable
+production WebGPU path now mirrors the Float64 material-and-inertia reference's
+solve shift, feasibility-first Armijo search, whole-pose assembled revert, and
+component-aware convergence metrics without per-frame readback. External-force
+and quadratic-target terms are still absent. Immutable pinned rest constraints
+are proposed inside the assembled feasibility gate and cannot be reapplied
+after rejection; they do not substitute for scripted or pointer-driven target
+terms. Convergence flags do not yet stop
+the encoded iteration sequence early, and the four visible demos still use the
+legacy co-rotated-linear path. Explicit in-app material labels, forces/handles,
+stable-material demo gates, and the Phase 1 stable-scene/performance gate
+remain before the project claims the paper's complete nonlinear-solid
+capability.
 
 Contact here is an implicit quadratic ground penalty with simple viscous
 tangential damping for grounded vertices. It is not a Coulomb friction model.

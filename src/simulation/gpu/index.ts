@@ -1,8 +1,14 @@
 export {
   DEFAULT_JGS2_STEP_SETTINGS,
+  JGS2_DEGENERATE_DYNAMIC_SCENE_SCALE,
   JGS2_MAX_BATCH_FRAMES,
+  JGS2_MAX_GLOBALIZED_ITERATIONS_PER_SUBMISSION,
   JGS2GpuSolver,
+  computeJGS2InitialDynamicSceneScale,
   resolveJGS2StepSettings,
+  type JGS2AssembledCandidateTestResult,
+  type JGS2ConvergenceReductionTestInput,
+  type JGS2GlobalizationDiagnostics,
   type JGS2PositionBufferView,
   type JGS2StepSettings,
 } from "./jgs2-solver";
@@ -47,7 +53,10 @@ export {
   JGS2_MATERIAL_COROTATED_LINEAR,
   JGS2_MATERIAL_STABLE_NEO_HOOKEAN,
   JGS2_REST_STIFFNESS_FLOATS,
+  JGS2_UNIFORM_BYTES,
   computeJGS2DynamicOffsets,
+  inferJGS2MaterialMode,
+  minimumJGS2InputDeformationDeterminant,
   inferJGS2BodyCount,
   jgs2TimestepsMatch,
   normalizeOddIterationCount,
@@ -59,5 +68,11 @@ export {
   validateJGS2ContactParameters,
   type JGS2DynamicOffsets,
   type JGS2GpuInput,
+  type JGS2MaterialMode,
 } from "./layout";
+export * from "./jgs2-globalization";
+export {
+  JGS2_GLOBALIZATION_STATUS_CODES,
+  jgs2GlobalizationWgsl,
+} from "./jgs2-globalization-wgsl";
 export { stableNeoHookeanWgsl } from "./stable-neo-hookean-wgsl";

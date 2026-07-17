@@ -2,7 +2,9 @@ import {
   JGS2_UNIFORM_BYTES,
   computeJGS2DynamicOffsets,
   inferJGS2BodyCount,
+  inferJGS2MaterialMode,
   jgs2TimestepsMatch,
+  minimumJGS2InputDeformationDeterminant,
   normalizeOddIterationCount,
   packJGS2Cubature,
   packJGS2InitialDynamic,
@@ -13,6 +15,21 @@ import {
   type JGS2DynamicOffsets,
   type JGS2GpuInput,
 } from "./layout";
+import {
+  decodeJGS2GlobalizationHistoryRecord,
+  decodeJGS2GlobalizationLocalDiagnostic,
+  JGS2_GLOBALIZATION_ACCEPTED_MINIMUM_VALID_BIT,
+  JGS2_GLOBALIZATION_CANDIDATE_GEOMETRY_VALID_BIT,
+  JGS2_GLOBALIZATION_HISTORY_CAPACITY,
+  JGS2_GLOBALIZATION_MAX_RUNTIME_TOLERANCE,
+  JGS2_GLOBALIZATION_DETERMINANT_FLOOR,
+  JGS2_GLOBALIZATION_HISTORY_VEC4S,
+  JGS2_GLOBALIZATION_LOCAL_DIAGNOSTIC_VEC4S,
+  JGS2_GLOBALIZATION_SOURCE_GEOMETRY_VALID_BIT,
+  JGS2_GLOBALIZATION_VALIDITY_BITS_MASK,
+  type JGS2GlobalizationHistoryRecord,
+  type JGS2GlobalizationLocalDiagnostic,
+} from "./jgs2-globalization";
 import {
   JGS2GpuOracleEvaluator,
   type JGS2GpuOracleDiagnostics,
@@ -34,6 +51,10 @@ export interface JGS2StepSettings {
   readonly regularization: number;
   readonly rotationEpsilon: number;
   readonly maxStep: number;
+  /** Component-aware relative residual tolerance for GPU convergence flags. */
+  readonly residualTolerance: number;
+  /** Maximum accepted update divided by the initial scene AABB diagonal. */
+  readonly normalizedUpdateTolerance: number;
   /** Exponential x/z damping rate in s^-1 for grounded vertices. */
   readonly contactTangentialDamping: number;
   /** Distance above the floor at which tangential damping becomes active. */
@@ -51,11 +72,50 @@ export interface JGS2PositionBufferView {
   readonly stride: 16;
 }
 
+export interface JGS2GlobalizationDiagnostics {
+  readonly local: readonly JGS2GlobalizationLocalDiagnostic[];
+  readonly history: readonly JGS2GlobalizationHistoryRecord[];
+  readonly historyCount: number;
+}
+
+export interface JGS2AssembledCandidateTestResult {
+  readonly positions: Float32Array;
+  readonly globalization: JGS2GlobalizationDiagnostics;
+}
+
+export interface JGS2ConvergenceReductionTestInput {
+  /** Five xyz arrays in inertia/material/external/target/contact order. */
+  readonly gradientComponents: readonly Float32Array[];
+  /** Accepted xyz update per vertex. */
+  readonly acceptedUpdates: Float32Array;
+  readonly assembledAccepted: boolean;
+  readonly assembledReverted: boolean;
+  readonly localFailureCount: number;
+  /** Test-only logical prefix used to exercise reduction-size boundaries. */
+  readonly reductionVertexCount?: number;
+}
+
 /**
  * Practical command-buffer bound for one solver submission. Callers needing a
  * longer run should chunk it so browsers do not accumulate unbounded commands.
  */
 export const JGS2_MAX_BATCH_FRAMES = 240;
+
+/**
+ * Maximum total stable-material nonlinear iterations encoded into one command
+ * buffer. Each globalized iteration expands to eight compute passes, so this
+ * caps the iteration body at roughly 16k passes while preserving the app's
+ * normal 120-frame, nine-iteration test batches. The legacy co-rotated path is
+ * intentionally governed only by {@link JGS2_MAX_BATCH_FRAMES}.
+ */
+export const JGS2_MAX_GLOBALIZED_ITERATIONS_PER_SUBMISSION = 2048;
+
+/**
+ * Finite normalization scale used when the dynamic-vertex AABB has no extent
+ * (including an entirely pinned input). Keeping it small and positive avoids
+ * division by zero without letting distant fixed anchors relax convergence.
+ */
+export const JGS2_DEGENERATE_DYNAMIC_SCENE_SCALE = 1e-12;
 
 export const DEFAULT_JGS2_STEP_SETTINGS: JGS2StepSettings = {
   timestep: 1 / 60,
@@ -67,6 +127,8 @@ export const DEFAULT_JGS2_STEP_SETTINGS: JGS2StepSettings = {
   regularization: 1e-6,
   rotationEpsilon: 1e-7,
   maxStep: 0.1,
+  residualTolerance: 1e-3,
+  normalizedUpdateTolerance: 1e-3,
   contactTangentialDamping: 8,
   contactMargin: 0.01,
   horizontalBodyCorrection: true,
@@ -87,6 +149,13 @@ interface JGS2Pipelines {
   readonly tetPolarRotation: GPUComputePipeline;
   readonly vertexPolarRotation: GPUComputePipeline;
   readonly solve: GPUComputePipeline;
+  /** Shared by the explicit assembled-candidate test path. */
+  readonly assembledVertexEnergy?: GPUComputePipeline;
+  readonly candidateTetrahedron?: GPUComputePipeline;
+  readonly reduceCandidate?: GPUComputePipeline;
+  readonly applyCandidate?: GPUComputePipeline;
+  readonly convergenceGradient?: GPUComputePipeline;
+  readonly reduceConvergence?: GPUComputePipeline;
   readonly copyPosition: GPUComputePipeline;
   readonly bodyHorizontalCorrection: GPUComputePipeline;
   readonly applyBodyHorizontalCorrection: GPUComputePipeline;
@@ -111,6 +180,7 @@ function createInitializedBuffer(
   label: string,
   usage: GPUBufferUsageFlags,
   data: ArrayBufferView,
+  createdBuffers: GPUBuffer[],
 ): GPUBuffer {
   const size = Math.max(4, alignTo4(data.byteLength));
   const buffer = device.createBuffer({
@@ -119,6 +189,7 @@ function createInitializedBuffer(
     usage,
     mappedAtCreation: true,
   });
+  createdBuffers.push(buffer);
   const mapped = new Uint8Array(buffer.getMappedRange());
   mapped.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
   buffer.unmap();
@@ -154,6 +225,8 @@ function validateStepSettings(settings: JGS2StepSettings): void {
     ["regularization", settings.regularization],
     ["rotationEpsilon", settings.rotationEpsilon],
     ["maxStep", settings.maxStep],
+    ["residualTolerance", settings.residualTolerance],
+    ["normalizedUpdateTolerance", settings.normalizedUpdateTolerance],
     ["contactTangentialDamping", settings.contactTangentialDamping],
     ["contactMargin", settings.contactMargin],
     ["gravity.x", settings.gravity[0]],
@@ -182,6 +255,20 @@ function validateStepSettings(settings: JGS2StepSettings): void {
   }
   if (settings.maxStep < 0) {
     throw new RangeError("maxStep must be nonnegative.");
+  }
+  for (const [name, value] of [
+    ["residualTolerance", settings.residualTolerance],
+    ["normalizedUpdateTolerance", settings.normalizedUpdateTolerance],
+  ] as const) {
+    if (
+      !(value > 0) ||
+      value > JGS2_GLOBALIZATION_MAX_RUNTIME_TOLERANCE
+    ) {
+      throw new RangeError(
+        `${name} must be positive and no greater than ` +
+          `${JGS2_GLOBALIZATION_MAX_RUNTIME_TOLERANCE}.`,
+      );
+    }
   }
   validateJGS2ContactParameters(
     settings.contactTangentialDamping,
@@ -237,6 +324,23 @@ function validateFrameBatchCount(frameCount: number): void {
   }
 }
 
+function validateGlobalizedSubmissionWork(
+  frameCount: number,
+  iterations: number,
+): void {
+  if (
+    iterations >
+    Math.floor(JGS2_MAX_GLOBALIZED_ITERATIONS_PER_SUBMISSION / frameCount)
+  ) {
+    throw new RangeError(
+      `Stable JGS2 may encode at most ` +
+        `${JGS2_MAX_GLOBALIZED_ITERATIONS_PER_SUBMISSION} total nonlinear ` +
+        `iterations per submission; got ${frameCount} frames * ` +
+        `${iterations} iterations.`,
+    );
+  }
+}
+
 function validateTimestampWrites(writes: GpuTimestampIntervalWrites): void {
   if (
     !Number.isSafeInteger(writes.startWriteIndex) ||
@@ -259,6 +363,8 @@ function packUniforms(
   settings: JGS2StepSettings,
   sourcePosition: number,
   targetPosition: number,
+  globalizationEnabled: boolean,
+  sceneScale: number,
 ): Uint8Array {
   const buffer = new ArrayBuffer(JGS2_UNIFORM_BYTES);
   const integers = new Uint32Array(buffer);
@@ -313,8 +419,71 @@ function packUniforms(
     [settings.contactTangentialDamping, settings.contactMargin, 0, 0],
     28,
   );
+  integers.set(
+    [
+      offsets.localGlobalization,
+      offsets.tetGlobalization,
+      offsets.assembledVertexEnergy,
+      offsets.convergenceGradient,
+    ],
+    32,
+  );
+  integers.set(
+    [
+      offsets.globalizationControl,
+      offsets.globalizationHistory,
+      JGS2_GLOBALIZATION_HISTORY_CAPACITY,
+      Number(globalizationEnabled),
+    ],
+    36,
+  );
+  floats.set(
+    [
+      settings.residualTolerance,
+      settings.normalizedUpdateTolerance,
+      sceneScale,
+      0,
+    ],
+    40,
+  );
 
   return new Uint8Array(buffer);
+}
+
+export function computeJGS2InitialDynamicSceneScale(
+  input: Pick<JGS2GpuInput, "vertexCount" | "positions" | "vertexInfo">,
+): number {
+  let minimumX = Number.POSITIVE_INFINITY;
+  let minimumY = Number.POSITIVE_INFINITY;
+  let minimumZ = Number.POSITIVE_INFINITY;
+  let maximumX = Number.NEGATIVE_INFINITY;
+  let maximumY = Number.NEGATIVE_INFINITY;
+  let maximumZ = Number.NEGATIVE_INFINITY;
+  let dynamicVertexCount = 0;
+  for (let vertex = 0; vertex < input.vertexCount; vertex += 1) {
+    const base = vertex * 4;
+    if (input.vertexInfo[base + 2] !== 0) {
+      continue;
+    }
+    dynamicVertexCount += 1;
+    const x = input.positions[base]!;
+    const y = input.positions[base + 1]!;
+    const z = input.positions[base + 2]!;
+    minimumX = Math.min(minimumX, x);
+    minimumY = Math.min(minimumY, y);
+    minimumZ = Math.min(minimumZ, z);
+    maximumX = Math.max(maximumX, x);
+    maximumY = Math.max(maximumY, y);
+    maximumZ = Math.max(maximumZ, z);
+  }
+  const diagonal = Math.hypot(
+    maximumX - minimumX,
+    maximumY - minimumY,
+    maximumZ - minimumZ,
+  );
+  return dynamicVertexCount > 0 && Number.isFinite(diagonal) && diagonal > 0
+    ? diagonal
+    : JGS2_DEGENERATE_DYNAMIC_SCENE_SCALE;
 }
 
 function createUniformBuffer(device: GPUDevice, label: string): GPUBuffer {
@@ -368,6 +537,81 @@ function encodeDispatch(
   pass.end();
 }
 
+async function validateGpuInitialStableSource(
+  device: GPUDevice,
+  buffers: JGS2GpuBuffers,
+  pipelines: Pick<
+    Required<JGS2Pipelines>,
+    "candidateTetrahedron" | "reduceCandidate"
+  >,
+  uniforms: JGS2UniformState,
+  offsets: JGS2DynamicOffsets,
+  tetCount: number,
+): Promise<void> {
+  const readback = device.createBuffer({
+    label: "jgs2-initial-stable-source-readback",
+    size: 16,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  try {
+    const encoder = device.createCommandEncoder({
+      label: "jgs2-initial-stable-source-command-encoder",
+    });
+    encodeDispatch(
+      encoder,
+      pipelines.candidateTetrahedron,
+      uniforms.baseBindGroup,
+      tetCount,
+      "jgs2-initial-stable-source-tetrahedron-pass",
+    );
+    encodeDispatch(
+      encoder,
+      pipelines.reduceCandidate,
+      uniforms.baseBindGroup,
+      1,
+      "jgs2-initial-stable-source-reduction-pass",
+    );
+    encoder.copyBufferToBuffer(
+      buffers.dynamic,
+      offsets.globalizationControl * 16,
+      readback,
+      0,
+      16,
+    );
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    const control = new Float32Array(readback.getMappedRange()).slice();
+    readback.unmap();
+    const sourceMinimum = control[0]!;
+    const candidateMinimum = control[1]!;
+    const acceptedMinimum = control[2]!;
+    const requiredValidityBits =
+      JGS2_GLOBALIZATION_SOURCE_GEOMETRY_VALID_BIT |
+      JGS2_GLOBALIZATION_CANDIDATE_GEOMETRY_VALID_BIT |
+      JGS2_GLOBALIZATION_ACCEPTED_MINIMUM_VALID_BIT;
+    const validityBits = control[3]!;
+    if (
+      ![sourceMinimum, candidateMinimum, acceptedMinimum].every(
+        Number.isFinite,
+      ) ||
+      !(sourceMinimum > JGS2_GLOBALIZATION_DETERMINANT_FLOOR) ||
+      !(candidateMinimum > JGS2_GLOBALIZATION_DETERMINANT_FLOOR) ||
+      !(acceptedMinimum > JGS2_GLOBALIZATION_DETERMINANT_FLOOR) ||
+      !Number.isSafeInteger(validityBits) ||
+      (validityBits & requiredValidityBits) !== requiredValidityBits
+    ) {
+      throw new RangeError(
+        "The uploaded stable Neo-Hookean source pose is not feasible under " +
+          "the production GPU f32 determinant calculation; " +
+          `source J=${sourceMinimum}, candidate J=${candidateMinimum}, ` +
+          `accepted J=${acceptedMinimum}.`,
+      );
+    }
+  } finally {
+    readback.destroy();
+  }
+}
+
 function formatCompilationErrors(messages: readonly GPUCompilationMessage[]): string {
   return messages
     .filter((message) => message.type === "error")
@@ -384,6 +628,8 @@ export class JGS2GpuSolver {
   readonly cubatureK: number;
   readonly bodyCount: number;
   readonly dynamicOffsets: JGS2DynamicOffsets;
+  /** True for the stable-material production path governed by Phase 1 policy. */
+  readonly globalizationEnabled: boolean;
 
   private destroyed = false;
   private submittedIterations = 0;
@@ -392,6 +638,7 @@ export class JGS2GpuSolver {
   private oracleEvaluatorCreation?: Promise<JGS2GpuOracleEvaluator>;
   private readonly timestampTimer: GpuTimestampFrameTimer;
   private diagnosticReadbackCount = 0;
+  private globalizationRecordsAvailable = false;
 
   private constructor(
     private readonly device: GPUDevice,
@@ -404,6 +651,8 @@ export class JGS2GpuSolver {
     private readonly uniforms: JGS2UniformState,
     private readonly defaultSettings: JGS2StepSettings,
     private readonly preprocessingTimestep: number,
+    private readonly sceneScale: number,
+    globalizationEnabled: boolean,
     offsets: JGS2DynamicOffsets,
   ) {
     this.vertexCount = inputShape.vertexCount;
@@ -411,6 +660,7 @@ export class JGS2GpuSolver {
     this.cubatureK = inputShape.cubatureK;
     this.bodyCount = inputShape.bodyCount;
     this.dynamicOffsets = offsets;
+    this.globalizationEnabled = globalizationEnabled;
     this.submittedSettings = defaultSettings;
     this.timestampTimer = new GpuTimestampFrameTimer(device, "jgs2-step");
   }
@@ -428,15 +678,39 @@ export class JGS2GpuSolver {
       );
     }
 
-    const resolvedSettings = resolveJGS2StepSettings(
+    const materialMode = inferJGS2MaterialMode(input);
+    const globalizationEnabled = materialMode === "stable-neo-hookean";
+    let resolvedSettings = resolveJGS2StepSettings(
       DEFAULT_JGS2_STEP_SETTINGS,
       settings,
     );
+    if (globalizationEnabled) {
+      const minimumDeterminant =
+        minimumJGS2InputDeformationDeterminant(input);
+      if (
+        !Number.isFinite(minimumDeterminant) ||
+        !(minimumDeterminant > JGS2_GLOBALIZATION_DETERMINANT_FLOOR)
+      ) {
+        throw new RangeError(
+          "A stable Neo-Hookean production solve requires an initially " +
+            `feasible pose with minimum J greater than ` +
+            `${JGS2_GLOBALIZATION_DETERMINANT_FLOOR}; got ` +
+            `${minimumDeterminant}.`,
+        );
+      }
+      // This project-specific translation changes the assembled pose after
+      // feasibility has been certified. Stable solves therefore keep it off.
+      resolvedSettings = {
+        ...resolvedSettings,
+        horizontalBodyCorrection: false,
+      };
+    }
     const bodyCount = inferJGS2BodyCount(input.vertexInfo, input.vertexCount);
     const offsets = computeJGS2DynamicOffsets(
       input.vertexCount,
       input.tetCount,
       bodyCount,
+      globalizationEnabled,
     );
     const dynamic = packJGS2InitialDynamic(input, offsets);
     const vertices = packJGS2VertexStatic(input);
@@ -455,102 +729,106 @@ export class JGS2GpuSolver {
       assertStorageBufferFits(device, label, byteLength);
     }
 
-    const buffers: JGS2GpuBuffers = {
-      dynamic: createInitializedBuffer(
-        device,
-        "jgs2-dynamic",
-        GPUBufferUsage.STORAGE |
-          GPUBufferUsage.COPY_SRC |
-          GPUBufferUsage.COPY_DST |
-          GPUBufferUsage.VERTEX,
-        dynamic,
-      ),
-      vertices: createInitializedBuffer(
-        device,
-        "jgs2-vertices",
-        GPUBufferUsage.STORAGE,
-        vertices,
-      ),
-      tets: createInitializedBuffer(
-        device,
-        "jgs2-tetrahedra",
-        GPUBufferUsage.STORAGE,
-        tets,
-      ),
-      stiffness: createInitializedBuffer(
-        device,
-        "jgs2-rest-stiffness",
-        GPUBufferUsage.STORAGE,
-        input.tetRestStiffness,
-      ),
-      adjacency: createInitializedBuffer(
-        device,
-        "jgs2-adjacency",
-        GPUBufferUsage.STORAGE,
-        input.adjacency,
-      ),
-      cubature: createInitializedBuffer(
-        device,
-        "jgs2-cubature",
-        GPUBufferUsage.STORAGE,
-        cubature,
-      ),
-    };
-
-    const bindGroupLayout = device.createBindGroupLayout({
-      label: "jgs2-bind-group-layout",
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "storage" },
-        },
-        ...[1, 2, 3, 4, 5].map<GPUBindGroupLayoutEntry>((binding) => ({
-          binding,
-          visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "read-only-storage" },
-        })),
-        {
-          binding: 6,
-          visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "uniform", minBindingSize: JGS2_UNIFORM_BYTES },
-        },
-      ],
-    });
-    const pipelineLayout = device.createPipelineLayout({
-      label: "jgs2-pipeline-layout",
-      bindGroupLayouts: [bindGroupLayout],
-    });
-    const shader = device.createShaderModule({
-      label: "jgs2-compute-shader",
-      code: jgs2Shader,
-    });
-    const compilation = await shader.getCompilationInfo();
-    const compilationErrors = formatCompilationErrors(compilation.messages);
-    if (compilationErrors) {
-      for (const buffer of Object.values(buffers)) {
-        buffer.destroy();
-      }
-      throw new Error(`JGS2 WGSL failed to compile:\n${compilationErrors}`);
-    }
-
-    const createPipeline = (entryPoint: string, label: string) =>
-      device.createComputePipelineAsync({
-        label,
-        layout: pipelineLayout,
-        compute: { module: shader, entryPoint },
+    const storageBuffers: GPUBuffer[] = [];
+    const uniformBuffers: GPUBuffer[] = [];
+    try {
+      const buffers: JGS2GpuBuffers = {
+        dynamic: createInitializedBuffer(
+          device,
+          "jgs2-dynamic",
+          GPUBufferUsage.STORAGE |
+            GPUBufferUsage.COPY_SRC |
+            GPUBufferUsage.COPY_DST |
+            GPUBufferUsage.VERTEX,
+          dynamic,
+          storageBuffers,
+        ),
+        vertices: createInitializedBuffer(
+          device,
+          "jgs2-vertices",
+          GPUBufferUsage.STORAGE,
+          vertices,
+          storageBuffers,
+        ),
+        tets: createInitializedBuffer(
+          device,
+          "jgs2-tetrahedra",
+          GPUBufferUsage.STORAGE,
+          tets,
+          storageBuffers,
+        ),
+        stiffness: createInitializedBuffer(
+          device,
+          "jgs2-rest-stiffness",
+          GPUBufferUsage.STORAGE,
+          input.tetRestStiffness,
+          storageBuffers,
+        ),
+        adjacency: createInitializedBuffer(
+          device,
+          "jgs2-adjacency",
+          GPUBufferUsage.STORAGE,
+          input.adjacency,
+          storageBuffers,
+        ),
+        cubature: createInitializedBuffer(
+          device,
+          "jgs2-cubature",
+          GPUBufferUsage.STORAGE,
+          cubature,
+          storageBuffers,
+        ),
+      };
+      const bindGroupLayout = device.createBindGroupLayout({
+        label: "jgs2-bind-group-layout",
+        entries: [
+          {
+            binding: 0,
+            visibility: GPUShaderStage.COMPUTE,
+            buffer: { type: "storage" },
+          },
+          ...[1, 2, 3, 4, 5].map<GPUBindGroupLayoutEntry>((binding) => ({
+            binding,
+            visibility: GPUShaderStage.COMPUTE,
+            buffer: { type: "read-only-storage" },
+          })),
+          {
+            binding: 6,
+            visibility: GPUShaderStage.COMPUTE,
+            buffer: { type: "uniform", minBindingSize: JGS2_UNIFORM_BYTES },
+          },
+        ],
       });
-    const [
-      predict,
-      tetPolarRotation,
-      vertexPolarRotation,
-      solve,
-      copyPosition,
-      bodyHorizontalCorrection,
-      applyBodyHorizontalCorrection,
-      finalize,
-    ] =
-      await Promise.all([
+      const pipelineLayout = device.createPipelineLayout({
+        label: "jgs2-pipeline-layout",
+        bindGroupLayouts: [bindGroupLayout],
+      });
+      const shader = device.createShaderModule({
+        label: "jgs2-compute-shader",
+        code: jgs2Shader,
+      });
+      const compilation = await shader.getCompilationInfo();
+      const compilationErrors = formatCompilationErrors(compilation.messages);
+      if (compilationErrors) {
+        throw new Error(`JGS2 WGSL failed to compile:\n${compilationErrors}`);
+      }
+
+      const createPipeline = (entryPoint: string, label: string) =>
+        device.createComputePipelineAsync({
+          label,
+          layout: pipelineLayout,
+          compute: { module: shader, entryPoint },
+        });
+      const [
+        predict,
+        tetPolarRotation,
+        vertexPolarRotation,
+        solve,
+        copyPosition,
+        bodyHorizontalCorrection,
+        applyBodyHorizontalCorrection,
+        finalize,
+      ] = await Promise.all([
         createPipeline("predict", "jgs2-predict-pipeline"),
         createPipeline("tetPolarRotation", "jgs2-tet-polar-pipeline"),
         createPipeline("vertexPolarRotation", "jgs2-vertex-polar-pipeline"),
@@ -566,62 +844,143 @@ export class JGS2GpuSolver {
         ),
         createPipeline("finalize", "jgs2-finalize-pipeline"),
       ]);
-    const pipelines: JGS2Pipelines = {
-      predict,
-      tetPolarRotation,
-      vertexPolarRotation,
-      solve,
-      copyPosition,
-      bodyHorizontalCorrection,
-      applyBodyHorizontalCorrection,
-      finalize,
-    };
+      const globalizationPipelines = globalizationEnabled
+        ? await Promise.all([
+            createPipeline(
+              "assembledVertexEnergy",
+              "jgs2-assembled-vertex-energy-pipeline",
+            ),
+            createPipeline(
+              "candidateTetrahedron",
+              "jgs2-candidate-tetrahedron-pipeline",
+            ),
+            createPipeline(
+              "reduceCandidate",
+              "jgs2-reduce-candidate-pipeline",
+            ),
+            createPipeline(
+              "applyCandidate",
+              "jgs2-apply-candidate-pipeline",
+            ),
+            createPipeline(
+              "convergenceGradient",
+              "jgs2-convergence-gradient-pipeline",
+            ),
+            createPipeline(
+              "reduceConvergence",
+              "jgs2-reduce-convergence-pipeline",
+            ),
+          ])
+        : undefined;
+      const pipelines: JGS2Pipelines = {
+        predict,
+        tetPolarRotation,
+        vertexPolarRotation,
+        solve,
+        ...(globalizationPipelines
+          ? {
+              assembledVertexEnergy: globalizationPipelines[0],
+              candidateTetrahedron: globalizationPipelines[1],
+              reduceCandidate: globalizationPipelines[2],
+              applyCandidate: globalizationPipelines[3],
+              convergenceGradient: globalizationPipelines[4],
+              reduceConvergence: globalizationPipelines[5],
+            }
+          : {}),
+        copyPosition,
+        bodyHorizontalCorrection,
+        applyBodyHorizontalCorrection,
+        finalize,
+      };
 
-    const base = createUniformBuffer(device, "jgs2-uniform-base");
-    const fromBToA = createUniformBuffer(device, "jgs2-uniform-b-to-a");
-    const fromAToB = createUniformBuffer(device, "jgs2-uniform-a-to-b");
-    const uniforms: JGS2UniformState = {
-      base,
-      fromBToA,
-      fromAToB,
-      baseBindGroup: createBindGroup(
-        device,
-        bindGroupLayout,
-        buffers,
+      const base = createUniformBuffer(device, "jgs2-uniform-base");
+      uniformBuffers.push(base);
+      const fromBToA = createUniformBuffer(device, "jgs2-uniform-b-to-a");
+      uniformBuffers.push(fromBToA);
+      const fromAToB = createUniformBuffer(device, "jgs2-uniform-a-to-b");
+      uniformBuffers.push(fromAToB);
+      const uniforms: JGS2UniformState = {
         base,
-        "jgs2-base-bind-group",
-      ),
-      fromBToABindGroup: createBindGroup(
-        device,
-        bindGroupLayout,
-        buffers,
         fromBToA,
-        "jgs2-b-to-a-bind-group",
-      ),
-      fromAToBBindGroup: createBindGroup(
-        device,
-        bindGroupLayout,
-        buffers,
         fromAToB,
-        "jgs2-a-to-b-bind-group",
-      ),
-    };
+        baseBindGroup: createBindGroup(
+          device,
+          bindGroupLayout,
+          buffers,
+          base,
+          "jgs2-base-bind-group",
+        ),
+        fromBToABindGroup: createBindGroup(
+          device,
+          bindGroupLayout,
+          buffers,
+          fromBToA,
+          "jgs2-b-to-a-bind-group",
+        ),
+        fromAToBBindGroup: createBindGroup(
+          device,
+          bindGroupLayout,
+          buffers,
+          fromAToB,
+          "jgs2-a-to-b-bind-group",
+        ),
+      };
 
-    return new JGS2GpuSolver(
-      device,
-      {
+      const inputShape = {
         vertexCount: input.vertexCount,
         tetCount: input.tetCount,
         cubatureK: input.cubatureK,
         bodyCount,
-      },
-      buffers,
-      pipelines,
-      uniforms,
-      resolvedSettings,
-      resolvedSettings.timestep,
-      offsets,
-    );
+      };
+      const sceneScale = computeJGS2InitialDynamicSceneScale(input);
+      if (globalizationEnabled) {
+        device.queue.writeBuffer(
+          base,
+          0,
+          packUniforms(
+            inputShape,
+            offsets,
+            resolvedSettings,
+            offsets.posA,
+            offsets.posA,
+            true,
+            sceneScale,
+          ),
+        );
+        await validateGpuInitialStableSource(
+          device,
+          buffers,
+          {
+            candidateTetrahedron: pipelines.candidateTetrahedron!,
+            reduceCandidate: pipelines.reduceCandidate!,
+          },
+          uniforms,
+          offsets,
+          input.tetCount,
+        );
+      }
+
+      return new JGS2GpuSolver(
+        device,
+        inputShape,
+        buffers,
+        pipelines,
+        uniforms,
+        resolvedSettings,
+        resolvedSettings.timestep,
+        sceneScale,
+        globalizationEnabled,
+        offsets,
+      );
+    } catch (error) {
+      for (const uniform of uniformBuffers) {
+        uniform.destroy();
+      }
+      for (const buffer of storageBuffers) {
+        buffer.destroy();
+      }
+      throw error;
+    }
   }
 
   get currentPositionBuffer(): GPUBuffer {
@@ -690,7 +1049,7 @@ export class JGS2GpuSolver {
           "precomputation before changing timestep.",
       );
     }
-    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    const settings = this.resolveStepSettings(overrides);
     const iterations = normalizeOddIterationCount(settings.iterations);
     this.submitFrame(settings, iterations);
   }
@@ -698,7 +1057,9 @@ export class JGS2GpuSolver {
   /**
    * Advance several identical-settings frames in one command buffer and one
    * queue submission. At most {@link JGS2_MAX_BATCH_FRAMES} may be encoded at
-   * once; chunk longer offline/test runs at that boundary.
+   * once. Stable-material submissions must also keep frameCount * iterations
+   * within {@link JGS2_MAX_GLOBALIZED_ITERATIONS_PER_SUBMISSION}; chunk longer
+   * offline/test runs at the tighter boundary.
    */
   stepFrames(
     frameCount: number,
@@ -716,7 +1077,7 @@ export class JGS2GpuSolver {
           "precomputation before changing timestep.",
       );
     }
-    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    const settings = this.resolveStepSettings(overrides);
     const iterations = normalizeOddIterationCount(settings.iterations);
     this.submitFrames(settings, iterations, frameCount);
   }
@@ -741,13 +1102,14 @@ export class JGS2GpuSolver {
           "Regenerate the precomputation before changing timestep.",
       );
     }
-    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    const settings = this.resolveStepSettings(overrides);
     this.submitFrame(settings, iterations);
   }
 
   /**
    * Batched counterpart to stepExactIterations(). Every encoded frame retains
-   * the requested nonlinear iteration count, including even counts.
+   * the requested nonlinear iteration count, including even counts. The same
+   * per-submission work bounds as stepFrames() apply.
    */
   stepFramesExactIterations(
     frameCount: number,
@@ -767,7 +1129,7 @@ export class JGS2GpuSolver {
           "Regenerate the precomputation before changing timestep.",
       );
     }
-    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    const settings = this.resolveStepSettings(overrides);
     this.submitFrames(settings, iterations, frameCount);
   }
 
@@ -790,12 +1152,14 @@ export class JGS2GpuSolver {
           "Regenerate the precomputation before changing timestep.",
       );
     }
-    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    const settings = this.resolveStepSettings(overrides);
     const iterations = normalizeOddIterationCount(settings.iterations);
-    return this.timestampTimer.measure((encoder) => {
+    const measurement = await this.timestampTimer.measure((encoder) => {
       this.prepareFrame(settings, iterations);
       this.encodeFrame(encoder, settings, iterations);
     });
+    this.markGlobalizationRecordsAvailable();
+    return measurement;
   }
 
   /**
@@ -818,7 +1182,7 @@ export class JGS2GpuSolver {
           "Regenerate the precomputation before changing timestep.",
       );
     }
-    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    const settings = this.resolveStepSettings(overrides);
     this.submitFrameWithGpuTimestampWrites(
       settings,
       normalizeOddIterationCount(settings.iterations),
@@ -845,12 +1209,21 @@ export class JGS2GpuSolver {
           "Regenerate the precomputation before changing timestep.",
       );
     }
-    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    const settings = this.resolveStepSettings(overrides);
     this.submitFrameWithGpuTimestampWrites(settings, iterations, writes);
   }
 
   private submitFrame(settings: JGS2StepSettings, iterations: number): void {
     this.submitFrames(settings, iterations, 1);
+  }
+
+  private resolveStepSettings(
+    overrides: Partial<JGS2StepSettings>,
+  ): JGS2StepSettings {
+    const resolved = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    return this.globalizationEnabled && resolved.horizontalBodyCorrection
+      ? { ...resolved, horizontalBodyCorrection: false }
+      : resolved;
   }
 
   private submitFrameWithGpuTimestampWrites(
@@ -864,6 +1237,7 @@ export class JGS2GpuSolver {
     });
     this.encodeFrame(encoder, settings, iterations, writes);
     this.device.queue.submit([encoder.finish()]);
+    this.markGlobalizationRecordsAvailable();
   }
 
   private submitFrames(
@@ -871,6 +1245,9 @@ export class JGS2GpuSolver {
     iterations: number,
     frameCount: number,
   ): void {
+    if (this.globalizationEnabled) {
+      validateGlobalizedSubmissionWork(frameCount, iterations);
+    }
     this.prepareFrame(settings, iterations);
     const encoder = this.device.createCommandEncoder({
       label:
@@ -882,9 +1259,26 @@ export class JGS2GpuSolver {
       this.encodeFrame(encoder, settings, iterations);
     }
     this.device.queue.submit([encoder.finish()]);
+    this.markGlobalizationRecordsAvailable();
+  }
+
+  private markGlobalizationRecordsAvailable(): void {
+    if (this.globalizationEnabled) {
+      this.globalizationRecordsAvailable = true;
+    }
   }
 
   private prepareFrame(settings: JGS2StepSettings, iterations: number): void {
+    if (
+      this.globalizationEnabled &&
+      iterations > JGS2_GLOBALIZATION_HISTORY_CAPACITY
+    ) {
+      throw new RangeError(
+        `Stable JGS2 records at most ` +
+          `${JGS2_GLOBALIZATION_HISTORY_CAPACITY} nonlinear iterations per ` +
+          `frame; got ${iterations}.`,
+      );
+    }
     this.submittedIterations = iterations;
     this.submittedSettings = settings;
 
@@ -897,6 +1291,8 @@ export class JGS2GpuSolver {
         settings,
         this.dynamicOffsets.posA,
         this.dynamicOffsets.posA,
+        this.globalizationEnabled,
+        this.sceneScale,
       ),
     );
     this.device.queue.writeBuffer(
@@ -908,6 +1304,8 @@ export class JGS2GpuSolver {
         settings,
         this.dynamicOffsets.posB,
         this.dynamicOffsets.posA,
+        this.globalizationEnabled,
+        this.sceneScale,
       ),
     );
     this.device.queue.writeBuffer(
@@ -919,6 +1317,8 @@ export class JGS2GpuSolver {
         settings,
         this.dynamicOffsets.posA,
         this.dynamicOffsets.posB,
+        this.globalizationEnabled,
+        this.sceneScale,
       ),
     );
   }
@@ -942,6 +1342,28 @@ export class JGS2GpuSolver {
           }
         : undefined,
     );
+
+    if (this.globalizationEnabled) {
+      // The local shader consumes stable material only after this exact-f32
+      // all-tetrahedron source check has populated the control record. At the
+      // start of a frame posA is the accepted pose and predict copies the same
+      // bits to posB, so the base bind group intentionally evaluates posA as
+      // both source and candidate.
+      encodeDispatch(
+        encoder,
+        this.pipelines.candidateTetrahedron!,
+        this.uniforms.baseBindGroup,
+        this.tetCount,
+        "jgs2-source-feasibility-preflight-pass",
+      );
+      encodeDispatch(
+        encoder,
+        this.pipelines.reduceCandidate!,
+        this.uniforms.baseBindGroup,
+        1,
+        "jgs2-source-feasibility-preflight-reduction-pass",
+      );
+    }
 
     for (let iteration = 0; iteration < iterations; iteration += 1) {
       const bindGroup =
@@ -969,6 +1391,43 @@ export class JGS2GpuSolver {
         this.vertexCount,
         `jgs2-solve-pass-${iteration}`,
       );
+      if (this.globalizationEnabled) {
+        encodeDispatch(
+          encoder,
+          this.pipelines.candidateTetrahedron!,
+          bindGroup,
+          this.tetCount,
+          `jgs2-candidate-tetrahedron-pass-${iteration}`,
+        );
+        encodeDispatch(
+          encoder,
+          this.pipelines.reduceCandidate!,
+          bindGroup,
+          1,
+          `jgs2-reduce-candidate-pass-${iteration}`,
+        );
+        encodeDispatch(
+          encoder,
+          this.pipelines.applyCandidate!,
+          bindGroup,
+          this.vertexCount,
+          `jgs2-apply-candidate-pass-${iteration}`,
+        );
+        encodeDispatch(
+          encoder,
+          this.pipelines.convergenceGradient!,
+          bindGroup,
+          this.vertexCount,
+          `jgs2-convergence-gradient-pass-${iteration}`,
+        );
+        encodeDispatch(
+          encoder,
+          this.pipelines.reduceConvergence!,
+          bindGroup,
+          1,
+          `jgs2-reduce-convergence-pass-${iteration}`,
+        );
+      }
     }
 
     if (iterations % 2 === 0) {
@@ -1061,6 +1520,319 @@ export class JGS2GpuSolver {
   }
 
   /**
+   * Explicit test/inspection readback of the final local records and the
+   * GPU-resident per-iteration history. Production stepping never calls it.
+   */
+  async readGlobalizationDiagnostics(): Promise<JGS2GlobalizationDiagnostics> {
+    this.assertUsable();
+    if (!this.globalizationEnabled) {
+      throw new Error(
+        "Globalization diagnostics are available only for stable " +
+          "Neo-Hookean production solves.",
+      );
+    }
+    if (!this.globalizationRecordsAvailable) {
+      throw new Error(
+        "Globalization diagnostics are unavailable until a stable nonlinear " +
+          "iteration or diagnostic test kernel has produced records.",
+      );
+    }
+    const first = this.dynamicOffsets.localGlobalization;
+    const packed = await this.readVec4Region(
+      first * 16,
+      (this.dynamicOffsets.vec4Count - first) * 16,
+      "jgs2-globalization-readback",
+    );
+    const local: JGS2GlobalizationLocalDiagnostic[] = [];
+    const localFloats = JGS2_GLOBALIZATION_LOCAL_DIAGNOSTIC_VEC4S * 4;
+    for (let vertex = 0; vertex < this.vertexCount; vertex += 1) {
+      const base = vertex * localFloats;
+      local.push(
+        decodeJGS2GlobalizationLocalDiagnostic(
+          packed.subarray(base, base + localFloats),
+        ),
+      );
+    }
+    const controlFloatOffset =
+      (this.dynamicOffsets.globalizationControl - first) * 4;
+    const rawHistoryCount = packed[controlFloatOffset + 7]!;
+    if (
+      !Number.isSafeInteger(rawHistoryCount) ||
+      rawHistoryCount < 0 ||
+      rawHistoryCount > JGS2_GLOBALIZATION_HISTORY_CAPACITY
+    ) {
+      throw new Error(
+        `GPU returned invalid globalization history count ` +
+          `${rawHistoryCount}.`,
+      );
+    }
+    const history: JGS2GlobalizationHistoryRecord[] = [];
+    const historyFloats = JGS2_GLOBALIZATION_HISTORY_VEC4S * 4;
+    const historyFloatOffset =
+      (this.dynamicOffsets.globalizationHistory - first) * 4;
+    for (let index = 0; index < rawHistoryCount; index += 1) {
+      const base = historyFloatOffset + index * historyFloats;
+      history.push(
+        decodeJGS2GlobalizationHistoryRecord(
+          packed.subarray(base, base + historyFloats),
+        ),
+      );
+    }
+    return { local, history, historyCount: rawHistoryCount };
+  }
+
+  /**
+   * Test-only entry point for the production assembled determinant/revert and
+   * convergence kernels. It deliberately shares the real pipelines rather
+   * than duplicating their policy in a diagnostic shader.
+   */
+  async evaluateAssembledCandidateForTest(
+    sourcePositions: Float32Array,
+    candidatePositions: Float32Array,
+    overrides: Partial<JGS2StepSettings> = {},
+  ): Promise<JGS2AssembledCandidateTestResult> {
+    this.assertUsable();
+    if (!this.globalizationEnabled) {
+      throw new Error("Assembled candidate tests require stable globalization.");
+    }
+    const expectedFloats = this.vertexCount * 4;
+    if (
+      sourcePositions.length !== expectedFloats ||
+      candidatePositions.length !== expectedFloats
+    ) {
+      throw new RangeError(
+        `Assembled candidate poses must each contain ${expectedFloats} floats.`,
+      );
+    }
+    for (const [label, values] of [
+      ["source", sourcePositions],
+      ["candidate", candidatePositions],
+    ] as const) {
+      for (const value of values) {
+        if (!Number.isFinite(value)) {
+          throw new RangeError(`${label} candidate pose must be finite.`);
+        }
+      }
+    }
+    const settings = this.resolveStepSettings(overrides);
+    this.prepareFrame(settings, 1);
+    this.device.queue.writeBuffer(
+      this.buffers.dynamic,
+      this.dynamicOffsets.posB * 16,
+      sourcePositions,
+    );
+    this.device.queue.writeBuffer(
+      this.buffers.dynamic,
+      this.dynamicOffsets.posA * 16,
+      candidatePositions,
+    );
+    this.device.queue.writeBuffer(
+      this.buffers.dynamic,
+      this.dynamicOffsets.predicted * 16,
+      sourcePositions,
+    );
+    const local = new Float32Array(
+      this.vertexCount * JGS2_GLOBALIZATION_LOCAL_DIAGNOSTIC_VEC4S * 4,
+    );
+    for (let vertex = 0; vertex < this.vertexCount; vertex += 1) {
+      local[
+        vertex * JGS2_GLOBALIZATION_LOCAL_DIAGNOSTIC_VEC4S * 4 + 15
+      ] = 0;
+    }
+    this.device.queue.writeBuffer(
+      this.buffers.dynamic,
+      this.dynamicOffsets.localGlobalization * 16,
+      local,
+    );
+    this.device.queue.writeBuffer(
+      this.buffers.dynamic,
+      this.dynamicOffsets.globalizationControl * 16,
+      new Float32Array(16),
+    );
+
+    const encoder = this.device.createCommandEncoder({
+      label: "jgs2-test-assembled-candidate-command-encoder",
+    });
+    const bindGroup = this.uniforms.fromBToABindGroup;
+    encodeDispatch(
+      encoder,
+      this.pipelines.assembledVertexEnergy!,
+      bindGroup,
+      this.vertexCount,
+      "jgs2-test-assembled-vertex-energy-pass",
+    );
+    encodeDispatch(
+      encoder,
+      this.pipelines.candidateTetrahedron!,
+      bindGroup,
+      this.tetCount,
+      "jgs2-test-candidate-tetrahedron-pass",
+    );
+    encodeDispatch(
+      encoder,
+      this.pipelines.reduceCandidate!,
+      bindGroup,
+      1,
+      "jgs2-test-reduce-candidate-pass",
+    );
+    encodeDispatch(
+      encoder,
+      this.pipelines.applyCandidate!,
+      bindGroup,
+      this.vertexCount,
+      "jgs2-test-apply-candidate-pass",
+    );
+    encodeDispatch(
+      encoder,
+      this.pipelines.convergenceGradient!,
+      bindGroup,
+      this.vertexCount,
+      "jgs2-test-convergence-gradient-pass",
+    );
+    encodeDispatch(
+      encoder,
+      this.pipelines.reduceConvergence!,
+      bindGroup,
+      1,
+      "jgs2-test-reduce-convergence-pass",
+    );
+    this.device.queue.submit([encoder.finish()]);
+    this.markGlobalizationRecordsAvailable();
+    const positions = await this.readPositions();
+    const globalization = await this.readGlobalizationDiagnostics();
+    return { positions, globalization };
+  }
+
+  /** Test-only wrapper around the exact production convergence reduction. */
+  async evaluateConvergenceReductionForTest(
+    input: JGS2ConvergenceReductionTestInput,
+    overrides: Partial<JGS2StepSettings> = {},
+  ): Promise<JGS2GlobalizationHistoryRecord> {
+    this.assertUsable();
+    if (!this.globalizationEnabled) {
+      throw new Error("Convergence reduction tests require stable globalization.");
+    }
+    if (input.gradientComponents.length !== 5) {
+      throw new RangeError("Convergence reduction requires five gradient components.");
+    }
+    const reductionVertexCount = input.reductionVertexCount ?? this.vertexCount;
+    if (
+      !Number.isSafeInteger(reductionVertexCount) ||
+      reductionVertexCount < 1 ||
+      reductionVertexCount > this.vertexCount
+    ) {
+      throw new RangeError(
+        `Convergence reduction vertex count must be between 1 and ` +
+          `${this.vertexCount}; got ${reductionVertexCount}.`,
+      );
+    }
+    const xyzCount = this.vertexCount * 3;
+    if (
+      input.gradientComponents.some((component) => component.length !== xyzCount) ||
+      input.acceptedUpdates.length !== xyzCount
+    ) {
+      throw new RangeError(
+        `Convergence gradient and update arrays must contain ${xyzCount} floats.`,
+      );
+    }
+    if (
+      typeof input.assembledAccepted !== "boolean" ||
+      typeof input.assembledReverted !== "boolean" ||
+      !Number.isSafeInteger(input.localFailureCount) ||
+      input.localFailureCount < 0
+    ) {
+      throw new RangeError("Invalid assembled convergence test controls.");
+    }
+    const packedComponents = new Float32Array(this.vertexCount * 5 * 4);
+    for (let vertex = 0; vertex < this.vertexCount; vertex += 1) {
+      for (let component = 0; component < 5; component += 1) {
+        const source = input.gradientComponents[component]!;
+        const destination = (vertex * 5 + component) * 4;
+        for (let coordinate = 0; coordinate < 3; coordinate += 1) {
+          const value = source[vertex * 3 + coordinate]!;
+          if (!Number.isFinite(value)) {
+            throw new RangeError("Convergence test gradients must be finite.");
+          }
+          packedComponents[destination + coordinate] = value;
+        }
+      }
+    }
+    const packedUpdates = new Float32Array(this.vertexCount * 4);
+    for (let vertex = 0; vertex < this.vertexCount; vertex += 1) {
+      const x = input.acceptedUpdates[vertex * 3]!;
+      const y = input.acceptedUpdates[vertex * 3 + 1]!;
+      const z = input.acceptedUpdates[vertex * 3 + 2]!;
+      if (![x, y, z].every(Number.isFinite)) {
+        throw new RangeError("Convergence test updates must be finite.");
+      }
+      packedUpdates[vertex * 4] = Math.hypot(x, y, z);
+      packedUpdates[vertex * 4 + 3] = 1;
+    }
+    const control = new Float32Array(16);
+    control.set([1, 1, 1, JGS2_GLOBALIZATION_VALIDITY_BITS_MASK], 0);
+    control.set(
+      [
+        Number(input.assembledAccepted),
+        Number(input.assembledReverted),
+        input.localFailureCount,
+        0,
+      ],
+      4,
+    );
+    control.set([0, 0, 0, 1], 8);
+    const settings = this.resolveStepSettings(overrides);
+    this.prepareFrame(settings, 1);
+    if (reductionVertexCount !== this.vertexCount) {
+      this.device.queue.writeBuffer(
+        this.uniforms.base,
+        0,
+        packUniforms(
+          { ...this.inputShape, vertexCount: reductionVertexCount },
+          this.dynamicOffsets,
+          settings,
+          this.dynamicOffsets.posA,
+          this.dynamicOffsets.posA,
+          true,
+          this.sceneScale,
+        ),
+      );
+    }
+    this.device.queue.writeBuffer(
+      this.buffers.dynamic,
+      this.dynamicOffsets.convergenceGradient * 16,
+      packedComponents,
+    );
+    this.device.queue.writeBuffer(
+      this.buffers.dynamic,
+      this.dynamicOffsets.finalUpdate * 16,
+      packedUpdates,
+    );
+    this.device.queue.writeBuffer(
+      this.buffers.dynamic,
+      this.dynamicOffsets.globalizationControl * 16,
+      control,
+    );
+    const encoder = this.device.createCommandEncoder({
+      label: "jgs2-test-convergence-reduction-command-encoder",
+    });
+    encodeDispatch(
+      encoder,
+      this.pipelines.reduceConvergence!,
+      this.uniforms.baseBindGroup,
+      1,
+      "jgs2-test-convergence-reduction-pass",
+    );
+    this.device.queue.submit([encoder.finish()]);
+    this.markGlobalizationRecordsAvailable();
+    const diagnostics = await this.readGlobalizationDiagnostics();
+    const record = diagnostics.history[0];
+    if (!record) {
+      throw new Error("GPU convergence reduction did not write history slot zero.");
+    }
+    return record;
+  }
+
+  /**
    * Explicit test-only readback of the three padded columns of every
    * vertex-local polar frame. Production rendering/stepping never calls this.
    */
@@ -1148,30 +1920,30 @@ export class JGS2GpuSolver {
     label: string,
   ): Promise<Float32Array> {
     this.diagnosticReadbackCount += 1;
-    const readback = this.device.createBuffer({
-      label,
-      size: byteLength,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    const encoder = this.device.createCommandEncoder({
-      label: `${label}-encoder`,
-    });
-    encoder.copyBufferToBuffer(
-      this.buffers.dynamic,
-      sourceOffset,
-      readback,
-      0,
-      byteLength,
-    );
-    this.device.queue.submit([encoder.finish()]);
-
+    let readback: GPUBuffer | undefined;
     try {
+      readback = this.device.createBuffer({
+        label,
+        size: byteLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      const encoder = this.device.createCommandEncoder({
+        label: `${label}-encoder`,
+      });
+      encoder.copyBufferToBuffer(
+        this.buffers.dynamic,
+        sourceOffset,
+        readback,
+        0,
+        byteLength,
+      );
+      this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const result = new Float32Array(readback.getMappedRange()).slice();
       readback.unmap();
       return result;
     } finally {
-      readback.destroy();
+      readback?.destroy();
     }
   }
 

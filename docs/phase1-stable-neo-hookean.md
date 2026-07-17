@@ -4,8 +4,11 @@ This record freezes the Phase 1 material, feasibility, local-solve, convergence,
 performance, and CPU/GPU/WASM decisions. The exact CPU and WGSL material path,
 material dispatch, deformation frames, and nonlinear Cubature preprocessing
 are implemented. A Float64 CPU material-and-inertia globalization reference is
-also implemented; composite force/target terms and production WebGPU
-globalization remain implementation contracts.
+also implemented, and its stable-material shift, restricted Armijo search,
+assembled feasibility/revert, and convergence-history policy now run in
+production WebGPU. Composite force/target terms, GPU-driven early termination,
+public stable scenes, and performance qualification remain implementation
+contracts.
 
 ## Primary sources
 
@@ -93,13 +96,19 @@ Production simulation has a stricter feasibility contract:
   is used for acceptance;
 - an assembled Jacobi iteration that violates the floor is reverted in full to
   its feasible source pose;
+- pinned rest targets participate in that assembled candidate and gate; stable
+  finalization preserves the accepted candidate or byte-identical reverted
+  source and never reapplies a rejected target afterward;
 - world-space update clamping is not an inversion policy;
 - accepted dynamic checkpoints must report `min J >= J_min`.
 
 CPU geometry-only trial checks and whole-pose assembled Jacobi reversion are
-the reference form of this guard. They use finite validity diagnostics and
-revert the complete pose, not individual vertices. The GPU line search and
-iteration-revert path remain Phase 1 runtime work.
+the reference form of this guard. The GPU performs an all-tetrahedron source
+preflight before material evaluation, applies the same ordering to every local
+trial, and rechecks the assembled candidate. Both paths use explicit finite
+validity diagnostics and revert the complete pose, not individual vertices.
+This immutable hard rest constraint is distinct from the still-pending
+quadratic, scripted, and pointer-driven target objective.
 
 ## Vertex deformation frames
 
@@ -182,8 +191,8 @@ meshes need the later sparse-preprocessing work.
 
 The Stable Neo-Hookean tangent can legitimately be indefinite away from rest;
 "stable" does not mean convex. The exact oracle remains unmodified. For an
-assembled symmetric 3-by-3 local solve matrix `H`, the CPU reference uses one
-uniform diagonal shift and the production GPU path must use the same policy:
+assembled symmetric 3-by-3 local solve matrix `H`, the CPU reference and stable
+production GPU path use one uniform diagonal shift:
 
 ```text
 s   = max(max_i abs(H_ii), frobenius(H) / sqrt(3), m_i / h^2)
@@ -193,7 +202,7 @@ rho = tau / s
 H_solve = H + tau I.
 ```
 
-The maximum permitted normalized shift is `rho <= 1e-3`. The GPU must expose
+The maximum permitted normalized shift is `rho <= 1e-3`. The GPU exposes
 `rho`, the unshifted minimum eigenvalue, and `gradient dot direction`.
 Nonzero-gradient directions must be descending. A local system requiring a
 larger shift is rejected and investigated; the cap may not be silently raised.
@@ -217,13 +226,15 @@ maximum backtracks = 12
 accept iff L(alpha p) <= L(0) + c1 alpha gradient_dot_p
 ```
 
-The current CPU reference scalar implements the inertia and stable-material
-terms only. It records initial energy, accepted energy, Armijo bound, accepted
-alpha, `gradient dot p`, determinant feasibility, and normalized shift. Its
-assembled Jacobi energy is a separate diagnostic and is not used to accept an
-individual parallel local step. If no positive alpha passes, the local update
-is zero and the failure is reported. External-force and quadratic-target terms
-and all production GPU wiring remain pending, so this reference does not close
+The CPU reference implements inertia and stable-material terms. The production
+GPU scalar adds the existing analytic floor penalty and records accepted energy
+delta, Armijo bound, accepted alpha, `gradient dot p`, determinant feasibility,
+and normalized shift. It evaluates the effective rounded `f32` update that will
+actually be stored; storage no-ops are numerical zero, not accepted steps.
+Assembled Jacobi energy remains a separate diagnostic and is not used to accept
+an individual parallel local step. If no positive alpha passes, the local
+update is zero and the failure is reported. External-force and quadratic-target
+terms remain pending, so the current partial objective does not close
 P1-EC-07.
 
 ## Convergence normalization
@@ -250,8 +261,10 @@ iteration.
 
 The CPU helper implements this normalization with overflow-safe finite
 diagnostics, matching xyz dimensions, whole-pose feasibility, and an explicit
-revert gate. No tiny nonlinear convergence history, GPU reduction, or runtime
-early-termination path is implemented yet.
+revert gate. The GPU records the same five component slots and up to 64
+iteration records without production readback. External-force and target slots
+are currently valid zeros. Tiny nonlinear/public-scene convergence histories
+and GPU-driven runtime early termination are not implemented yet.
 
 ## Phase 1 performance gate
 
@@ -270,11 +283,12 @@ must still demonstrate a 20,000-30,000-tetrahedron non-contact solid at
 - CPU Float64: exact material/implicit/local oracles, deterministic training,
   validation, small-scene preprocessing, artifact construction, and the
   material-and-inertia globalization reference.
-- WebGPU production target: every per-frame deformation gradient, material
-  evaluation, Cubature projection, local solve, line search, convergence
-  reduction, state update, and rendering operation. The existing runtime has
-  the first four through the unglobalized local solve; line search,
-  convergence reduction, and assembled revert remain pending.
+- WebGPU production: every per-frame deformation gradient, material evaluation,
+  Cubature projection, stable local solve and line search, source/assembled
+  feasibility check, component-aware convergence reduction, state update, and
+  rendering operation. Creation performs one synchronized exact-`f32` source
+  feasibility readback; normal stepping performs no diagnostic readback. The
+  current flags are recorded rather than used for GPU-driven early exit.
 - WASM: not used in Phase 1. It would add a memory boundary without improving
   the GPU-resident hot loop. Reconsider only for large arbitrary in-browser
   sparse preprocessing; fixed larger scenes should load offline artifacts.

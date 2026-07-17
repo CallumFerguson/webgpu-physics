@@ -7,9 +7,11 @@ Jacobi subproblem, and the paper's precomputed perturbation bases and Cubature
 projection. The runtime can evaluate either the original co-rotated linear
 regression material or the paper's stable Neo-Hookean energy and exact current
 tangent. The stable path now trains and validates nonlinear current-pose
-Cubature. A CPU material-and-inertia globalization reference now exists;
-composite force/target terms and the production WebGPU globalization path
-remain Phase 1 work.
+Cubature. Its production WebGPU path now implements the CPU
+material-and-inertia reference's scale-aware solve shift, restricted Armijo
+search, assembled feasibility/revert, and convergence history. Composite
+force/target terms, early termination, public stable scenes, and Phase 1
+performance qualification remain Phase 1 work.
 
 ## Algorithm mapping
 
@@ -75,7 +77,8 @@ against a dense CPU oracle on tiny systems.
 | Location | Work | Reason |
 | --- | --- | --- |
 | CPU, once per scene | Procedural mesh construction, rest tetrahedral data, lumped masses, dense rest-Hessian Cholesky, equilibrium bases, nonlinear pose generation, Cubature training, and buffer packing | These tasks are irregular, use double precision, and are amortized over the scene. This mirrors the paper's CPU preprocessing. |
-| GPU, every frame | Implicit prediction, polar frames, co-rotated linear or stable Neo-Hookean current gradients and tangent products, Cubature projection, regularized `3 x 3` vertex solves, per-body horizontal COM correction, floor contact and tangential damping, velocity update, and surface rendering | These are uniform data-parallel kernels. State stays GPU-resident, with no per-frame position readback. |
+| GPU plus one CPU synchronization, once per stable solver | Evaluate every uploaded tetrahedron with production `f32` determinant arithmetic and read back the reduced minimum/validity mask | This closes the host-versus-GPU arithmetic gap before any stable material solve. It is a creation-time safety gate, not a frame-loop diagnostic. |
+| GPU, every frame | Implicit prediction, polar frames, co-rotated linear or stable Neo-Hookean current gradients and tangent products, Cubature projection, legacy regularized solves or stable shifted/Armijo solves, source and assembled determinant gates (including pinned rest targets), convergence reduction, per-body horizontal COM correction where permitted, floor contact and tangential damping, velocity update, and surface rendering | These are uniform data-parallel kernels. State stays GPU-resident, with no per-frame position readback. Stable finalization retains the assembled gate's accepted candidate or reverted source instead of reapplying a rejected pinned target. |
 | CPU, tests only | Requested checkpoint readback and invariant calculation | A deliberate synchronization is useful for correctness but would distort real-time performance. |
 
 WebAssembly is intentionally absent. It cannot improve the GPU-resident frame
@@ -97,10 +100,18 @@ threads. Fixed demo assets would be better precomputed offline.
   seven fixed `f32` polar iterations followed by explicit orthonormalization
   and a degenerate-matrix fallback. This construction is affine-exact at both
   interior and boundary vertices and is shared with the Float64 CPU oracle.
-- Local matrices are symmetrized and solved by shifted Cholesky. A scale-aware
-  diagonal shift and maximum update length keep malformed `f32` systems finite.
+- Stable local matrices are symmetrized, spectrally shifted with the frozen
+  normalized cap, and solved by unclamped normalized Cholesky. Their effective
+  stored `f32` updates pass geometry-first Armijo checks. The legacy regression
+  material retains its historical regularized solve and optional maximum
+  update length.
 - Vertex subproblems gather incident elements through CSR. This avoids relying
-  on floating-point atomics, which are not part of core WebGPU.
+  on floating-point atomics, which are not part of core WebGPU. Input packing
+  validates an exact canonical CSR incidence list so missing, duplicate, or
+  unrelated tetrahedra cannot silently change the local objective.
+- Candidate and convergence reductions use one 128-lane workgroup with fixed
+  strided ownership and deterministic binary trees. Their combined 9,216-byte
+  scratch requirement stays below WebGPU's portable 16 KiB limit.
 - A free body's solved mass-weighted x/z center is translated to its predicted
   center before velocity finalization. This projects out net translation
   injected by finite independent local solves while preserving legitimate
@@ -125,13 +136,17 @@ stable Neo-Hookean energy, stress, and exact current tangent on both CPU and
 GPU, plus CPU/GPU checks over a frozen 64-pose material corpus. Its nonlinear
 current-pose Cubature preprocessing, held-out local-update oracle, and
 two-iteration production GPU parity path are also complete. The CPU reference
-now additionally covers solve-only shifting, geometry-before-energy Armijo
-trials, whole-pose feasibility/revert, and convergence normalization for its
-material-and-inertia scalar. External-force and quadratic-target terms, WebGPU
-globalization and reductions, and runtime convergence history remain pending.
-The four public scenes continue to use the legacy co-rotated-linear material
-until explicit labels, production local line search, convergence diagnostics,
-and Phase 1 scenes meet their roadmap gates.
+and stable WebGPU runtime now share solve-only shifting,
+geometry-before-energy Armijo trials, whole-pose feasibility/revert, and
+component-aware convergence normalization for the material-and-inertia
+objective; the GPU also includes the analytic floor term. External-force and
+quadratic-target terms and GPU-driven early termination remain pending. The
+existing immutable pinned rest constraint is an assembled-gated hard proposal,
+not a populated quadratic-target component or a moving kinematic-target API.
+The
+four public scenes continue to use the legacy co-rotated-linear material until
+explicit labels, stable scenes, force/target controls, screenshots, and the
+Phase 1 performance gate are complete.
 Contact is an implicit quadratic ground penalty with
 simple grounded viscous damping.
 Full incremental potential contact would additionally require broad-phase

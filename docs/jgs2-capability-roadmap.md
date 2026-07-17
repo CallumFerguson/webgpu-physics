@@ -296,11 +296,11 @@ nonlinear energy gradient and Hessian.
 | Reviewer | TBD |
 | Start date | 2026-07-16 |
 | Completion date | TBD |
-| Branch or PR | main; Phase 0 gate ce478e6; Phase 1 material/runtime gate c0f5456; CPU globalization reference milestone (this commit) |
-| Design records | docs/phase1-stable-neo-hookean.md; docs/jgs2-implementation.md; docs/evidence/phase1-nonlinear-cubature.md; docs/evidence/phase1-globalization-reference.md; manifests/phase1-scenes.v1.json; manifests/phase1-cubature.v1.json; manifests/phase1-globalization.v1.json |
+| Branch or PR | main; Phase 0 gate ce478e6; Phase 1 material/runtime gate c0f5456; CPU globalization reference 988b4bc; GPU globalization milestone (this commit) |
+| Design records | docs/phase1-stable-neo-hookean.md; docs/jgs2-implementation.md; docs/evidence/phase1-nonlinear-cubature.md; docs/evidence/phase1-globalization-reference.md; docs/evidence/phase1-gpu-globalization.md; manifests/phase1-scenes.v1.json; manifests/phase1-cubature.v1.json; manifests/phase1-globalization.v1.json; manifests/phase1-globalization.v2.json |
 | Primary test command | Routine: npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e. Qualification: npm.cmd run test:e2e:full |
 | Performance result | TBD |
-| Known limitations | CPU/WGSL material derivatives, exact diagnostics, material dispatch, affine-exact frames, nonlinear current-pose Cubature, packed-f32 quality gates, and production update parity are implemented. A Float64 CPU material-and-inertia reference now covers scale-aware solve-only shifting, geometry-before-energy Armijo trials, whole-pose Jacobi feasibility/revert, and component-aware convergence-metric evaluation. Its restricted scalar does not yet include external-force or quadratic-target terms and none of this globalization path is wired into production WebGPU. GPU convergence/history, public stable scenes and labels, forces/handles, and performance evidence remain. Dense TypeScript preprocessing is intentionally limited to small fixtures. |
+| Known limitations | CPU/WGSL material derivatives, exact diagnostics, material dispatch, affine-exact frames, nonlinear current-pose Cubature, packed-f32 quality gates, and production update parity are implemented. The Float64 and stable WebGPU material/inertia paths now cover scale-aware solve-only shifting, effective-f32 geometry-before-energy Armijo trials, all-tetrahedron source/assembled feasibility with whole-pose revert, and component-aware GPU convergence histories. External-force and quadratic-target terms, GPU-driven early exit, public stable scenes/labels, forces/handles, tiny/public runtime convergence evidence, and Phase 1 performance qualification remain. Dense TypeScript preprocessing is intentionally limited to small fixtures. |
 | Exit sign-off | TBD |
 
 ### Required implementation
@@ -317,18 +317,22 @@ nonlinear energy gradient and Hessian.
 - [x] Retrain the equilibrium bases and Cubature data for the nonlinear model.
 - [ ] Add arbitrary per-vertex external forces.
 - [ ] Add scripted and pointer-driven kinematic targets with clean release.
-- [ ] Add GPU-side convergence flags based on residual and update norms.
-- [ ] Add monotone local line-search infrastructure for nonlinear updates.
-- [ ] Document positive-definite projection or regularization for each local
-      Hessian and expose its applied shift as a diagnostic.
+- [x] Add GPU-side convergence flags based on residual and update norms.
+- [x] Add monotone local line-search infrastructure for nonlinear updates.
+- [x] Document positive-definite projection or regularization for each local
+       Hessian and expose its applied shift as a diagnostic.
 - [ ] Preserve co-rotated linear elasticity only as an explicitly labeled
       regression or debugging material in public scene metadata.
 
-CPU material-and-inertia reference implementations for the solve-only shift,
-restricted line search, assembled feasibility, and convergence metric are
-recorded in `docs/evidence/phase1-globalization-reference.md`. The boxes above
-and P1-EC-05 through P1-EC-10 remain open until the composite objective and
-production WebGPU path are complete.
+CPU reference and partial production-WebGPU implementations for the solve-only
+shift, restricted line search, assembled feasibility, and convergence metric
+are recorded in `docs/evidence/phase1-globalization-reference.md` and
+`docs/evidence/phase1-gpu-globalization.md`. P1-EC-05 is now closed by the
+positive-determinant material corpus plus GPU-exact source, local-trial, and
+assembled-candidate rejection/revert tests, including a post-gate pinned-target
+regression. P1-EC-06 through P1-EC-10 remain
+open until force/target terms, tiny/public histories, dynamic checkpoints, and
+the complete composite objective have their required evidence.
 
 ### Required scenes
 
@@ -347,7 +351,7 @@ production WebGPU path are complete.
       tolerances.
 - [x] P1-EC-04: GPU Neo-Hookean energy, gradients, and Hessian blocks match CPU with
       relative error <= 1e-3.
-- [ ] P1-EC-05: Tests at deformation determinants 0.5, 0.1, and 0.01 remain finite;
+- [x] P1-EC-05: Tests at deformation determinants 0.5, 0.1, and 0.01 remain finite;
       non-positive determinants are rejected or made infeasible before
       material evaluation according to the documented inversion policy.
 - [ ] P1-EC-06: Every dynamic checkpoint in the canonical Phase 1 manifest has
@@ -386,7 +390,8 @@ production WebGPU path are complete.
 | Neo-Hookean derivative report | CPU 60-pose corpus: worst gradient 8.975e-10; worst Hessian 1.957e-11; exact tangent symmetry and rest-stiffness parity pass | [x] |
 | Objectivity and rest-state report | CPU density, stress, tangent action, translated tetrahedron, internal force/torque, and translational null-mode tests pass; f32-exact GPU quarter turns have rest and rigid energy/force errors 0/0 under the roadmap default zero-reference metric | [x] |
 | CPU-versus-GPU report | Frozen 64-pose material-only hardware corpus: worst relative energy 2.234e-6, gradient 1.161e-6, local Hessian 1.089e-6; total implicit parity also <=1e-3; scaled non-affine vertex-frame error 8.702e-8 | [x] |
-| Convergence history | CPU normalization and protocol unit tests added; tiny-reference and runtime GPU convergence histories TBD | [ ] |
+| Convergence history | CPU normalization plus GPU material/inertia/contact component reduction and 64-record ABI pass; tiny-reference, public runtime, early-exit, force, and target evidence TBD | [ ] |
+| GPU globalization report | docs/evidence/phase1-gpu-globalization.md; stable production shift/Armijo/assembled-revert/component-reduction hardware cases | [x] |
 | Cubature residual report | 12-tet full-rank parity fixture, K=6: packed residual maximum 0.548989%; packed selected-vs-independent-dense update RMS training 3.713075e-5, held-out 3.984377e-5, combined 3.796498e-5; two-iteration production GPU parity 2.113e-9 | [x] |
 | Scene screenshots and diagnostics | TBD | [ ] |
 | Performance report | TBD | [ ] |
@@ -1037,6 +1042,8 @@ later passing run so the history remains visible.
 | P0-GATE-03 | 2026-07-16 | 0-1 | Production live-performance HUD milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e | i7-13700K / RTX 5090 / Chrome 150 | Pass: 159 unit, build, frozen 26/159 unit and 7/18 E2E selectors, 18/18 hardware E2E in 252466.729 ms with zero retries/skips/errors; desktop/mobile live HUD, deterministic isolation, tab-resume epoch reset, strict timestamp samples; isolated stress 269.8 FPS average, 198.0 FPS 1% low, wall mean/p95 3.706/4.500 ms, CPU 0.132 ms/frame, GPU frame span 1.434 ms; necessary compute assessment passed | docs/reproducibility.md; docs/evidence/phase0-performance-baseline.md; tests/e2e/jgs2.spec.ts | Complete exact-current-code regression; three independent UI/GPU/gate audits; unused E2E HMR disabled after one reproduced local resource-pressure flake |
 | P1-GLOB-REF-01 | 2026-07-16 | 1 | Phase 1 CPU globalization reference milestone | .\node_modules\.bin\vitest.cmd run src/simulation/cpu/nonlinear-globalization.test.ts src/simulation/cpu/nonlinear-restricted-energy.test.ts src/simulation/cpu/nonlinear-iteration.test.ts src/reproducibility/phase1-globalization-manifest.test.ts --disableConsoleIntercept --reporter=verbose | i7-13700K | Foundation only: 29/29 focused tests; all 240 canonical packed material/inertia systems descend and accept with max shifted residual 3.801004e-16 and minimum accepted J 0.864768; scale/cap/backtrack failure, non-finite determinant propagation, whole-pose revert, energy diagnostics, overflow-safe convergence, zero ABI slots, and frozen objective isolation pass; P1-EC-05 through P1-EC-10 remain open | docs/evidence/phase1-globalization-reference.md; manifests/phase1-globalization.v1.json | Automated partial CPU reference; independent scope/correctness/diff audits; force/target and GPU production pending |
 | P1-GATE-04 | 2026-07-16 | 1 | Phase 1 CPU globalization reference milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e | i7-13700K / RTX 5090 / Chrome 150 | Pass: 189 unit, build, frozen 26/189 unit and 7/18 E2E selectors, 18/18 hardware E2E in 46802.453 ms with zero retries/skips/errors; no Phase 1 exit or formal performance claim | docs/reproducibility.md; docs/evidence/phase1-globalization-reference.md | Complete exact-current-tree routine regression; independent code/evidence audits; full qualification intentionally deferred to roadmap exit |
+| P1-EC-05 | 2026-07-17 | 1 | Phase 1 GPU globalization milestone | npm.cmd run test:e2e -- tests/e2e/stable-neo-hookean-gpu-oracle.spec.ts tests/e2e/nonlinear-globalization-gpu.spec.ts | i7-13700K / RTX 5090 / Chrome 150 | Pass: GPU material remains finite at J=0.5, 0.1, and 0.01; a host-pass/GPU-f32-fail source is rejected at initialization; infeasible local trials skip energy; negative and nonfinite assembled candidates revert byte-exactly while preserving a valid source minimum; a pinned target with candidate J=-1 cannot bypass the gate during finalization | docs/evidence/phase1-gpu-globalization.md; manifests/phase1-globalization.v2.json | Automated material/source/local/assembled inversion policy evidence; fresh independent review |
+| P1-GATE-05 | 2026-07-17 | 1 | Phase 1 GPU globalization milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e; npm.cmd run test:e2e:full | i7-13700K / RTX 5090 / Chrome 150 | Pass: 248 unit, build, frozen 26/248 unit and 7/24 E2E selectors; routine 24/24 in 50.6 s and qualification 24/24 in 4.0 min with zero skips/retries; full Cubature 24 unique poses/240 locals, max update error 9.992e-7; no Phase 1 exit claim | docs/reproducibility.md; docs/evidence/phase1-gpu-globalization.md | Complete exact-current-tree routine and qualification regression; fresh independent code/evidence/invariant review |
 
 ## Decision log
 
@@ -1047,10 +1054,11 @@ and accepted limitations.
 | --- | --- | --- | --- | --- | --- | --- |
 | P0-D01 | 2026-07-16 | 0-1 | Split hardware E2E into an under-one-minute fast tier and a full qualification tier; use one-step breadth plus one-second sentinels for the quick 32-state corpus, in-place combined 0/12 smoke telemetry for screenshot tests, a combined 30/120 pass for the quick isolated baseline, and retain canonical 32-by-1,200 plus fresh 120/600 profiles in the full tier | The prior exhaustive corpus and repeated fresh scene profiles dominated feedback time. The selected quick workloads preserve GPU-path breadth, sentinel depth, per-scene observability, and settled-state timing while the full command preserves exhaustive and statistically meaningful evidence | Quick combined CPU timings include timestamp instrumentation when supported and short-sample tails are smoke-only; release, roadmap-exit, exhaustive-corpus, and formal performance evidence must use `test:e2e:full`; canonical manifests and historical evidence remain unchanged | Codex implementation agent; user-directed runtime target; independent review completed |
 | P1-D01 | 2026-07-16 | 1 | Cap solve-only normalized local diagonal shift at 1e-3; target f32 eigenvalue floor is 256 times unit roundoff | Keeps the exact material oracle unmodified and turns excessive regularization into a visible failure; nonlinear corpus must leave fourfold headroom or trigger projection/Cubature diagnosis | GPU local solve must expose raw minimum eigenvalue, shift, normalized ratio, and descent; threshold changes require a new decision | Codex implementation agent; reviewer pending |
-| P1-D02 | 2026-07-16 | 1 | Preserve raw stable Neo-Hookean behavior for all finite J, but require accepted runtime poses to satisfy J>1e-4 and revert an infeasible assembled Jacobi iteration | Matches the source material's collapse/inversion robustness while enforcing the roadmap's positive dynamic checkpoint policy | Line search and feasibility reductions must reject before acceptance; world-space clamping cannot substitute | Codex implementation agent; reviewer pending |
+| P1-D02 | 2026-07-16 | 1 | Preserve raw stable Neo-Hookean behavior for all finite J, but require accepted runtime poses to satisfy J>1e-4 and revert an infeasible assembled Jacobi iteration | Matches the source material's collapse/inversion robustness while enforcing the roadmap's positive dynamic checkpoint policy | Line search and feasibility reductions must reject before acceptance; pinned targets are part of the assembled candidate and cannot be reapplied after rejection; world-space clamping cannot substitute | Codex implementation agent; reviewer pending |
 | P1-D03 | 2026-07-16 | 1 | Use a 4,800-tetrahedron non-contact solid at p95<=16.7 ms as the Phase 1 development gate; retain the final 20,000-30,000-tet Phase 7 target | Current dense browser preprocessing is intentionally a tiny-system oracle; the smaller gate validates the nonlinear hot loop without weakening final capability parity | Phase 1 manifest must freeze the exact interval; Phase 7 still requires scalable offline artifacts and the larger target | Codex implementation agent; reviewer pending |
 | P1-D04 | 2026-07-16 | 1 | Keep Phase 1 Float64 oracle/preprocessing on CPU JavaScript and per-frame work on WebGPU; do not add WASM | WASM does not improve the GPU-resident loop and large in-browser sparse preprocessing is outside this phase | Reconsider only for arbitrary large user meshes; fixed large scenes should load offline artifacts | Codex implementation agent; reviewer pending |
 | P1-D05 | 2026-07-16 | 1 | Define the current P1-EC-11 parity set as the versioned nonlinear Cubature fixture, require T>K and both Float64/f32 candidate rank >K, and fail stable preprocessing closed above 1% | The material-only single-tet oracle is not a sparse-Cubature fixture, while the 12-tet edge-constrained fixture has rank 12 and nonzero K=6 approximation error; future stable parity scenes cannot silently inherit this result | Every future stable parity scene must be added to the Cubature manifest or carry its own equivalent gate; unsuitable automatic preprocessing throws instead of shipping low-quality weights | Codex implementation agent; independent architecture and gate audits |
+| P1-D06 | 2026-07-17 | 1 | Apply immutable pinned rest targets inside the stable assembled-feasibility candidate and never snap them again during finalization | A post-gate snap could invert canonical storage after diagnostics had certified a reverted feasible source; the hardware regression starts at J=+1 and rejects a pinned target at J=-1 | Rejected targets leave the byte-identical source in canonical storage; future moving or quadratic targets require their own gated or line-searched objective path | Codex implementation agent; independent invariant and evidence audits |
 
 ## Blocker log
 
