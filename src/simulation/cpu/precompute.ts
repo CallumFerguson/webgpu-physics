@@ -12,12 +12,126 @@ import type {
   PrecomputeOptions,
   RestLinearSystem,
   SceneDefinition,
+  SurfaceTopology,
   TetrahedralMesh,
   VertexPrecomputation,
 } from "./types";
 
 const CUBATURE_TRAINING_MODE_COUNT = 8;
 const CUBATURE_INVERSE_ITERATIONS = 24;
+
+function triangleArea(
+  positions: Float64Array,
+  i0: number,
+  i1: number,
+  i2: number,
+): number {
+  const a = i0 * 3;
+  const b = i1 * 3;
+  const c = i2 * 3;
+  const abx = positions[b]! - positions[a]!;
+  const aby = positions[b + 1]! - positions[a + 1]!;
+  const abz = positions[b + 2]! - positions[a + 2]!;
+  const acx = positions[c]! - positions[a]!;
+  const acy = positions[c + 1]! - positions[a + 1]!;
+  const acz = positions[c + 2]! - positions[a + 2]!;
+  const cx = aby * acz - abz * acy;
+  const cy = abz * acx - abx * acz;
+  const cz = abx * acy - aby * acx;
+  return 0.5 * Math.hypot(cx, cy, cz);
+}
+
+function validateAndAddClothMasses(
+  definition: SceneDefinition,
+  masses: Float64Array,
+): void {
+  const cloth = definition.cloth;
+  if (!cloth) return;
+  const vertexCount = getVertexCount(definition.mesh);
+  if (cloth.triangles.length === 0 || cloth.triangles.length % 3 !== 0) {
+    throw new RangeError("Cloth triangles must contain one or more index triples.");
+  }
+  for (const [name, value] of [
+    ["density", cloth.density],
+    ["youngModulus", cloth.youngModulus],
+    ["thickness", cloth.thickness],
+  ] as const) {
+    if (!(value > 0) || !Number.isFinite(value)) {
+      throw new RangeError(`Cloth ${name} must be finite and positive.`);
+    }
+  }
+  if (
+    !Number.isFinite(cloth.poissonRatio) ||
+    cloth.poissonRatio < 0 ||
+    cloth.poissonRatio >= 0.5
+  ) {
+    throw new RangeError("Cloth poissonRatio must be in [0, 0.5).");
+  }
+  if (
+    !Number.isFinite(cloth.bendingStiffness) ||
+    cloth.bendingStiffness < 0
+  ) {
+    throw new RangeError("Cloth bendingStiffness must be finite and nonnegative.");
+  }
+  const triangleCount = cloth.triangles.length / 3;
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const indices = [
+      cloth.triangles[triangle * 3]!,
+      cloth.triangles[triangle * 3 + 1]!,
+      cloth.triangles[triangle * 3 + 2]!,
+    ] as const;
+    if (
+      new Set(indices).size !== 3 ||
+      indices.some((vertex) => vertex >= vertexCount)
+    ) {
+      throw new RangeError(`Cloth triangle ${triangle} has invalid vertex indices.`);
+    }
+    const area = triangleArea(definition.mesh.positions, ...indices);
+    if (!(area > 1e-12) || !Number.isFinite(area)) {
+      throw new RangeError(`Cloth triangle ${triangle} must be nondegenerate.`);
+    }
+    const vertexMass = (cloth.density * cloth.thickness * area) / 3;
+    for (const vertex of indices) masses[vertex] += vertexMass;
+  }
+}
+
+function surfaceWithCloth(
+  tetrahedronSurface: SurfaceTopology,
+  definition: SceneDefinition,
+): SurfaceTopology {
+  const cloth = definition.cloth;
+  if (!cloth) return tetrahedronSurface;
+  const triangles = new Uint32Array(
+    tetrahedronSurface.triangles.length + cloth.triangles.length,
+  );
+  triangles.set(tetrahedronSurface.triangles);
+  triangles.set(cloth.triangles, tetrahedronSurface.triangles.length);
+  const edgeKeys = new Set<string>();
+  const edgeValues: number[] = [];
+  const addEdge = (first: number, second: number): void => {
+    const low = Math.min(first, second);
+    const high = Math.max(first, second);
+    const key = `${low}:${high}`;
+    if (edgeKeys.has(key)) return;
+    edgeKeys.add(key);
+    edgeValues.push(low, high);
+  };
+  for (let edge = 0; edge < tetrahedronSurface.edges.length; edge += 2) {
+    addEdge(
+      tetrahedronSurface.edges[edge]!,
+      tetrahedronSurface.edges[edge + 1]!,
+    );
+  }
+  for (let triangle = 0; triangle < cloth.triangles.length; triangle += 3) {
+    const i0 = cloth.triangles[triangle]!;
+    const i1 = cloth.triangles[triangle + 1]!;
+    const i2 = cloth.triangles[triangle + 2]!;
+    addEdge(i0, i1);
+    addEdge(i1, i2);
+    addEdge(i2, i0);
+  }
+  return { triangles, edges: Uint32Array.from(edgeValues) };
+}
 
 interface ExactBasisResult {
   readonly basis: Float64Array;
@@ -110,7 +224,10 @@ export function buildPrecomputedScene(
   definition: SceneDefinition,
   options: PrecomputeOptions = {},
 ): PrecomputedScene {
-  const surface = extractBoundarySurface(definition.mesh);
+  const surface = surfaceWithCloth(
+    extractBoundarySurface(definition.mesh),
+    definition,
+  );
   const restTetraData = computeRestTetraData(
     definition.mesh,
     definition.materials,
@@ -120,6 +237,7 @@ export function buildPrecomputedScene(
     definition.materials,
     restTetraData,
   );
+  validateAndAddClothMasses(definition, lumpedMasses);
   const restSystem = assembleRestLinearSystem(
     definition.mesh,
     restTetraData,
@@ -148,7 +266,16 @@ export function buildPrecomputedScene(
         CUBATURE_TRAINING_MODE_COUNT,
         CUBATURE_INVERSE_ITERATIONS,
       );
-  const nonlinearCorpus = stableNeoHookean
+  const incidentTetrahedronCounts = new Uint32Array(
+    getVertexCount(definition.mesh),
+  );
+  for (const vertex of definition.mesh.tetrahedra) {
+    incidentTetrahedronCounts[vertex] += 1;
+  }
+  const hasActiveTetrahedronVertex = [...restSystem.activeVertices].some(
+    (vertex) => incidentTetrahedronCounts[vertex]! > 0,
+  );
+  const nonlinearCorpus = stableNeoHookean && hasActiveTetrahedronVertex
     ? buildNonlinearCubaturePoseCorpus({
         mesh: definition.mesh,
         restData: restTetraData,
@@ -161,6 +288,24 @@ export function buildPrecomputedScene(
 
   for (const vertex of restSystem.activeVertices) {
     const exact = computeExactVertexBasis(definition.mesh, restSystem, vertex);
+    if (stableNeoHookean && incidentTetrahedronCounts[vertex] === 0) {
+      vertexPrecomputations.push({
+        vertex,
+        ...(options.retainExactBases ? { exactBasis: exact.basis } : {}),
+        schurInverse: exact.schurInverse,
+        cubature: [],
+        cubatureModel: "stable-neo-hookean",
+        trainingResidualF64: 0,
+        trainingResidual: 0,
+        validTrainingPoseCount: 0,
+        trivialTrainingPoseCount: 0,
+        nonzeroTrainingCandidateCount: 0,
+        trainingColumnRank: 0,
+        packedNonzeroTrainingCandidateCount: 0,
+        packedTrainingColumnRank: 0,
+      });
+      continue;
+    }
     if (nonlinearCorpus) {
       const cubature = selectStableNeoHookeanCubatureSamples(
         {

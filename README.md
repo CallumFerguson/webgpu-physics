@@ -24,6 +24,8 @@ Current scene URLs are:
 - `/?scene=minimal`
 - `/?scene=stiffness`
 - `/?scene=drop`
+- `/?scene=contact`
+- `/?scene=cloth`
 - `/?scene=stress`
 
 ## Useful commands
@@ -43,16 +45,18 @@ the old exhaustive tier and is not part of normal roadmap work.
 The repository already includes implicit tetrahedral elastodynamics, the
 paper's full-coordinate JGS2 basis, co-rotated subspaces, nonnegative Cubature,
 co-rotated linear and stable Neo-Hookean materials, nonlinear GPU local solves,
-globalization, external force/target objectives, deterministic frame stepping,
-screenshots, and CPU/GPU performance metrics.
+globalization, external force/target objectives, topology-filtered VT/EE IPC
+contact, lagged friction, StVK triangle cloth with quadratic-dihedral bending,
+deterministic frame stepping, screenshots, and CPU/GPU performance metrics.
 
 Per-frame simulation and rendering stay on the GPU. Small, one-time scene
 precomputation remains in TypeScript on the CPU. WebAssembly is intentionally
 not used because it would not improve the GPU-resident hot loop for these fixed
 small scenes.
 
-Mesh IPC contact, friction, cloth, and colored Gauss-Seidel remain to be added.
-The current floor is a penalty plane, not full IPC contact.
+Colored Gauss-Seidel scheduling remains to be added. The contact and cloth
+demos use the mesh IPC path; the analytic penalty plane remains only for the
+small non-IPC comparison scenes.
 
 See the [implementation roadmap](docs/ROADMAP.md) for the remaining work,
 strict timeboxes, acceptance criteria, and minimal-testing rules.

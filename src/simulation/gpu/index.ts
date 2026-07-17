@@ -83,3 +83,18 @@ export {
   jgs2GlobalizationWgsl,
 } from "./jgs2-globalization-wgsl";
 export { stableNeoHookeanWgsl } from "./stable-neo-hookean-wgsl";
+export {
+  JGS2_CLOTH_GLOBAL_BYTES,
+  JGS2_CLOTH_GLOBAL_VEC4S,
+  JGS2_CLOTH_GLOBAL_WORDS,
+  JGS2_CLOTH_HINGE_BYTES,
+  JGS2_CLOTH_HINGE_VEC4S,
+  JGS2_CLOTH_HINGE_WORDS,
+  JGS2_CLOTH_TRIANGLE_BYTES,
+  JGS2_CLOTH_TRIANGLE_VEC4S,
+  JGS2_CLOTH_TRIANGLE_WORDS,
+  packJGS2GpuClothArena,
+  validateJGS2GpuClothInput,
+  type JGS2GpuClothInput,
+  type PackedJGS2GpuClothArena,
+} from "./cloth-layout";

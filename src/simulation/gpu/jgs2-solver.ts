@@ -45,6 +45,7 @@ import {
   type GpuTimestampMeasurement,
 } from "./gpu-timestamp";
 import { packIpcContactBuffer } from "./ipc-contact-layout";
+import { packJGS2GpuClothArena } from "./cloth-layout";
 import { JGS2_WORKGROUP_SIZE, jgs2Shader } from "./jgs2-shader";
 import { minimumStaticIpcContactDistance } from "../cpu/ipc-contact";
 
@@ -702,7 +703,7 @@ async function validateGpuInitialStableSource(
   >,
   uniforms: JGS2UniformState,
   offsets: JGS2DynamicOffsets,
-  tetCount: number,
+  globalizationElementCount: number,
 ): Promise<void> {
   const readback = device.createBuffer({
     label: "jgs2-initial-stable-source-readback",
@@ -717,8 +718,8 @@ async function validateGpuInitialStableSource(
       encoder,
       pipelines.candidateTetrahedron,
       uniforms.baseBindGroup,
-      tetCount,
-      "jgs2-initial-stable-source-tetrahedron-pass",
+      globalizationElementCount,
+      "jgs2-initial-stable-source-element-pass",
     );
     encodeDispatch(
       encoder,
@@ -784,6 +785,8 @@ export class JGS2GpuSolver {
   readonly cubatureK: number;
   readonly bodyCount: number;
   readonly contactCandidateCount: number;
+  readonly clothTriangleCount: number;
+  readonly globalizationElementCount: number;
   readonly dynamicOffsets: JGS2DynamicOffsets;
   /** True for the stable-material production path governed by Phase 1 policy. */
   readonly globalizationEnabled: boolean;
@@ -817,6 +820,7 @@ export class JGS2GpuSolver {
     private readonly pinnedVertices: Uint8Array,
     initialObjectiveActivity: PackedObjectiveActivity,
     contactCandidateCount: number,
+    clothTriangleCount: number,
     globalizationEnabled: boolean,
     offsets: JGS2DynamicOffsets,
   ) {
@@ -825,6 +829,8 @@ export class JGS2GpuSolver {
     this.cubatureK = inputShape.cubatureK;
     this.bodyCount = inputShape.bodyCount;
     this.contactCandidateCount = contactCandidateCount;
+    this.clothTriangleCount = clothTriangleCount;
+    this.globalizationElementCount = this.tetCount + clothTriangleCount;
     this.dynamicOffsets = offsets;
     this.globalizationEnabled = globalizationEnabled;
     this.objectiveFlagsValue = initialObjectiveActivity.flags;
@@ -852,6 +858,15 @@ export class JGS2GpuSolver {
 
     const materialMode = inferJGS2MaterialMode(input);
     const globalizationEnabled = materialMode === "stable-neo-hookean";
+    const clothTriangleCount = input.cloth
+      ? input.cloth.triangleIndices.length / 3
+      : 0;
+    const globalizationElementCount = input.tetCount + clothTriangleCount;
+    if (clothTriangleCount > 0 && !globalizationEnabled) {
+      throw new RangeError(
+        "Triangle cloth requires the stable Neo-Hookean production path.",
+      );
+    }
     const packedContacts = packIpcContactBuffer(
       input.contactCandidates ?? EMPTY_IPC_CONTACT_CANDIDATES,
     );
@@ -931,6 +946,7 @@ export class JGS2GpuSolver {
       bodyCount,
       globalizationEnabled,
       packedContacts.byteLength / 16,
+      globalizationElementCount,
     );
     const dynamic = packJGS2InitialDynamic(input, offsets);
     new Uint32Array(dynamic.buffer).set(
@@ -948,7 +964,15 @@ export class JGS2GpuSolver {
     );
     const vertices = packJGS2VertexStatic(input);
     const tets = packJGS2TetStatic(input);
-    const cubature = packJGS2Cubature(input);
+    const cubaturePrefix = packJGS2Cubature(input);
+    const packedCloth = input.cloth
+      ? packJGS2GpuClothArena(input.cloth)
+      : undefined;
+    const cubature = new Uint32Array(
+      cubaturePrefix.length + (packedCloth?.integers.length ?? 0),
+    );
+    cubature.set(cubaturePrefix);
+    if (packedCloth) cubature.set(packedCloth.integers, cubaturePrefix.length);
 
     const storageSizes: ReadonlyArray<readonly [string, number]> = [
       ["JGS2 dynamic buffer", dynamic.byteLength],
@@ -1230,7 +1254,7 @@ export class JGS2GpuSolver {
           },
           uniforms,
           offsets,
-          input.tetCount,
+          globalizationElementCount,
         );
       }
 
@@ -1247,6 +1271,7 @@ export class JGS2GpuSolver {
         pinnedVertices,
         initialObjectiveActivity,
         packedContacts.candidateCount,
+        clothTriangleCount,
         globalizationEnabled,
         offsets,
       );
@@ -1910,7 +1935,7 @@ export class JGS2GpuSolver {
         encoder,
         this.pipelines.candidateTetrahedron!,
         this.uniforms.baseBindGroup,
-        this.tetCount,
+        this.globalizationElementCount,
         "jgs2-source-feasibility-preflight-pass",
       );
       encodeDispatch(
@@ -2008,7 +2033,7 @@ export class JGS2GpuSolver {
           encoder,
           this.pipelines.candidateTetrahedron!,
           bindGroup,
-          this.tetCount,
+          this.globalizationElementCount,
           `jgs2-candidate-tetrahedron-pass-${iteration}`,
         );
         encodeDispatch(
@@ -2278,7 +2303,7 @@ export class JGS2GpuSolver {
       encoder,
       this.pipelines.candidateTetrahedron!,
       bindGroup,
-      this.tetCount,
+      this.globalizationElementCount,
       "jgs2-test-candidate-tetrahedron-pass",
     );
     encodeDispatch(

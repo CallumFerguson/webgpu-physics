@@ -1,5 +1,10 @@
 import { JGS2_CUBATURE_RECORD_WORDS } from "./layout";
 import {
+  JGS2_CLOTH_GLOBAL_WORDS,
+  JGS2_CLOTH_HINGE_WORDS,
+  JGS2_CLOTH_TRIANGLE_WORDS,
+} from "./cloth-layout";
+import {
   IPC_CONTACT_CANDIDATE_VEC4S,
   IPC_CONTACT_GLOBAL_VEC4S,
   IPC_CONTACT_TYPE_EDGE_EDGE,
@@ -21,6 +26,9 @@ export const JGS2_WORKGROUP_SIZE = 128;
 export const jgs2Shader = /* wgsl */ `
 const WORKGROUP_SIZE: u32 = ${JGS2_WORKGROUP_SIZE}u;
 const CUBATURE_RECORD_WORDS: u32 = ${JGS2_CUBATURE_RECORD_WORDS}u;
+const CLOTH_GLOBAL_WORDS: u32 = ${JGS2_CLOTH_GLOBAL_WORDS}u;
+const CLOTH_TRIANGLE_WORDS: u32 = ${JGS2_CLOTH_TRIANGLE_WORDS}u;
+const CLOTH_HINGE_WORDS: u32 = ${JGS2_CLOTH_HINGE_WORDS}u;
 const EMPTY_TET: u32 = 0xffffffffu;
 const LOCAL_GLOBALIZATION_STRIDE: u32 = 4u;
 const TET_GLOBALIZATION_STRIDE: u32 = 2u;
@@ -858,6 +866,465 @@ fn outerProductColumns(left: vec3f, right: vec3f) -> mat3x3f {
   );
 }
 
+// The cloth arena is an optional, read-only tail after the frozen cubature
+// records in binding 5. Legacy scenes end exactly at clothArenaBase(), so all
+// accessors first prove that the two global vec4s are present.
+struct ClothMembraneEvaluation {
+  energy: f32,
+  deformation0: vec3f,
+  deformation1: vec3f,
+  stress: vec3f,
+  gradients: array<vec3f, 3>,
+}
+
+struct ClothDihedralEvaluation {
+  angle: f32,
+  edgeLength: f32,
+  valid: u32,
+  gradients: array<vec3f, 4>,
+}
+
+fn clothArenaBase() -> u32 {
+  return params.counts.x * params.counts.z * CUBATURE_RECORD_WORDS;
+}
+
+fn clothTailAvailable() -> bool {
+  let base = clothArenaBase();
+  let wordCount = arrayLength(&cubatureWords);
+  return base <= wordCount && wordCount - base >= CLOTH_GLOBAL_WORDS;
+}
+
+fn clothTriangleCount() -> u32 {
+  if (!clothTailAvailable()) { return 0u; }
+  let base = clothArenaBase();
+  let available = arrayLength(&cubatureWords) - base - CLOTH_GLOBAL_WORDS;
+  return min(cubatureWords[base], available / CLOTH_TRIANGLE_WORDS);
+}
+
+fn clothHingeCount() -> u32 {
+  if (!clothTailAvailable()) { return 0u; }
+  let base = clothArenaBase();
+  let triangleWords = clothTriangleCount() * CLOTH_TRIANGLE_WORDS;
+  let available = arrayLength(&cubatureWords) - base -
+    CLOTH_GLOBAL_WORDS - triangleWords;
+  return min(cubatureWords[base + 1u], available / CLOTH_HINGE_WORDS);
+}
+
+fn clothMaterial() -> vec4f {
+  if (!clothTailAvailable()) { return vec4f(0.0); }
+  let base = clothArenaBase() + 4u;
+  return vec4f(
+    cubatureFloat(base),
+    cubatureFloat(base + 1u),
+    cubatureFloat(base + 2u),
+    cubatureFloat(base + 3u),
+  );
+}
+
+fn clothTriangleBase(triangle: u32) -> u32 {
+  return clothArenaBase() + CLOTH_GLOBAL_WORDS +
+    triangle * CLOTH_TRIANGLE_WORDS;
+}
+
+fn clothTriangleIndices(triangle: u32) -> vec3u {
+  let base = clothTriangleBase(triangle);
+  return vec3u(
+    cubatureWords[base],
+    cubatureWords[base + 1u],
+    cubatureWords[base + 2u],
+  );
+}
+
+fn clothTriangleIndicesValid(indices: vec3u) -> bool {
+  return indices.x < params.counts.x && indices.y < params.counts.x &&
+    indices.z < params.counts.x && indices.x != indices.y &&
+    indices.x != indices.z && indices.y != indices.z;
+}
+
+fn clothTriangleInverseRestBasis(triangle: u32) -> vec4f {
+  let base = clothTriangleBase(triangle) + 4u;
+  return vec4f(
+    cubatureFloat(base),
+    cubatureFloat(base + 1u),
+    cubatureFloat(base + 2u),
+    cubatureFloat(base + 3u),
+  );
+}
+
+fn clothTriangleRestArea(triangle: u32) -> f32 {
+  return cubatureFloat(clothTriangleBase(triangle) + 8u);
+}
+
+fn clothHingeBase(hinge: u32) -> u32 {
+  return clothArenaBase() + CLOTH_GLOBAL_WORDS +
+    clothTriangleCount() * CLOTH_TRIANGLE_WORDS +
+    hinge * CLOTH_HINGE_WORDS;
+}
+
+fn clothHingeIndices(hinge: u32) -> vec4u {
+  let base = clothHingeBase(hinge);
+  return vec4u(
+    cubatureWords[base],
+    cubatureWords[base + 1u],
+    cubatureWords[base + 2u],
+    cubatureWords[base + 3u],
+  );
+}
+
+fn clothHingeIndicesValid(indices: vec4u) -> bool {
+  return indices.x < params.counts.x && indices.y < params.counts.x &&
+    indices.z < params.counts.x && indices.w < params.counts.x &&
+    indices.x != indices.y && indices.x != indices.z &&
+    indices.x != indices.w && indices.y != indices.z &&
+    indices.y != indices.w && indices.z != indices.w;
+}
+
+fn clothHingeRest(hinge: u32) -> vec2f {
+  let base = clothHingeBase(hinge) + 4u;
+  return vec2f(cubatureFloat(base), cubatureFloat(base + 1u));
+}
+
+fn clothTriangleLocalSlot(indices: vec3u, vertex: u32) -> u32 {
+  if (indices.x == vertex) { return 0u; }
+  if (indices.y == vertex) { return 1u; }
+  if (indices.z == vertex) { return 2u; }
+  return 3u;
+}
+
+fn clothHingeLocalSlot(indices: vec4u, vertex: u32) -> u32 {
+  if (indices.x == vertex) { return 0u; }
+  if (indices.y == vertex) { return 1u; }
+  if (indices.z == vertex) { return 2u; }
+  if (indices.w == vertex) { return 3u; }
+  return 4u;
+}
+
+fn clothPositionAt(
+  positionOffset: u32,
+  vertex: u32,
+  overrideVertex: u32,
+  overridePosition: vec3f,
+) -> vec3f {
+  return select(
+    loadPosition(positionOffset, vertex),
+    overridePosition,
+    vertex == overrideVertex,
+  );
+}
+
+fn clothTriangleShapeGradient(
+  inverseRestBasis: vec4f,
+  localVertex: u32,
+) -> vec2f {
+  if (localVertex == 1u) {
+    return inverseRestBasis.xy;
+  }
+  if (localVertex == 2u) {
+    return inverseRestBasis.zw;
+  }
+  return -inverseRestBasis.xy - inverseRestBasis.zw;
+}
+
+fn clothMembraneEvaluationAt(
+  triangle: u32,
+  positionOffset: u32,
+  overrideVertex: u32,
+  overridePosition: vec3f,
+) -> ClothMembraneEvaluation {
+  let indices = clothTriangleIndices(triangle);
+  let x0 = clothPositionAt(
+    positionOffset,
+    indices.x,
+    overrideVertex,
+    overridePosition,
+  );
+  let edge01 = clothPositionAt(
+    positionOffset,
+    indices.y,
+    overrideVertex,
+    overridePosition,
+  ) - x0;
+  let edge02 = clothPositionAt(
+    positionOffset,
+    indices.z,
+    overrideVertex,
+    overridePosition,
+  ) - x0;
+  let inverse = clothTriangleInverseRestBasis(triangle);
+  let deformation0 = edge01 * inverse.x + edge02 * inverse.z;
+  let deformation1 = edge01 * inverse.y + edge02 * inverse.w;
+  let e00 = 0.5 * (dot(deformation0, deformation0) - 1.0);
+  let e01 = 0.5 * dot(deformation0, deformation1);
+  let e11 = 0.5 * (dot(deformation1, deformation1) - 1.0);
+  let trace = e00 + e11;
+  let material = clothMaterial();
+  let stress = vec3f(
+    2.0 * material.y * e00 + material.x * trace,
+    2.0 * material.y * e01,
+    2.0 * material.y * e11 + material.x * trace,
+  );
+  let firstPiola0 = deformation0 * stress.x + deformation1 * stress.y;
+  let firstPiola1 = deformation0 * stress.y + deformation1 * stress.z;
+  let areaWeight = clothTriangleRestArea(triangle) * material.z;
+  var gradients: array<vec3f, 3>;
+  for (var local = 0u; local < 3u; local += 1u) {
+    let shapeGradient = clothTriangleShapeGradient(inverse, local);
+    gradients[local] = areaWeight * (
+      firstPiola0 * shapeGradient.x + firstPiola1 * shapeGradient.y
+    );
+  }
+  let density = material.y * (
+    e00 * e00 + 2.0 * e01 * e01 + e11 * e11
+  ) + 0.5 * material.x * trace * trace;
+  return ClothMembraneEvaluation(
+    areaWeight * density,
+    deformation0,
+    deformation1,
+    stress,
+    gradients,
+  );
+}
+
+// Exact 3 by 3 diagonal block d g_i / d x_i. Each column differentiates
+// F by e_k q_i^T, then applies dP = dF S + F dS.
+fn clothMembraneLocalHessian(
+  triangle: u32,
+  localVertex: u32,
+  positionOffset: u32,
+) -> mat3x3f {
+  let evaluation = clothMembraneEvaluationAt(
+    triangle,
+    positionOffset,
+    0xffffffffu,
+    vec3f(0.0),
+  );
+  let inverse = clothTriangleInverseRestBasis(triangle);
+  let shapeGradient = clothTriangleShapeGradient(inverse, localVertex);
+  let material = clothMaterial();
+  let areaWeight = clothTriangleRestArea(triangle) * material.z;
+  var columns: array<vec3f, 3>;
+  for (var coordinate = 0u; coordinate < 3u; coordinate += 1u) {
+    var axis = vec3f(0.0);
+    axis[coordinate] = 1.0;
+    let differentialF0 = axis * shapeGradient.x;
+    let differentialF1 = axis * shapeGradient.y;
+    let differentialE00 = shapeGradient.x * evaluation.deformation0[coordinate];
+    let differentialE01 = 0.5 * (
+      shapeGradient.x * evaluation.deformation1[coordinate] +
+      shapeGradient.y * evaluation.deformation0[coordinate]
+    );
+    let differentialE11 = shapeGradient.y * evaluation.deformation1[coordinate];
+    let differentialTrace = differentialE00 + differentialE11;
+    let differentialStress = vec3f(
+      2.0 * material.y * differentialE00 + material.x * differentialTrace,
+      2.0 * material.y * differentialE01,
+      2.0 * material.y * differentialE11 + material.x * differentialTrace,
+    );
+    let differentialP0 =
+      differentialF0 * evaluation.stress.x +
+      differentialF1 * evaluation.stress.y +
+      evaluation.deformation0 * differentialStress.x +
+      evaluation.deformation1 * differentialStress.y;
+    let differentialP1 =
+      differentialF0 * evaluation.stress.y +
+      differentialF1 * evaluation.stress.z +
+      evaluation.deformation0 * differentialStress.y +
+      evaluation.deformation1 * differentialStress.z;
+    columns[coordinate] = areaWeight * (
+      differentialP0 * shapeGradient.x +
+      differentialP1 * shapeGradient.y
+    );
+  }
+  let result = mat3x3f(columns[0], columns[1], columns[2]);
+  return 0.5 * (result + transpose(result));
+}
+
+fn clothTriangleRawNormalAt(
+  triangle: u32,
+  positionOffset: u32,
+  overrideVertex: u32,
+  overridePosition: vec3f,
+) -> vec3f {
+  let indices = clothTriangleIndices(triangle);
+  let x0 = clothPositionAt(
+    positionOffset,
+    indices.x,
+    overrideVertex,
+    overridePosition,
+  );
+  let x1 = clothPositionAt(
+    positionOffset,
+    indices.y,
+    overrideVertex,
+    overridePosition,
+  );
+  let x2 = clothPositionAt(
+    positionOffset,
+    indices.z,
+    overrideVertex,
+    overridePosition,
+  );
+  return cross(x1 - x0, x2 - x0);
+}
+
+fn clothNormalizedDifferential(
+  unitValue: vec3f,
+  valueLength: f32,
+  differential: vec3f,
+) -> vec3f {
+  return (
+    differential - unitValue * dot(unitValue, differential)
+  ) / valueLength;
+}
+
+// Analytic differential of atan2(t dot (n0 cross n1), n0 dot n1) for the
+// oriented hinge triangles (0,1,2) and (1,0,3).
+fn clothDihedralEvaluationAt(
+  hinge: u32,
+  positionOffset: u32,
+  overrideVertex: u32,
+  overridePosition: vec3f,
+) -> ClothDihedralEvaluation {
+  let indices = clothHingeIndices(hinge);
+  var positions: array<vec3f, 4>;
+  positions[0] = clothPositionAt(positionOffset, indices.x, overrideVertex, overridePosition);
+  positions[1] = clothPositionAt(positionOffset, indices.y, overrideVertex, overridePosition);
+  positions[2] = clothPositionAt(positionOffset, indices.z, overrideVertex, overridePosition);
+  positions[3] = clothPositionAt(positionOffset, indices.w, overrideVertex, overridePosition);
+  var zeroGradients: array<vec3f, 4>;
+  for (var local = 0u; local < 4u; local += 1u) {
+    zeroGradients[local] = vec3f(0.0);
+  }
+  let edge = positions[1] - positions[0];
+  let edgeLength = length(edge);
+  let to2 = positions[2] - positions[0];
+  let reverseEdge = -edge;
+  let to3 = positions[3] - positions[1];
+  let rawNormal0 = cross(edge, to2);
+  let rawNormal1 = cross(reverseEdge, to3);
+  let normalLength0 = length(rawNormal0);
+  let normalLength1 = length(rawNormal1);
+  let edgeScale0 = max(edgeLength, max(length(to2), length(to2 - edge)));
+  let edgeScale1 = max(edgeLength, max(length(to3), length(to3 - reverseEdge)));
+  let geometryValid =
+    jgs2_globalization_finite_scalar(edgeLength) && edgeLength > 0.0 &&
+    jgs2_globalization_finite_scalar(normalLength0) &&
+    jgs2_globalization_finite_scalar(normalLength1) &&
+    normalLength0 > 1.0e-12 * edgeScale0 * edgeScale0 &&
+    normalLength1 > 1.0e-12 * edgeScale1 * edgeScale1;
+  if (!geometryValid) {
+    return ClothDihedralEvaluation(0.0, 0.0, 0u, zeroGradients);
+  }
+  let tangent = edge / edgeLength;
+  let normal0 = rawNormal0 / normalLength0;
+  let normal1 = rawNormal1 / normalLength1;
+  let normalCross = cross(normal0, normal1);
+  let sine = dot(tangent, normalCross);
+  let cosine = dot(normal0, normal1);
+  let denominator = sine * sine + cosine * cosine;
+  if (
+    !jgs2_globalization_finite_scalar(denominator) ||
+    !(denominator > 0.0)
+  ) {
+    return ClothDihedralEvaluation(0.0, 0.0, 0u, zeroGradients);
+  }
+  var gradients: array<vec3f, 4>;
+  for (var coordinate = 0u; coordinate < 12u; coordinate += 1u) {
+    let differentiatedVertex = coordinate / 3u;
+    let axisIndex = coordinate % 3u;
+    var deltas: array<vec3f, 4>;
+    for (var local = 0u; local < 4u; local += 1u) {
+      deltas[local] = vec3f(0.0);
+    }
+    var basis = vec3f(0.0);
+    basis[axisIndex] = 1.0;
+    deltas[differentiatedVertex] = basis;
+    let differentialEdge = deltas[1] - deltas[0];
+    let differentialTangent = clothNormalizedDifferential(
+      tangent,
+      edgeLength,
+      differentialEdge,
+    );
+    let differentialTo2 = deltas[2] - deltas[0];
+    let differentialTo3 = deltas[3] - deltas[1];
+    let differentialNormal0Raw =
+      cross(differentialEdge, to2) + cross(edge, differentialTo2);
+    let differentialNormal1Raw =
+      cross(-differentialEdge, to3) + cross(reverseEdge, differentialTo3);
+    let differentialNormal0 = clothNormalizedDifferential(
+      normal0,
+      normalLength0,
+      differentialNormal0Raw,
+    );
+    let differentialNormal1 = clothNormalizedDifferential(
+      normal1,
+      normalLength1,
+      differentialNormal1Raw,
+    );
+    let differentialCosine =
+      dot(differentialNormal0, normal1) +
+      dot(normal0, differentialNormal1);
+    let differentialSine =
+      dot(differentialTangent, normalCross) +
+      dot(
+        tangent,
+        cross(differentialNormal0, normal1) +
+          cross(normal0, differentialNormal1),
+      );
+    gradients[differentiatedVertex][axisIndex] =
+      (cosine * differentialSine - sine * differentialCosine) /
+        denominator;
+  }
+  let angle = atan2(sine, cosine);
+  var finite = jgs2_globalization_finite_scalar(angle);
+  for (var local = 0u; local < 4u; local += 1u) {
+    finite = finite && jgs2_globalization_finite_vec3(gradients[local]);
+  }
+  if (!finite) {
+    return ClothDihedralEvaluation(0.0, 0.0, 0u, zeroGradients);
+  }
+  return ClothDihedralEvaluation(
+    angle,
+    edgeLength,
+    1u,
+    gradients,
+  );
+}
+
+fn clothWrappedAngleDifference(angle: f32, reference: f32) -> f32 {
+  let difference = angle - reference;
+  return atan2(sin(difference), cos(difference));
+}
+
+fn clothBendingEnergyAt(
+  hinge: u32,
+  positionOffset: u32,
+  overrideVertex: u32,
+  overridePosition: vec3f,
+) -> f32 {
+  let evaluation = clothDihedralEvaluationAt(
+    hinge,
+    positionOffset,
+    overrideVertex,
+    overridePosition,
+  );
+  if (evaluation.valid == 0u) {
+    return jgs2_globalization_f32_max;
+  }
+  let rest = clothHingeRest(hinge);
+  let angleDifference = clothWrappedAngleDifference(evaluation.angle, rest.x);
+  let weightedStiffness = clothMaterial().w * rest.y;
+  return 0.5 * weightedStiffness * angleDifference * angleDifference;
+}
+
+fn clothTriangleOwnedByVertex(indices: vec3u, vertex: u32) -> bool {
+  return vertex == min(indices.x, min(indices.y, indices.z));
+}
+
+fn clothHingeOwnedByVertex(indices: vec4u, vertex: u32) -> bool {
+  return vertex == min(min(indices.x, indices.y), min(indices.z, indices.w));
+}
+
 fn currentCubatureBasis(
   recordBase: u32,
   sourceVertex: u32,
@@ -1067,6 +1534,53 @@ fn restrictedMinimumDeformationDeterminant(
     }
     minimumDeterminant = min(minimumDeterminant, determinantValue);
   }
+  // Cloth has no signed 3D determinant. Use its signed relative area stretch:
+  // magnitude detects collapse while the source/trial normal dot rejects a
+  // local orientation flip before StVK or dihedral energy is evaluated.
+  for (
+    var triangle = 0u;
+    triangle < clothTriangleCount();
+    triangle += 1u
+  ) {
+    let indices = clothTriangleIndices(triangle);
+    if (!clothTriangleIndicesValid(indices)) {
+      return RestrictedGeometryResult(0.0, 0u);
+    }
+    if (clothTriangleLocalSlot(indices, sourceVertex) >= 3u) {
+      continue;
+    }
+    let sourceNormal = clothTriangleRawNormalAt(
+      triangle,
+      params.offsets1.w,
+      0xffffffffu,
+      vec3f(0.0),
+    );
+    let trialNormal = clothTriangleRawNormalAt(
+      triangle,
+      params.offsets1.w,
+      sourceVertex,
+      loadPosition(params.offsets1.w, sourceVertex) + displacement,
+    );
+    let twiceRestArea = 2.0 * clothTriangleRestArea(triangle);
+    let sourceStretch = length(sourceNormal) / twiceRestArea;
+    let trialStretchMagnitude = length(trialNormal) / twiceRestArea;
+    let trialStretch = select(
+      -trialStretchMagnitude,
+      trialStretchMagnitude,
+      dot(sourceNormal, trialNormal) > 0.0,
+    );
+    if (
+      !(twiceRestArea > 0.0) ||
+      !jgs2_globalization_finite_scalar(sourceStretch) ||
+      !jgs2_globalization_finite_scalar(trialStretch)
+    ) {
+      return RestrictedGeometryResult(0.0, 0u);
+    }
+    minimumDeterminant = min(
+      minimumDeterminant,
+      min(sourceStretch, trialStretch),
+    );
+  }
   return RestrictedGeometryResult(minimumDeterminant, 1u);
 }
 
@@ -1141,6 +1655,56 @@ fn restrictedEnergyDelta(
       displacement,
     );
     result += stableMaterialEnergyDelta(tet, initial, finalDeformation);
+  }
+
+  let trialPosition = sourcePosition + displacement;
+  for (
+    var triangle = 0u;
+    triangle < clothTriangleCount();
+    triangle += 1u
+  ) {
+    let indices = clothTriangleIndices(triangle);
+    if (!clothTriangleIndicesValid(indices)) {
+      return jgs2_globalization_f32_max;
+    }
+    if (clothTriangleLocalSlot(indices, sourceVertex) >= 3u) {
+      continue;
+    }
+    let sourceMembrane = clothMembraneEvaluationAt(
+      triangle,
+      params.offsets1.w,
+      0xffffffffu,
+      vec3f(0.0),
+    );
+    let trialMembrane = clothMembraneEvaluationAt(
+      triangle,
+      params.offsets1.w,
+      sourceVertex,
+      trialPosition,
+    );
+    result += trialMembrane.energy - sourceMembrane.energy;
+  }
+  for (var hinge = 0u; hinge < clothHingeCount(); hinge += 1u) {
+    let indices = clothHingeIndices(hinge);
+    if (!clothHingeIndicesValid(indices)) {
+      return jgs2_globalization_f32_max;
+    }
+    if (clothHingeLocalSlot(indices, sourceVertex) >= 4u) {
+      continue;
+    }
+    let sourceBending = clothBendingEnergyAt(
+      hinge,
+      params.offsets1.w,
+      0xffffffffu,
+      vec3f(0.0),
+    );
+    let trialBending = clothBendingEnergyAt(
+      hinge,
+      params.offsets1.w,
+      sourceVertex,
+      trialPosition,
+    );
+    result += trialBending - sourceBending;
   }
 
   for (var sample = 0u; sample < params.counts.z; sample += 1u) {
@@ -1460,6 +2024,54 @@ fn vertexImplicitEnergyAt(positionOffset: u32, vertex: u32) -> f32 {
   if (!pinned && params.solver.x > 0.0) {
     let penetration = min(0.0, position.y - params.gravityFloor.w);
     energy += 0.5 * params.solver.x * penetration * penetration;
+  }
+  // Give each cloth element one deterministic vertex owner. Candidate
+  // triangle records carry geometry only, so this is the sole assembled
+  // membrane/bending energy contribution and remains valid for pinned owners.
+  for (
+    var triangle = 0u;
+    triangle < clothTriangleCount();
+    triangle += 1u
+  ) {
+    let indices = clothTriangleIndices(triangle);
+    if (!clothTriangleIndicesValid(indices)) {
+      return jgs2_globalization_f32_max;
+    }
+    if (!clothTriangleOwnedByVertex(indices, vertex)) { continue; }
+    let twiceRestArea = 2.0 * clothTriangleRestArea(triangle);
+    let rawNormal = clothTriangleRawNormalAt(
+      triangle,
+      positionOffset,
+      0xffffffffu,
+      vec3f(0.0),
+    );
+    let areaStretch = length(rawNormal) / twiceRestArea;
+    if (
+      !(twiceRestArea > 0.0) ||
+      !jgs2_globalization_finite_scalar(areaStretch) ||
+      !(areaStretch > jgs2_globalization_determinant_floor)
+    ) {
+      return jgs2_globalization_f32_max;
+    }
+    energy += clothMembraneEvaluationAt(
+      triangle,
+      positionOffset,
+      0xffffffffu,
+      vec3f(0.0),
+    ).energy;
+  }
+  for (var hinge = 0u; hinge < clothHingeCount(); hinge += 1u) {
+    let indices = clothHingeIndices(hinge);
+    if (!clothHingeIndicesValid(indices)) {
+      return jgs2_globalization_f32_max;
+    }
+    if (!clothHingeOwnedByVertex(indices, vertex)) { continue; }
+    energy += clothBendingEnergyAt(
+      hinge,
+      positionOffset,
+      0xffffffffu,
+      vec3f(0.0),
+    );
   }
   energy += ipcOwnedEnergy(vertex, positionOffset);
   return energy;
@@ -1833,6 +2445,68 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
     }
   }
 
+  // The compact cloth demo scans the static topology directly. Membrane uses
+  // the exact local StVK diagonal block; bending uses the standard positive
+  // Gauss-Newton block k L (d theta/dx_i)(d theta/dx_i)^T.
+  for (
+    var triangle = 0u;
+    triangle < clothTriangleCount();
+    triangle += 1u
+  ) {
+    let indices = clothTriangleIndices(triangle);
+    if (!clothTriangleIndicesValid(indices)) {
+      gradient += vec3f(jgs2_globalization_f32_max);
+      continue;
+    }
+    let slot = clothTriangleLocalSlot(indices, vertex);
+    if (slot < 3u) {
+      let membrane = clothMembraneEvaluationAt(
+        triangle,
+        params.offsets1.w,
+        0xffffffffu,
+        vec3f(0.0),
+      );
+      gradient += membrane.gradients[slot];
+      hessian += clothMembraneLocalHessian(
+        triangle,
+        slot,
+        params.offsets1.w,
+      );
+    }
+  }
+  for (var hinge = 0u; hinge < clothHingeCount(); hinge += 1u) {
+    let indices = clothHingeIndices(hinge);
+    if (!clothHingeIndicesValid(indices)) {
+      gradient += vec3f(jgs2_globalization_f32_max);
+      continue;
+    }
+    let slot = clothHingeLocalSlot(indices, vertex);
+    if (slot < 4u) {
+      let dihedral = clothDihedralEvaluationAt(
+        hinge,
+        params.offsets1.w,
+        0xffffffffu,
+        vec3f(0.0),
+      );
+      if (dihedral.valid == 0u) {
+        gradient += vec3f(jgs2_globalization_f32_max);
+      } else {
+        let rest = clothHingeRest(hinge);
+        let angleDifference = clothWrappedAngleDifference(
+          dihedral.angle,
+          rest.x,
+        );
+        let weightedStiffness = clothMaterial().w * rest.y;
+        let angleGradient = dihedral.gradients[slot];
+        gradient += weightedStiffness * angleDifference * angleGradient;
+        hessian += weightedStiffness * outerProductColumns(
+          angleGradient,
+          angleGradient,
+        );
+      }
+    }
+  }
+
   // A one-sided quadratic penalty keeps the first demos deterministic and
   // avoids requiring a CPU collision pipeline.
   if (params.solver.x > 0.0 && position.y < params.gravityFloor.w) {
@@ -2131,13 +2805,58 @@ fn assembledVertexEnergy(@builtin(global_invocation_id) globalId: vec3u) {
 
 @compute @workgroup_size(WORKGROUP_SIZE)
 fn candidateTetrahedron(@builtin(global_invocation_id) globalId: vec3u) {
-  let tet = globalId.x;
-  if (tet >= params.counts.y) {
+  let element = globalId.x;
+  let triangleCount = clothTriangleCount();
+  if (element >= params.counts.y + triangleCount) {
     return;
   }
   if (nonlinearStopLatched()) {
     return;
   }
+  if (element >= params.counts.y) {
+    let triangle = element - params.counts.y;
+    let indices = clothTriangleIndices(triangle);
+    let sourceNormal = clothTriangleRawNormalAt(
+      triangle,
+      params.offsets1.w,
+      0xffffffffu,
+      vec3f(0.0),
+    );
+    let candidateNormal = clothTriangleRawNormalAt(
+      triangle,
+      params.offsets2.x,
+      0xffffffffu,
+      vec3f(0.0),
+    );
+    let twiceRestArea = 2.0 * clothTriangleRestArea(triangle);
+    let sourceStretch = length(sourceNormal) / twiceRestArea;
+    let candidateStretchMagnitude = length(candidateNormal) / twiceRestArea;
+    let candidateStretch = select(
+      -candidateStretchMagnitude,
+      candidateStretchMagnitude,
+      dot(sourceNormal, candidateNormal) > 0.0,
+    );
+    let sourceGeometryValid = clothTriangleIndicesValid(indices) &&
+      twiceRestArea > 0.0 &&
+      jgs2_globalization_finite_vec3(sourceNormal) &&
+      jgs2_globalization_finite_scalar(sourceStretch);
+    let candidateGeometryValid = clothTriangleIndicesValid(indices) &&
+      twiceRestArea > 0.0 &&
+      jgs2_globalization_finite_vec3(candidateNormal) &&
+      jgs2_globalization_finite_scalar(candidateStretch);
+    let base = params.offsets3.y + element * TET_GLOBALIZATION_STRIDE;
+    dynamicData[base] = vec4f(
+      select(0.0, sourceStretch, sourceGeometryValid),
+      select(0.0, candidateStretch, candidateGeometryValid),
+      select(0.0, 1.0, sourceGeometryValid),
+      select(0.0, 1.0, candidateGeometryValid),
+    );
+    // Membrane and bending energies are owned exactly once by the assembled
+    // vertex records. Keep the shared diagnostic-energy lanes neutral/valid.
+    dynamicData[base + 1u] = vec4f(0.0, 0.0, 1.0, 1.0);
+    return;
+  }
+  let tet = element;
   let attributes = tetData[tet].attributes;
   let sourceF = tetrahedronDeformationGradientAt(tet, params.offsets1.w);
   let candidateF = tetrahedronDeformationGradientAt(tet, params.offsets2.x);
@@ -2174,7 +2893,7 @@ fn candidateTetrahedron(@builtin(global_invocation_id) globalId: vec3u) {
     );
     candidateEnergyValid = jgs2_globalization_finite_scalar(candidateEnergy);
   }
-  let base = params.offsets3.y + tet * TET_GLOBALIZATION_STRIDE;
+  let base = params.offsets3.y + element * TET_GLOBALIZATION_STRIDE;
   dynamicData[base] = vec4f(
     select(0.0, sourceJ, sourceGeometryValid),
     select(0.0, candidateJ, candidateGeometryValid),
@@ -2215,7 +2934,7 @@ fn reduceCandidate(
   // Fixed striding gives every record one deterministic lane owner.
   for (
     var tet = lane;
-    tet < params.counts.y;
+    tet < params.counts.y + clothTriangleCount();
     tet += WORKGROUP_SIZE
   ) {
     let base = params.offsets3.y + tet * TET_GLOBALIZATION_STRIDE;
@@ -2614,6 +3333,53 @@ fn convergenceGradient(@builtin(global_invocation_id) globalId: vec3u) {
         tet,
         params.offsets2.x,
       )[slot];
+    }
+  }
+  for (
+    var triangle = 0u;
+    triangle < clothTriangleCount();
+    triangle += 1u
+  ) {
+    let indices = clothTriangleIndices(triangle);
+    if (!clothTriangleIndicesValid(indices)) {
+      material += vec3f(jgs2_globalization_f32_max);
+      continue;
+    }
+    let slot = clothTriangleLocalSlot(indices, vertex);
+    if (slot < 3u) {
+      material += clothMembraneEvaluationAt(
+        triangle,
+        params.offsets2.x,
+        0xffffffffu,
+        vec3f(0.0),
+      ).gradients[slot];
+    }
+  }
+  for (var hinge = 0u; hinge < clothHingeCount(); hinge += 1u) {
+    let indices = clothHingeIndices(hinge);
+    if (!clothHingeIndicesValid(indices)) {
+      material += vec3f(jgs2_globalization_f32_max);
+      continue;
+    }
+    let slot = clothHingeLocalSlot(indices, vertex);
+    if (slot < 4u) {
+      let dihedral = clothDihedralEvaluationAt(
+        hinge,
+        params.offsets2.x,
+        0xffffffffu,
+        vec3f(0.0),
+      );
+      if (dihedral.valid == 0u) {
+        material += vec3f(jgs2_globalization_f32_max);
+      } else {
+        let rest = clothHingeRest(hinge);
+        let angleDifference = clothWrappedAngleDifference(
+          dihedral.angle,
+          rest.x,
+        );
+        material += clothMaterial().w * rest.y * angleDifference *
+          dihedral.gradients[slot];
+      }
     }
   }
   var contact = vec3f(0.0);

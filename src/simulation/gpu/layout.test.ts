@@ -293,6 +293,15 @@ describe("JGS2 per-body bookkeeping", () => {
     expect(offsets.vec4Count).toBe(24);
   });
 
+  it("shares candidate diagnostics between tetrahedra and cloth triangles", () => {
+    const offsets = computeJGS2DynamicOffsets(2, 1, 3, true, 0, 5);
+
+    expect(offsets.tetGlobalization).toBe(32);
+    expect(offsets.assembledVertexEnergy).toBe(42);
+    expect(offsets.convergenceGradient).toBe(44);
+    expect(offsets.vec4Count).toBe(570);
+  });
+
   it("infers body count from packed vertexInfo body ids", () => {
     const vertexInfo = new Uint32Array([
       0, 0, 0, 0,

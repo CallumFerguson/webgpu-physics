@@ -8,6 +8,10 @@ import {
 } from "./jgs2-globalization";
 import type { StaticIpcContactCandidates } from "../cpu/ipc-contact";
 import { validateIpcContactCandidatesForGpu } from "./ipc-contact-layout";
+import {
+  validateJGS2GpuClothInput,
+  type JGS2GpuClothInput,
+} from "./cloth-layout";
 
 export const JGS2_VERTEX_STATIC_WORDS = 12;
 /** Two vec4 records: external force and isotropic quadratic target. */
@@ -54,6 +58,8 @@ export interface JGS2GpuInput {
   readonly objectives?: JGS2GpuObjectivesInput;
   /** Optional static VT/EE broad-phase superset for small-scene IPC contact. */
   readonly contactCandidates?: StaticIpcContactCandidates;
+  /** Optional triangle membrane/dihedral layer sharing the vertex state. */
+  readonly cloth?: JGS2GpuClothInput;
 
   /** Four vertex indices per tetrahedron. */
   readonly tetIndices: Uint32Array;
@@ -97,7 +103,7 @@ export interface JGS2DynamicOffsets {
   readonly finalUpdate: number;
   /** Four vec4 globalization diagnostics per vertex. */
   readonly localGlobalization: number;
-  /** Two vec4 assembled-candidate diagnostics per tetrahedron. */
+  /** Two vec4 assembled-candidate diagnostics per tet or cloth triangle. */
   readonly tetGlobalization: number;
   /** Per-vertex source/candidate implicit-energy contributions. */
   readonly assembledVertexEnergy: number;
@@ -236,6 +242,15 @@ export function validateJGS2GpuInput(input: JGS2GpuInput): void {
           `IPC candidate references vertex ${vertex}, but vertexCount is ${vertexCount}.`,
         );
       }
+    }
+  }
+  if (input.cloth) {
+    validateJGS2GpuClothInput(input.cloth);
+    if (input.cloth.vertexCount !== vertexCount) {
+      throw new RangeError(
+        `Cloth vertexCount ${input.cloth.vertexCount} must equal solver ` +
+          `vertexCount ${vertexCount}.`,
+      );
     }
   }
   inferJGS2BodyCount(input.vertexInfo, vertexCount);
@@ -406,11 +421,13 @@ export function computeJGS2DynamicOffsets(
   bodyCount = 0,
   globalizationEnabled = true,
   ipcContactVec4Count = 0,
+  globalizationElementCount = tetCount,
 ): JGS2DynamicOffsets {
   assertInteger("vertexCount", vertexCount, 1);
   assertInteger("tetCount", tetCount, 1);
   assertInteger("bodyCount", bodyCount, 0);
   assertInteger("ipcContactVec4Count", ipcContactVec4Count, 0);
+  assertInteger("globalizationElementCount", globalizationElementCount, tetCount);
 
   const posA = 0;
   const posB = posA + vertexCount;
@@ -452,7 +469,8 @@ export function computeJGS2DynamicOffsets(
     localGlobalization +
     vertexCount * JGS2_GLOBALIZATION_LOCAL_DIAGNOSTIC_VEC4S;
   const assembledVertexEnergy =
-    tetGlobalization + tetCount * JGS2_GLOBALIZATION_TET_DIAGNOSTIC_VEC4S;
+    tetGlobalization +
+    globalizationElementCount * JGS2_GLOBALIZATION_TET_DIAGNOSTIC_VEC4S;
   const convergenceGradient = assembledVertexEnergy + vertexCount;
   const globalizationControl =
     convergenceGradient + vertexCount * JGS2_CONVERGENCE_COMPONENT_VEC4S;

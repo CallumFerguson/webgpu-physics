@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   getTetrahedronCount,
   getVertexCount,
+  minimumStaticIpcContactDistance,
   transformTetrahedralMesh,
 } from "../simulation/cpu";
 import {
@@ -32,6 +33,7 @@ describe("procedural demo scenes", () => {
       "stiffness",
       "drop",
       "contact",
+      "cloth",
       "stress",
     ]);
     expect(DEFAULT_SCENE_ID).toBe("minimal");
@@ -297,6 +299,7 @@ describe("procedural demo scenes", () => {
       stiffness: 2,
       drop: 1,
       contact: 4,
+      cloth: 2,
       stress: 6,
     };
     const expectedPinnedBodyCounts: Record<SceneId, number> = {
@@ -304,6 +307,7 @@ describe("procedural demo scenes", () => {
       stiffness: 2,
       drop: 0,
       contact: 2,
+      cloth: 2,
       stress: 0,
     };
 
@@ -412,5 +416,97 @@ describe("procedural demo scenes", () => {
       candidate.every((vertex) => scene.mesh.bodyIds[vertex] === 3),
     );
     expect(selfContactCandidates.length).toBeGreaterThan(0);
+  }, 20_000);
+
+  it("builds a two-point-pinned triangle cloth with consistent areal mass", () => {
+    const scene = buildScene("cloth");
+    const cloth = scene.cloth;
+
+    expect(cloth).toBeDefined();
+    expect(getVertexCount(scene.mesh)).toBe(33);
+    expect(getTetrahedronCount(scene.mesh)).toBe(6);
+    expect(cloth!.triangles).toHaveLength(32 * 3);
+    expect(scene.settings).toMatchObject({
+      timestep: 1 / 120,
+      solverIterations: 7,
+      cubatureSamples: 4,
+    });
+
+    const clothVertices = new Set<number>(cloth!.triangles);
+    expect(clothVertices.size).toBe(25);
+    expect(Math.min(...clothVertices)).toBe(8);
+    expect(Math.max(...clothVertices)).toBe(32);
+    expect(
+      [...clothVertices].every((vertex) => scene.mesh.bodyIds[vertex] === 1),
+    ).toBe(true);
+    expect(
+      [...scene.mesh.tetrahedra].every(
+        (vertex) => scene.mesh.bodyIds[vertex] === 0,
+      ),
+    ).toBe(true);
+
+    const pinnedColliderVertices = Array.from(
+      { length: getVertexCount(scene.mesh) },
+      (_unused, vertex) => vertex,
+    ).filter(
+      (vertex) =>
+        scene.mesh.bodyIds[vertex] === 0 && scene.mesh.fixed[vertex] !== 0,
+    );
+    const pinnedClothVertices = [...clothVertices].filter(
+      (vertex) => scene.mesh.fixed[vertex] !== 0,
+    );
+    expect(pinnedColliderVertices).toHaveLength(8);
+    expect(pinnedClothVertices).toHaveLength(2);
+    expect(
+      [...clothVertices].filter((vertex) => scene.mesh.fixed[vertex] === 0),
+    ).toHaveLength(23);
+
+    const packedClothSurface = scene.surface.triangles.subarray(
+      scene.surface.triangles.length - cloth!.triangles.length,
+    );
+    expect([...packedClothSurface]).toEqual([...cloth!.triangles]);
+
+    let expectedClothMass = 0;
+    for (let triangle = 0; triangle < cloth!.triangles.length; triangle += 3) {
+      const i0 = cloth!.triangles[triangle]!;
+      const i1 = cloth!.triangles[triangle + 1]!;
+      const i2 = cloth!.triangles[triangle + 2]!;
+      const ax = scene.mesh.positions[i1 * 3]! - scene.mesh.positions[i0 * 3]!;
+      const ay =
+        scene.mesh.positions[i1 * 3 + 1]! - scene.mesh.positions[i0 * 3 + 1]!;
+      const az =
+        scene.mesh.positions[i1 * 3 + 2]! - scene.mesh.positions[i0 * 3 + 2]!;
+      const bx = scene.mesh.positions[i2 * 3]! - scene.mesh.positions[i0 * 3]!;
+      const by =
+        scene.mesh.positions[i2 * 3 + 1]! - scene.mesh.positions[i0 * 3 + 1]!;
+      const bz =
+        scene.mesh.positions[i2 * 3 + 2]! - scene.mesh.positions[i0 * 3 + 2]!;
+      const crossX = ay * bz - az * by;
+      const crossY = az * bx - ax * bz;
+      const crossZ = ax * by - ay * bx;
+      const area = 0.5 * Math.hypot(crossX, crossY, crossZ);
+      expect(area).toBeGreaterThan(0);
+      expectedClothMass += cloth!.density * cloth!.thickness * area;
+    }
+
+    const actualClothMass = [...clothVertices].reduce(
+      (total, vertex) => total + scene.lumpedMasses[vertex]!,
+      0,
+    );
+    expect(actualClothMass).toBeCloseTo(expectedClothMass, 10);
+    for (const vertex of clothVertices) {
+      expect(scene.lumpedMasses[vertex]).toBeGreaterThan(0);
+    }
+
+    const gpuInput = toJGS2GpuInput(scene);
+    expect(gpuInput.cloth?.triangleIndices).toHaveLength(32 * 3);
+    expect(gpuInput.cloth?.hingeIndices).toHaveLength(40 * 4);
+    const minimumContactDistance = minimumStaticIpcContactDistance(
+      gpuInput.positions,
+      gpuInput.contactCandidates!,
+      4,
+    );
+    expect(minimumContactDistance).toBeGreaterThan(0.003);
+    expect(minimumContactDistance).toBeLessThan(0.08);
   }, 20_000);
 });

@@ -234,6 +234,7 @@ const sceneLabels: Record<SceneId, string> = {
   stiffness: "Soft / stiff",
   drop: "Floor impact",
   contact: "IPC contact",
+  cloth: "Pinned cloth",
   stress: "Stress test",
 };
 
@@ -426,9 +427,11 @@ export function App() {
         return;
       }
       const format = gpu.getPreferredCanvasFormat();
-      const ipcContactScene = scene.id === "contact";
+      const ipcContactScene = scene.id === "contact" || scene.id === "cloth";
       const ipcFrictionEnabled =
         new URLSearchParams(window.location.search).get("friction") !== "0";
+      const ipcFrictionCoefficient =
+        scene.id === "contact" ? 0.45 : scene.id === "cloth" ? 0.3 : 0;
       const solverSettings = {
         timestep: scene.settings.timestep,
         gravity: scene.settings.gravity,
@@ -444,7 +447,7 @@ export function App() {
         ipcMinimumDistance: 0.003,
         ipcBarrierStiffness: ipcContactScene ? 100_000 : 0,
         ipcFrictionCoefficient:
-          ipcContactScene && ipcFrictionEnabled ? 0.45 : 0,
+          ipcContactScene && ipcFrictionEnabled ? ipcFrictionCoefficient : 0,
         ipcFrictionVelocityEpsilon: 0.05,
         ipcStepSafety: 0.9,
         parityMode,
@@ -1541,7 +1544,10 @@ export function App() {
         adapter: adapterDescription(adapter.info),
         iterations: solver.lastSubmittedIterationCount || scene.settings.solverIterations,
         cubatureSamples: gpuInput.cubatureK,
-        material: materialLabel(scene.materials),
+        material:
+          scene.id === "cloth"
+            ? "StVK membrane + bending"
+            : materialLabel(scene.materials),
         convergence: null,
       });
       setPhase("ready");
@@ -1598,7 +1604,10 @@ export function App() {
 
   const liveSnapshot = livePerformance.snapshot;
   const displayedMaterial =
-    stats?.material ?? materialLabel(sceneDefinition.materials);
+    stats?.material ??
+    (sceneDefinition.id === "cloth"
+      ? "StVK membrane + bending"
+      : materialLabel(sceneDefinition.materials));
   const displayedIterations =
     stats?.iterations ?? sceneDefinition.settings.solverIterations;
   const displayedConvergence = stats?.convergence ?? null;

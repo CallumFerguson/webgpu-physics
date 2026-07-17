@@ -3,6 +3,8 @@ import {
   buildStaticIpcContactCandidates,
   buildPrecomputedScene,
   computeStableNeoHookeanParameters,
+  precomputeQuadraticDihedralRest,
+  precomputeStVKTriangleRest,
   generateRegularCuboidMesh,
   getTetrahedronCount,
   getVertexCount,
@@ -18,6 +20,7 @@ import {
   validateJGS2GpuInput,
   type JGS2GpuInput,
 } from "../simulation/gpu/layout";
+import type { JGS2GpuClothInput } from "../simulation/gpu/cloth-layout";
 import {
   PHASE0_FORCE_FREE_BASE_STATE,
   PHASE0_FORCE_FREE_FIXTURE_ID,
@@ -71,6 +74,7 @@ export const SCENE_IDS = [
   "stiffness",
   "drop",
   "contact",
+  "cloth",
   "stress",
 ] as const;
 export type SceneId = (typeof SCENE_IDS)[number];
@@ -148,6 +152,15 @@ const CONTACT_SELF_MATERIAL: LinearMaterial = {
   youngModulus: 62_000,
   poissonRatio: 0.35,
   color: [0.72, 0.38, 0.92, 1],
+};
+
+const CLOTH_COLLIDER_MATERIAL: LinearMaterial = {
+  name: "cloth collider",
+  model: "stable-neo-hookean",
+  density: 1_000,
+  youngModulus: 110_000,
+  poissonRatio: 0.34,
+  color: [0.32, 0.39, 0.5, 1],
 };
 
 export type MinimalScriptedTargetPhase =
@@ -463,6 +476,93 @@ function contactDefinition(): SceneDefinition {
   };
 }
 
+function clothDefinition(): SceneDefinition {
+  const collider = generateRegularCuboidMesh({
+    cells: [1, 1, 1],
+    origin: [-0.65, 0, -0.45],
+    size: [0.9, 0.5, 0.9],
+    materialId: 0,
+    bodyId: 0,
+    fixed: () => true,
+  });
+  const cells = 4;
+  const clothVertexCount = (cells + 1) * (cells + 1);
+  const clothPositions = new Float64Array(clothVertexCount * 3);
+  const clothFixed = new Uint8Array(clothVertexCount);
+  const clothBodyIds = new Uint16Array(clothVertexCount);
+  clothBodyIds.fill(1);
+  const vertex = (x: number, z: number) => x + z * (cells + 1);
+  for (let z = 0; z <= cells; z += 1) {
+    for (let x = 0; x <= cells; x += 1) {
+      const index = vertex(x, z);
+      // Pre-fold two columns back over the sheet with a narrow feasible IPC
+      // gap. The rest metric and rest dihedrals are computed from this shape,
+      // while gravity makes the free flap drape over the collider and exercise
+      // nonlocal same-sheet candidates deterministically.
+      const folded = x >= 3;
+      const worldX = folded ? 0.8 - 0.4 * x : -0.8 + 0.4 * x;
+      clothPositions.set(
+        [worldX, folded ? 1.229 : 1.15, -0.8 + (1.6 * z) / cells],
+        index * 3,
+      );
+      clothFixed[index] = z === 0 && (x === 0 || x === 2) ? 1 : 0;
+    }
+  }
+  const clothMesh: TetrahedralMesh = {
+    positions: clothPositions,
+    tetrahedra: new Uint32Array(),
+    materialIds: new Uint16Array(),
+    fixed: clothFixed,
+    bodyIds: clothBodyIds,
+  };
+  const clothOffset = getVertexCount(collider);
+  const triangles: number[] = [];
+  for (let z = 0; z < cells; z += 1) {
+    for (let x = 0; x < cells; x += 1) {
+      const i00 = clothOffset + vertex(x, z);
+      const i10 = clothOffset + vertex(x + 1, z);
+      const i01 = clothOffset + vertex(x, z + 1);
+      const i11 = clothOffset + vertex(x + 1, z + 1);
+      triangles.push(i00, i01, i10, i10, i01, i11);
+    }
+  }
+  return {
+    id: "cloth",
+    title: "Pinned cloth drape",
+    description:
+      "A two-point-pinned, pre-folded StVK triangle sheet bends and drapes over a fixed collider through the same JGS2 and IPC path.",
+    mesh: appendTetrahedralMeshes([collider, clothMesh]),
+    cloth: {
+      triangles: Uint32Array.from(triangles),
+      density: 480,
+      youngModulus: 9_000,
+      poissonRatio: 0.3,
+      thickness: 0.012,
+      bendingStiffness: 0.045,
+      color: [0.72, 0.28, 0.88, 1],
+    },
+    materials: [CLOTH_COLLIDER_MATERIAL],
+    settings: {
+      timestep: 1 / 120,
+      gravity: [0, -9.81, 0],
+      floorY: 0,
+      solverIterations: 7,
+      cubatureSamples: 4,
+    },
+    camera: {
+      eye: [3.1, 2.25, 4.1],
+      target: [0, 0.65, 0],
+      up: [0, 1, 0],
+      fovYRadians: Math.PI / 4,
+    },
+    landmark: {
+      vertex: clothOffset + vertex(2, 2),
+      label: "cloth center",
+      expectedMotion: [0, -1, 0],
+    },
+  };
+}
+
 function stressBlock(body: number): TetrahedralMesh {
   const base = generateRegularCuboidMesh({
     cells: [2, 1, 1],
@@ -530,6 +630,8 @@ export function buildSceneDefinition(id: SceneId): SceneDefinition {
       return dropDefinition();
     case "contact":
       return contactDefinition();
+    case "cloth":
+      return clothDefinition();
     case "stress":
       return stressDefinition();
   }
@@ -585,12 +687,126 @@ function computeVertexColors(scene: PrecomputedScene): Float32Array {
       contributionCounts[vertex] += 1;
     }
   }
+  if (scene.cloth) {
+    for (const vertex of scene.cloth.triangles) {
+      for (let channel = 0; channel < 4; channel += 1) {
+        colors[vertex * 4 + channel] += scene.cloth.color[channel]!;
+      }
+      contributionCounts[vertex] += 1;
+    }
+  }
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
     for (let channel = 0; channel < 4; channel += 1) {
       colors[vertex * 4 + channel] /= contributionCounts[vertex]!;
     }
   }
   return colors;
+}
+
+function packedRestPositions(
+  positions: Float64Array,
+  indices: readonly number[],
+): Float64Array {
+  const packed = new Float64Array(indices.length * 3);
+  for (let local = 0; local < indices.length; local += 1) {
+    const vertex = indices[local]!;
+    packed.set(positions.subarray(vertex * 3, vertex * 3 + 3), local * 3);
+  }
+  return packed;
+}
+
+/** Build the paper's compact StVK-triangle/quadratic-dihedral GPU records. */
+function buildJGS2GpuClothInput(
+  scene: PrecomputedScene,
+): JGS2GpuClothInput | undefined {
+  const cloth = scene.cloth;
+  if (!cloth) return undefined;
+  const triangleCount = cloth.triangles.length / 3;
+  const triangleInverseRestBases = new Float32Array(triangleCount * 4);
+  const triangleRestAreas = new Float32Array(triangleCount);
+  type OrientedHalfEdge = {
+    readonly first: number;
+    readonly second: number;
+    readonly opposite: number;
+  };
+  const openEdges = new Map<string, OrientedHalfEdge>();
+  const closedEdges = new Set<string>();
+  const hingeIndices: number[] = [];
+  const addHalfEdge = (
+    first: number,
+    second: number,
+    opposite: number,
+  ): void => {
+    const key = `${Math.min(first, second)}:${Math.max(first, second)}`;
+    if (closedEdges.has(key)) {
+      throw new RangeError(`Cloth edge ${key} is non-manifold.`);
+    }
+    const previous = openEdges.get(key);
+    if (!previous) {
+      openEdges.set(key, { first, second, opposite });
+      return;
+    }
+    if (previous.first !== second || previous.second !== first) {
+      throw new RangeError(
+        `Cloth triangles sharing edge ${key} must have consistent orientation.`,
+      );
+    }
+    hingeIndices.push(
+      previous.first,
+      previous.second,
+      previous.opposite,
+      opposite,
+    );
+    openEdges.delete(key);
+    closedEdges.add(key);
+  };
+
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const base = triangle * 3;
+    const i0 = cloth.triangles[base]!;
+    const i1 = cloth.triangles[base + 1]!;
+    const i2 = cloth.triangles[base + 2]!;
+    const rest = precomputeStVKTriangleRest(
+      packedRestPositions(scene.mesh.positions, [i0, i1, i2]),
+    );
+    triangleInverseRestBases.set(rest.inverseRestBasis, triangle * 4);
+    triangleRestAreas[triangle] = rest.restArea;
+    addHalfEdge(i0, i1, i2);
+    addHalfEdge(i1, i2, i0);
+    addHalfEdge(i2, i0, i1);
+  }
+
+  const hinges = Uint32Array.from(hingeIndices);
+  const hingeCount = hinges.length / 4;
+  const hingeRestAngles = new Float32Array(hingeCount);
+  const hingeRestEdgeLengths = new Float32Array(hingeCount);
+  for (let hinge = 0; hinge < hingeCount; hinge += 1) {
+    const base = hinge * 4;
+    const rest = precomputeQuadraticDihedralRest(
+      packedRestPositions(scene.mesh.positions, [
+        hinges[base]!,
+        hinges[base + 1]!,
+        hinges[base + 2]!,
+        hinges[base + 3]!,
+      ]),
+    );
+    hingeRestAngles[hinge] = rest.restAngle;
+    hingeRestEdgeLengths[hinge] = rest.restEdgeLength;
+  }
+
+  return {
+    vertexCount: getVertexCount(scene.mesh),
+    triangleIndices: cloth.triangles.slice(),
+    triangleInverseRestBases,
+    triangleRestAreas,
+    hingeIndices: hinges,
+    hingeRestAngles,
+    hingeRestEdgeLengths,
+    youngModulus: cloth.youngModulus,
+    poissonRatio: cloth.poissonRatio,
+    thickness: cloth.thickness,
+    bendingStiffness: cloth.bendingStiffness,
+  };
 }
 
 function packJGS2GpuInput(
@@ -707,7 +923,8 @@ function packJGS2GpuInput(
     cubatureTetIds,
     cubatureWeights,
     cubatureBasis,
-    ...(scene.id === "contact"
+    ...(scene.cloth ? { cloth: buildJGS2GpuClothInput(scene)! } : {}),
+    ...(scene.id === "contact" || scene.id === "cloth"
       ? {
           contactCandidates: buildStaticIpcContactCandidates(
             vertexCount,

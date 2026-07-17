@@ -176,20 +176,28 @@ cloth, and Gauss-Seidel scheduling.
 
 **Must pass before item 4**
 
-- [ ] Pinned cloth falls, stretches, and bends while pinned vertices remain fixed.
-- [ ] The included drape/fold does not pass through the collider or itself.
-- [ ] No NaNs or inverted/degenerate triangles occur in the scripted run.
-- [ ] One focused cloth energy/gradient test and one short browser test pass.
+- [x] Pinned cloth falls, stretches, and bends while pinned vertices remain fixed.
+- [x] The included drape/fold does not pass through the collider or itself.
+- [x] No NaNs or inverted/degenerate triangles occur in the scripted run.
+- [x] One focused cloth energy/gradient test and one short browser test pass.
 
 **Work record**
 
-- Status: Not started
-- Started:
-- Completed:
-- Commit:
-- Tests/commands run:
-- Actual time:
-- Notes/blockers:
+- Status: Completed
+- Started: 2026-07-17
+- Completed: 2026-07-17
+- Commit: `feat: add cloth through JGS2 and IPC`
+- Tests/commands run: focused Vitest (97 tests); full Vitest (320 tests);
+  focused hardware Playwright cloth demo (1 test); `npm run build`.
+- Actual time: About 1 hour with parallel CPU/GPU math and acceptance work.
+- Notes/blockers: The paper's StVK membrane and quadratic dihedral bending
+  use a compact cloth-specific exact local gather inside the existing JGS2
+  solve; cloth-only rest bases are therefore mass-only and have empty solid
+  Cubature records. Static cloth data appends to the existing read-only
+  Cubature buffer, preserving the seven-storage-buffer/176-byte uniform ABI.
+  The 5x5 pre-fold starts with active, feasible self-contact and reaches the
+  fixed collider by frame 48; hardware checks retained a minimum area ratio
+  of 0.8469 and a final collider separation of 0.07836 with `dmin = 0.003`.
 
 ## Item 4 - Parallel Gauss-Seidel option
 
@@ -270,7 +278,7 @@ sizes, are present:
 - [x] external forces and target objectives;
 - [x] collision candidates, IPC barrier terms, and collision-safe line search;
 - [x] frictional contact;
-- [ ] triangle cloth with stretching and bending;
+- [x] triangle cloth with stretching and bending;
 - [ ] parallel colored Gauss-Seidel as well as Jacobi; and
 - [ ] small integrated scenes demonstrating all of the above at interactive
       speed on the target computer.

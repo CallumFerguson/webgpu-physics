@@ -46,6 +46,17 @@ export {
   type VectorFunction,
 } from "./finite-difference";
 export {
+  evaluateQuadraticDihedralBending,
+  evaluateStVKTriangleMembrane,
+  precomputeQuadraticDihedralRest,
+  precomputeStVKTriangleRest,
+  type QuadraticDihedralBendingEvaluation,
+  type QuadraticDihedralRestData,
+  type StVKMembraneMaterial,
+  type StVKTriangleMembraneEvaluation,
+  type StVKTriangleRestData,
+} from "./cloth";
+export {
   buildStaticIpcContactCandidates,
   evaluateIpcBarrier,
   evaluateIpcEdgeEdgeDistance,
@@ -267,6 +278,7 @@ export type {
   SimulationSettings,
   SurfaceTopology,
   TetrahedralMesh,
+  TriangleClothDefinition,
   Vec3,
   VertexPrecomputation,
 } from "./types";

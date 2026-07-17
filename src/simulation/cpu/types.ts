@@ -94,11 +94,26 @@ export interface SimulationSettings {
   readonly initialBodyVelocities?: readonly Vec3[];
 }
 
+/** One deliberately small triangle-cloth layer sharing the scene vertex array. */
+export interface TriangleClothDefinition {
+  /** Three consistently oriented vertex indices per membrane triangle. */
+  readonly triangles: Uint32Array;
+  /** Volumetric density; areal mass is density times thickness. */
+  readonly density: number;
+  readonly youngModulus: number;
+  readonly poissonRatio: number;
+  readonly thickness: number;
+  /** Rest-edge-weighted quadratic dihedral stiffness. */
+  readonly bendingStiffness: number;
+  readonly color: ColorRgba;
+}
+
 export interface SceneDefinition {
   readonly id: string;
   readonly title: string;
   readonly description: string;
   readonly mesh: TetrahedralMesh;
+  readonly cloth?: TriangleClothDefinition;
   readonly materials: readonly LinearMaterial[];
   readonly settings: SimulationSettings;
   readonly camera: SceneCamera;

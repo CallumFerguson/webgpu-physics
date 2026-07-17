@@ -539,4 +539,97 @@ describe("JGS2 stable globalization shader contract", () => {
     expect(finalize).not.toContain("vertexObjectives");
     expect(finalize).not.toContain("vertexTargetPositionStiffness");
   });
+
+  it("treats the optional cloth arena as a bounds-checked cubature tail", () => {
+    const available = functionBody("clothTailAvailable");
+    expect(available).toContain("base <= wordCount");
+    expect(available).toContain("wordCount - base >= CLOTH_GLOBAL_WORDS");
+
+    const triangles = functionBody("clothTriangleCount");
+    expect(triangles).toContain("if (!clothTailAvailable()) { return 0u; }");
+    expect(triangles).toContain("available / CLOTH_TRIANGLE_WORDS");
+    const hinges = functionBody("clothHingeCount");
+    expect(hinges).toContain("clothTriangleCount() * CLOTH_TRIANGLE_WORDS");
+    expect(hinges).toContain("available / CLOTH_HINGE_WORDS");
+  });
+
+  it("uses analytic StVK membrane derivatives and an exact local diagonal block", () => {
+    const membrane = functionBody("clothMembraneEvaluationAt");
+    expect(membrane).toContain(
+      "let e00 = 0.5 * (dot(deformation0, deformation0) - 1.0)",
+    );
+    expect(membrane).toContain("2.0 * material.y * e01");
+    expect(membrane).toContain("firstPiola0 * shapeGradient.x");
+    expect(membrane).toContain("areaWeight * density");
+
+    const hessian = functionBody("clothMembraneLocalHessian");
+    expect(hessian).toContain("let differentialF0 = axis * shapeGradient.x");
+    expect(hessian).toContain("let differentialStress = vec3f(");
+    expect(hessian).toContain("differentialF0 * evaluation.stress.x");
+    expect(hessian).toContain("0.5 * (result + transpose(result))");
+
+    const solve = functionBody("jgs2Solve");
+    expect(solve).toContain("gradient += membrane.gradients[slot]");
+    expect(solve).toContain("hessian += clothMembraneLocalHessian(");
+  });
+
+  it("uses a wrapped signed dihedral gradient and Gauss-Newton bending block", () => {
+    const dihedral = functionBody("clothDihedralEvaluationAt");
+    expect(dihedral).toContain("for (var coordinate = 0u; coordinate < 12u");
+    expect(dihedral).toContain(
+      "(cosine * differentialSine - sine * differentialCosine)",
+    );
+    expect(dihedral).toContain("let angle = atan2(sine, cosine)");
+    const wrapped = functionBody("clothWrappedAngleDifference");
+    expect(wrapped).toContain("atan2(sin(difference), cos(difference))");
+
+    const solve = functionBody("jgs2Solve");
+    expect(solve).toContain(
+      "weightedStiffness * angleDifference * angleGradient",
+    );
+    expect(solve).toContain(
+      "weightedStiffness * outerProductColumns(",
+    );
+  });
+
+  it("includes incident cloth in local feasibility, energy, and convergence", () => {
+    const geometry = functionBody(
+      "restrictedMinimumDeformationDeterminant",
+    );
+    expect(geometry).toContain("triangle < clothTriangleCount()");
+    expect(geometry).toContain("dot(sourceNormal, trialNormal) > 0.0");
+    expect(geometry).toContain("min(sourceStretch, trialStretch)");
+
+    const restricted = functionBody("restrictedEnergyDelta");
+    expect(restricted).toContain(
+      "result += trialMembrane.energy - sourceMembrane.energy",
+    );
+    expect(restricted).toContain("result += trialBending - sourceBending");
+
+    const convergence = functionBody("convergenceGradient");
+    expect(convergence).toContain("clothMembraneEvaluationAt(");
+    expect(convergence).toContain("clothDihedralEvaluationAt(");
+  });
+
+  it("owns assembled cloth energy once and globalizes triangles after tets", () => {
+    const assembled = functionBody("vertexImplicitEnergyAt");
+    expect(assembled).toContain("clothTriangleOwnedByVertex(indices, vertex)");
+    expect(assembled).toContain("clothHingeOwnedByVertex(indices, vertex)");
+    expect(assembled).toContain("energy += clothMembraneEvaluationAt(");
+    expect(assembled).toContain("energy += clothBendingEnergyAt(");
+
+    const candidate = functionBody("candidateTetrahedron");
+    expect(candidate).toContain(
+      "element >= params.counts.y + triangleCount",
+    );
+    expect(candidate).toContain("let triangle = element - params.counts.y");
+    expect(candidate).toContain("dot(sourceNormal, candidateNormal) > 0.0");
+    expect(candidate).toContain(
+      "dynamicData[base + 1u] = vec4f(0.0, 0.0, 1.0, 1.0)",
+    );
+    const reduction = functionBody("reduceCandidate");
+    expect(reduction).toContain(
+      "tet < params.counts.y + clothTriangleCount()",
+    );
+  });
 });

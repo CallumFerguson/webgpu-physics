@@ -40,7 +40,7 @@
       "solver": {
         "iterations": 7,
         "schedule": "jacobi",
-        "cubature": { "mode": "selected", "samplesPerSubproblem": 4 }
+        "cubature": { "mode": "selected", "samplesPerSubproblem": 6 }
       },
       "initialState": {
         "position": "generator-rest-pose",
@@ -173,6 +173,113 @@
         { "id": "finite-state", "operator": "equals", "value": true, "normalization": "boolean" },
         { "id": "minimum-determinant-ratio", "operator": ">", "value": 0.01, "normalization": "frame-zero minimum determinant" },
         { "id": "settled-to-final-horizontal-drift", "operator": "<=", "value": 0.05, "normalization": "world units" }
+      ]
+    },
+    {
+      "id": "baseline.contact",
+      "phase": 0,
+      "kind": "baseline-scene",
+      "purpose": "Small-scene IPC collision, self-contact, and lagged-friction regression.",
+      "runtimeSceneId": "contact",
+      "generator": {
+        "id": "composed-ipc-contact-demo",
+        "version": "1",
+        "seed": 0,
+        "parameters": {
+          "components": ["pinned-slab", "lower-block", "sliding-upper-block", "same-body-self-contact-pair"],
+          "staticCandidateMode": "all-topology-filtered-vt-ee"
+        }
+      },
+      "materials": [
+        { "id": "pinned-contact-slab", "density": 1000, "youngModulus": 120000, "poissonRatio": 0.34, "color": [0.34, 0.4, 0.48, 1] },
+        { "id": "lower-contact-block", "density": 900, "youngModulus": 65000, "poissonRatio": 0.36, "color": [0.15, 0.74, 0.66, 1] },
+        { "id": "sliding-contact-block", "density": 850, "youngModulus": 75000, "poissonRatio": 0.35, "color": [0.97, 0.48, 0.2, 1] },
+        { "id": "self-contact-pair", "density": 825, "youngModulus": 62000, "poissonRatio": 0.35, "color": [0.72, 0.38, 0.92, 1] }
+      ],
+      "simulation": {
+        "timestep": 0.016666666666666666,
+        "gravity": [0, -9.81, 0],
+        "floorY": -0.18,
+        "parityMode": false
+      },
+      "solver": {
+        "iterations": 7,
+        "schedule": "jacobi",
+        "cubature": { "mode": "selected", "samplesPerSubproblem": 6 }
+      },
+      "initialState": {
+        "position": "generator-rest-pose with feasible IPC separation",
+        "linearVelocityByBody": [[0, 0, 0], [0, 0, 0], [0.8, 0, 0], [0, 0, 0]]
+      },
+      "sampledFrames": [
+        { "id": "start", "frame": 0, "simulatedSeconds": 0, "artifacts": ["diagnostics", "screenshot"] },
+        { "id": "contact-end", "frame": 36, "simulatedSeconds": 0.6, "artifacts": ["diagnostics", "screenshot"] }
+      ],
+      "camera": {
+        "eye": [3.4, 2.25, 4.7],
+        "target": [0.15, 0.46, 0],
+        "up": [0, 1, 0],
+        "fovYRadians": 0.7853981633974483
+      },
+      "expectedMetrics": [
+        { "id": "finite-state", "operator": "equals", "value": true, "normalization": "boolean" },
+        { "id": "minimum-ipc-distance", "operator": ">", "value": 0.003, "normalization": "world units" },
+        { "id": "friction-travel-ratio", "operator": "<", "value": 0.5, "normalization": "frictional to frictionless x travel" }
+      ]
+    },
+    {
+      "id": "baseline.cloth",
+      "phase": 0,
+      "kind": "baseline-scene",
+      "purpose": "Pinned StVK membrane and quadratic-dihedral cloth with collider and self-contact.",
+      "runtimeSceneId": "cloth",
+      "generator": {
+        "id": "pinned-prefolded-triangle-cloth",
+        "version": "1",
+        "seed": 0,
+        "parameters": {
+          "gridCells": [4, 4],
+          "triangleCount": 32,
+          "hingeCount": 40,
+          "pinnedClothVertices": 2,
+          "foldGap": 0.079,
+          "collider": { "cells": [1, 1, 1], "origin": [-0.65, 0, -0.45], "size": [0.9, 0.5, 0.9] },
+          "cloth": { "density": 480, "youngModulus": 9000, "poissonRatio": 0.3, "thickness": 0.012, "bendingStiffness": 0.045 }
+        }
+      },
+      "materials": [
+        { "id": "cloth-collider", "density": 1000, "youngModulus": 110000, "poissonRatio": 0.34, "color": [0.32, 0.39, 0.5, 1] }
+      ],
+      "simulation": {
+        "timestep": 0.008333333333333333,
+        "gravity": [0, -9.81, 0],
+        "floorY": 0,
+        "parityMode": false
+      },
+      "solver": {
+        "iterations": 7,
+        "schedule": "jacobi",
+        "cubature": { "mode": "selected", "samplesPerSubproblem": 4 }
+      },
+      "initialState": {
+        "position": "pre-folded cloth rest pose above a fixed collider",
+        "linearVelocity": [0, 0, 0]
+      },
+      "sampledFrames": [
+        { "id": "start", "frame": 0, "simulatedSeconds": 0, "artifacts": ["diagnostics", "screenshot"] },
+        { "id": "contact-end", "frame": 48, "simulatedSeconds": 0.4, "artifacts": ["diagnostics", "screenshot"] }
+      ],
+      "camera": {
+        "eye": [3.1, 2.25, 4.1],
+        "target": [0, 0.65, 0],
+        "up": [0, 1, 0],
+        "fovYRadians": 0.7853981633974483
+      },
+      "expectedMetrics": [
+        { "id": "finite-state", "operator": "equals", "value": true, "normalization": "boolean" },
+        { "id": "pinned-max-error", "operator": "<=", "value": 0.00002, "normalization": "world units" },
+        { "id": "minimum-area-ratio", "operator": ">", "value": 0.1, "normalization": "rest triangle area" },
+        { "id": "minimum-ipc-distance", "operator": ">", "value": 0.003, "normalization": "world units" }
       ]
     },
     {
