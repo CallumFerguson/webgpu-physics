@@ -7,7 +7,7 @@
       "id": "baseline.minimal",
       "phase": 0,
       "kind": "baseline-scene",
-      "purpose": "Frozen minimal cantilever regression and deterministic frame stepping.",
+      "purpose": "Frozen stable cantilever with a steady force, scripted target, and deterministic frame stepping.",
       "runtimeSceneId": "minimal",
       "generator": {
         "id": "regular-cuboid-tetrahedra",
@@ -44,7 +44,9 @@
       },
       "initialState": {
         "position": "generator-rest-pose",
-        "linearVelocity": [0, 0, 0]
+        "linearVelocity": [0, 0, 0],
+        "externalForce": { "vertex": 1, "value": [250, 0, 0] },
+        "scriptedTargetFrames": { "pullStart": 48, "pullEnd": 90, "release": 108 }
       },
       "sampledFrames": [
         {
@@ -55,8 +57,8 @@
         },
         {
           "id": "visual-end",
-          "frame": 45,
-          "simulatedSeconds": 1.5,
+          "frame": 60,
+          "simulatedSeconds": 2,
           "artifacts": ["diagnostics", "screenshot"]
         }
       ],

@@ -79,10 +79,18 @@ export const SCENE_IDS = [
 ] as const;
 export type SceneId = (typeof SCENE_IDS)[number];
 export const DEFAULT_SCENE_ID: SceneId = "minimal";
+/** Curated capability demos shown in the app; other scene IDs remain fixtures. */
+export const PUBLIC_SCENE_IDS = [
+  "minimal",
+  "contact",
+  "cloth",
+  "stress",
+] as const satisfies readonly SceneId[];
+export type PublicSceneId = (typeof PUBLIC_SCENE_IDS)[number];
 
 /**
  * Test-only scene identifier. It is deliberately excluded from SCENE_IDS so
- * the four public demo links remain stable.
+ * the public demo links remain stable.
  */
 export const FORCE_FREE_CONSERVATION_FIXTURE_ID =
   PHASE0_FORCE_FREE_FIXTURE_ID;
@@ -180,6 +188,8 @@ export interface MinimalScriptedTargetState {
 }
 
 export const MINIMAL_SCRIPTED_TARGET_VERTEX = 1;
+/** Steady public-demo force, separate from gravity and the scripted target. */
+export const MINIMAL_EXTERNAL_FORCE = [250, 0, 0] as const;
 export const MINIMAL_SCRIPTED_TARGET_PULL_START_FRAME = 48;
 export const MINIMAL_SCRIPTED_TARGET_PULL_END_FRAME = 90;
 export const MINIMAL_SCRIPTED_TARGET_RELEASE_FRAME = 108;
@@ -267,7 +277,7 @@ function minimalDefinition(): SceneDefinition {
     id: "minimal",
     title: "Minimal cantilever",
     description:
-      "A left-face-fixed tetrahedral beam sags under gravity; its left end must remain still while the free tip moves down.",
+      "A left-face-fixed stable solid sags under gravity and a steady lateral force before its free tip follows a scripted soft target.",
     mesh,
     materials: [MINIMAL_MATERIAL],
     settings: {
@@ -904,6 +914,13 @@ function packJGS2GpuInput(
     }
   }
 
+  const externalForces =
+    scene.id === "minimal" ? new Float32Array(vertexCount * 3) : undefined;
+  externalForces?.set(
+    MINIMAL_EXTERNAL_FORCE,
+    MINIMAL_SCRIPTED_TARGET_VERTEX * 3,
+  );
+
   const input: JGS2GpuInput = {
     vertexCount,
     tetCount,
@@ -913,6 +930,7 @@ function packJGS2GpuInput(
     vertexRest,
     vertexColors: computeVertexColors(scene),
     vertexInfo,
+    ...(externalForces ? { objectives: { externalForces } } : {}),
     tetIndices: scene.mesh.tetrahedra.slice(),
     tetInverseDm,
     tetMeta,

@@ -17,6 +17,7 @@ import {
   PHASE0_FORCE_FREE_CORPUS_CASE_COUNT,
   PHASE0_FORCE_FREE_FRAME_COUNT,
   PHASE0_FORCE_FREE_ITERATIONS,
+  PUBLIC_SCENE_IDS,
   SCENE_IDS,
   buildForceFreeConservationDefinition,
   buildForceFreeConservationScene,
@@ -1693,6 +1694,7 @@ export function App() {
   const displayedIterations =
     stats?.iterations ?? sceneDefinition.settings.solverIterations;
   const displayedSchedule = stats?.schedule ?? schedule;
+  const publicSceneIndex = PUBLIC_SCENE_IDS.findIndex((id) => id === sceneId);
   const displayedConvergence = stats?.convergence ?? null;
   const displayedTarget =
     !conservationFixture && sceneId === "minimal" && !parityMode
@@ -1739,7 +1741,7 @@ export function App() {
         <aside className="scene-rail" aria-label="Demo scenes">
           <p className="rail-label">Scenes</p>
           <nav>
-            {SCENE_IDS.map((id, index) => (
+            {PUBLIC_SCENE_IDS.map((id, index) => (
               <a
                 className={id === sceneId ? "scene-link scene-link--active" : "scene-link"}
                 href={sceneHref(id, schedule)}
@@ -1779,7 +1781,12 @@ export function App() {
         <section className="content">
           <div className="scene-heading">
             <div>
-              <p className="eyebrow">Demo {String(SCENE_IDS.indexOf(sceneId) + 1).padStart(2, "0")} · Deterministic</p>
+              <p className="eyebrow">
+                {publicSceneIndex >= 0
+                  ? `Demo ${String(publicSceneIndex + 1).padStart(2, "0")}`
+                  : "Regression fixture"}
+                {" · Deterministic"}
+              </p>
               <h1>{sceneDefinition.title}</h1>
             </div>
             <p>{sceneDefinition.description}</p>

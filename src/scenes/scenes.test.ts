@@ -16,6 +16,9 @@ import {
   PHASE0_FORCE_FREE_INITIAL_EULER,
   PHASE0_FORCE_FREE_ITERATIONS,
   PHASE0_FORCE_FREE_TIMESTEP,
+  MINIMAL_EXTERNAL_FORCE,
+  MINIMAL_SCRIPTED_TARGET_VERTEX,
+  PUBLIC_SCENE_IDS,
   SCENE_IDS,
   buildForceFreeConservationScene,
   buildScene,
@@ -37,6 +40,12 @@ describe("procedural demo scenes", () => {
       "stress",
     ]);
     expect(DEFAULT_SCENE_ID).toBe("minimal");
+    expect(PUBLIC_SCENE_IDS).toEqual([
+      "minimal",
+      "contact",
+      "cloth",
+      "stress",
+    ]);
     expect(buildSceneDefinition(DEFAULT_SCENE_ID).id).toBe("minimal");
   });
 
@@ -91,6 +100,23 @@ describe("procedural demo scenes", () => {
       ...secondGpu.cubatureWeights,
     ]);
     expect([...firstGpu.cubatureBasis]).toEqual([...secondGpu.cubatureBasis]);
+  });
+
+  it("ships the minimal demo with a separate steady external force", () => {
+    const input = toJGS2GpuInput(buildScene("minimal"));
+    const forces = input.objectives?.externalForces;
+    expect(forces).toBeDefined();
+    expect(
+      Array.from(
+        forces!.subarray(
+          MINIMAL_SCRIPTED_TARGET_VERTEX * 3,
+          MINIMAL_SCRIPTED_TARGET_VERTEX * 3 + 3,
+        ),
+      ),
+    ).toEqual(MINIMAL_EXTERNAL_FORCE);
+    expect(
+      Array.from(forces!).filter((component) => component !== 0),
+    ).toEqual([MINIMAL_EXTERNAL_FORCE[0]]);
   });
 
   it("implements the frozen exact-all-element force-free fixture", () => {

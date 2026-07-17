@@ -63,9 +63,10 @@ feature work. The full E2E tier is not part of this roadmap. At the end, run
 one build and the small set of new capability tests together; run the existing
 fast E2E suite once only if shared solver changes make that useful.
 
-## Existing foundation
+## Roadmap-start foundation
 
-The repository already contains the expensive foundation work:
+At the start of this roadmap, the repository already contained the expensive
+foundation work:
 
 - implicit tetrahedral elastodynamics and WebGPU rendering;
 - the paper's full-coordinate JGS2 local perturbation basis;
@@ -77,9 +78,9 @@ The repository already contains the expensive foundation work:
 - four existing scenes, deterministic frame stepping, screenshots, and a live
   performance HUD.
 
-The remaining work is to expose that foundation in complete demos and add the
-paper capabilities that are genuinely absent: mesh contact/IPC, friction,
-cloth, and Gauss-Seidel scheduling.
+The roadmap items below record how that foundation was exposed in complete
+demos and extended with mesh contact/IPC, friction, cloth, and Gauss-Seidel
+scheduling.
 
 ## Item 1 - Finish the nonlinear-solid demo path
 
@@ -256,24 +257,34 @@ interactively on this machine; no formal universal FPS promise is required.
 
 **Definition of done**
 
-- [ ] Each paper capability listed below is exercised by at least one scene.
-- [ ] Every scene starts automatically and has an unambiguous visual result.
-- [ ] The HUD reports FPS, 1% low, CPU submit/step time, GPU step/render time
+- [x] Each paper capability listed below is exercised by at least one scene.
+- [x] Every scene starts automatically and has an unambiguous visual result.
+- [x] The HUD reports FPS, 1% low, CPU submit/step time, GPU step/render time
       when timestamp queries are available, solver type, and iterations.
-- [ ] One integrated browser smoke test visits the four scenes, takes start/end
+- [x] One integrated browser smoke test visits the four scenes, takes start/end
       screenshots, and checks only finiteness plus the scene's main landmark.
-- [ ] `npm run build` and the focused capability tests pass together.
-- [ ] README run instructions and capability limitations are accurate.
+- [x] `npm run build` and the focused capability tests pass together.
+- [x] README run instructions and capability limitations are accurate.
 
 **Work record**
 
-- Status: Not started
-- Started:
-- Completed:
-- Commit:
-- Tests/commands run:
-- Actual time:
-- Notes/blockers:
+- Status: Completed
+- Started: 2026-07-17
+- Completed: 2026-07-17
+- Commit: `feat: finalize capability demos and handoff`
+- Tests/commands run: focused Vitest (48 tests); combined hardware Playwright
+  Item 1-5 capability run (5 tests); production auto-start/live-HUD hardware
+  check (1 test); `npm run build`; final full Vitest (327 tests).
+- Actual time: About 1 hour including visual review and hardware integration.
+- Notes/blockers: The public rail now contains only minimal, contact, cloth,
+  and stress; stiffness/drop remain addressable regression fixtures. Minimal
+  visibly combines a steady external force with the scripted soft target. The
+  integrated hardware smoke advances 60/24/48/60 frames respectively, uses an
+  isolated WebGPU context per scene, captures eight screenshots, and reports
+  finite states plus landmark motions of 0.1201, 0.2363, 0.5662, and 0.9314.
+  The focused tests retain the detailed feasibility checks. The target
+  Chrome/NVIDIA adapter also populated FPS, 1% low,
+  CPU timing, and GPU timestamp-query fields. No universal FPS claim is made.
 
 ## Paper capability checklist
 
@@ -289,8 +300,8 @@ sizes, are present:
 - [x] collision candidates, IPC barrier terms, and collision-safe line search;
 - [x] frictional contact;
 - [x] triangle cloth with stretching and bending;
-- [ ] parallel colored Gauss-Seidel as well as Jacobi; and
-- [ ] small integrated scenes demonstrating all of the above at interactive
+- [x] parallel colored Gauss-Seidel as well as Jacobi; and
+- [x] small integrated scenes demonstrating all of the above at interactive
       speed on the target computer.
 
 Large-scale preprocessing, millions of elements, every demo in the paper, and
