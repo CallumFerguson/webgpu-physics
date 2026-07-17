@@ -82,6 +82,13 @@ test("P0-EC-03 exact GPU oracle matches the CPU oracle with active floor contact
 
     const scene = scenes.buildScene("drop");
     const input = scenes.toJGS2GpuInput(scene);
+    // P0-EC-03 is the retained co-rotated CPU/GPU oracle contract. The public
+    // drop demo now uses stable Neo-Hookean material, so keep this regression
+    // fixture on its original material path independently of demo evolution.
+    for (let tetrahedron = 0; tetrahedron < input.tetCount; tetrahedron += 1) {
+      input.tetMeta[tetrahedron * 4 + 3] =
+        gpuApi.JGS2_MATERIAL_COROTATED_LINEAR;
+    }
     const timestep = scene.settings.timestep;
     const solver = await gpuApi.JGS2GpuSolver.create(device, input, {
       timestep,
@@ -99,7 +106,7 @@ test("P0-EC-03 exact GPU oracle matches the CPU oracle with active floor contact
       const initialDiagnostics = await solver.readOracleDiagnostics();
       // This checkpoint is after impact, so the same comparison covers the
       // all-element elastic, inertial, and quadratic floor-contact terms.
-      solver.stepFrames(35);
+      solver.stepFramesExactIterations(80, scene.settings.solverIterations);
       await solver.awaitIdle();
       const positions4 = await solver.readPositions();
       const predicted4 = await solver.readPredictedPositions();

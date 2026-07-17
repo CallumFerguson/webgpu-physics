@@ -87,6 +87,7 @@ export interface JGS2ObjectiveActivity {
 
 export interface JGS2GlobalizationDiagnostics {
   readonly local: readonly JGS2GlobalizationLocalDiagnostic[];
+  /** Executed records; production stops at convergence, exact APIs do not. */
   readonly history: readonly JGS2GlobalizationHistoryRecord[];
   readonly historyCount: number;
 }
@@ -444,6 +445,7 @@ function packUniforms(
   sourcePosition: number,
   targetPosition: number,
   globalizationEnabled: boolean,
+  stopAfterConvergence: boolean,
   sceneScale: number,
   objectiveFlags: number,
 ): Uint8Array {
@@ -528,7 +530,7 @@ function packUniforms(
       settings.residualTolerance,
       settings.normalizedUpdateTolerance,
       sceneScale,
-      0,
+      Number(stopAfterConvergence),
     ],
     40,
   );
@@ -814,12 +816,6 @@ export class JGS2GpuSolver {
             `${minimumDeterminant}.`,
         );
       }
-      // This project-specific translation changes the assembled pose after
-      // feasibility has been certified. Stable solves therefore keep it off.
-      resolvedSettings = {
-        ...resolvedSettings,
-        horizontalBodyCorrection: false,
-      };
     }
     const bodyCount = inferJGS2BodyCount(input.vertexInfo, input.vertexCount);
     const offsets = computeJGS2DynamicOffsets(
@@ -1068,6 +1064,7 @@ export class JGS2GpuSolver {
             offsets.posA,
             offsets.posA,
             true,
+            false,
             sceneScale,
             initialObjectiveActivity.flags,
           ),
@@ -1148,6 +1145,7 @@ export class JGS2GpuSolver {
     return this.positionView(this.dynamicOffsets.old);
   }
 
+  /** Configured iteration budget, distinct from stable historyCount after a stop. */
   get lastSubmittedIterationCount(): number {
     return this.submittedIterations;
   }
@@ -1387,7 +1385,7 @@ export class JGS2GpuSolver {
     }
     const settings = this.resolveStepSettings(overrides);
     const iterations = normalizeOddIterationCount(settings.iterations);
-    this.submitFrame(settings, iterations);
+    this.submitFrame(settings, iterations, true);
   }
 
   /**
@@ -1415,12 +1413,13 @@ export class JGS2GpuSolver {
     }
     const settings = this.resolveStepSettings(overrides);
     const iterations = normalizeOddIterationCount(settings.iterations);
-    this.submitFrames(settings, iterations, frameCount);
+    this.submitFrames(settings, iterations, frameCount, true);
   }
 
   /**
    * Advance one complete simulation frame using exactly the requested number
-   * of nonlinear Jacobi iterations. Unlike step(), even counts are retained.
+   * of nonlinear Jacobi iterations. Unlike step(), even counts are retained
+   * and a stable convergence flag does not short-circuit later iterations.
    */
   stepExactIterations(
     iterations: number,
@@ -1439,7 +1438,7 @@ export class JGS2GpuSolver {
       );
     }
     const settings = this.resolveStepSettings(overrides);
-    this.submitFrame(settings, iterations);
+    this.submitFrame(settings, iterations, false);
   }
 
   /**
@@ -1466,7 +1465,7 @@ export class JGS2GpuSolver {
       );
     }
     const settings = this.resolveStepSettings(overrides);
-    this.submitFrames(settings, iterations, frameCount);
+    this.submitFrames(settings, iterations, frameCount, false);
   }
 
   /**
@@ -1491,7 +1490,7 @@ export class JGS2GpuSolver {
     const settings = this.resolveStepSettings(overrides);
     const iterations = normalizeOddIterationCount(settings.iterations);
     const measurement = await this.timestampTimer.measure((encoder) => {
-      this.prepareFrame(settings, iterations);
+      this.prepareFrame(settings, iterations, true);
       this.encodeFrame(encoder, settings, iterations);
     });
     this.markGlobalizationRecordsAvailable();
@@ -1523,6 +1522,7 @@ export class JGS2GpuSolver {
       settings,
       normalizeOddIterationCount(settings.iterations),
       writes,
+      true,
     );
   }
 
@@ -1546,18 +1546,28 @@ export class JGS2GpuSolver {
       );
     }
     const settings = this.resolveStepSettings(overrides);
-    this.submitFrameWithGpuTimestampWrites(settings, iterations, writes);
+    this.submitFrameWithGpuTimestampWrites(settings, iterations, writes, false);
   }
 
-  private submitFrame(settings: JGS2StepSettings, iterations: number): void {
-    this.submitFrames(settings, iterations, 1);
+  private submitFrame(
+    settings: JGS2StepSettings,
+    iterations: number,
+    stopAfterConvergence: boolean,
+  ): void {
+    this.submitFrames(settings, iterations, 1, stopAfterConvergence);
   }
 
   private resolveStepSettings(
     overrides: Partial<JGS2StepSettings>,
   ): JGS2StepSettings {
     const resolved = resolveJGS2StepSettings(this.defaultSettings, overrides);
-    return this.globalizationEnabled && resolved.horizontalBodyCorrection
+    // The free-body correction is one common x/z translation per body, so it
+    // preserves every deformation gradient and determinant on the horizontal
+    // debug plane. Active force/target objectives are not translation
+    // invariant, however, and must retain their solved center-of-mass motion.
+    return this.globalizationEnabled &&
+      this.objectiveFlagsValue !== 0 &&
+      resolved.horizontalBodyCorrection
       ? { ...resolved, horizontalBodyCorrection: false }
       : resolved;
   }
@@ -1566,8 +1576,9 @@ export class JGS2GpuSolver {
     settings: JGS2StepSettings,
     iterations: number,
     writes: GpuTimestampIntervalWrites,
+    stopAfterConvergence: boolean,
   ): void {
-    this.prepareFrame(settings, iterations);
+    this.prepareFrame(settings, iterations, stopAfterConvergence);
     const encoder = this.device.createCommandEncoder({
       label: "jgs2-profiled-step-command-encoder",
     });
@@ -1580,11 +1591,12 @@ export class JGS2GpuSolver {
     settings: JGS2StepSettings,
     iterations: number,
     frameCount: number,
+    stopAfterConvergence: boolean,
   ): void {
     if (this.globalizationEnabled) {
       validateGlobalizedSubmissionWork(frameCount, iterations);
     }
-    this.prepareFrame(settings, iterations);
+    this.prepareFrame(settings, iterations, stopAfterConvergence);
     const encoder = this.device.createCommandEncoder({
       label:
         frameCount === 1
@@ -1604,7 +1616,11 @@ export class JGS2GpuSolver {
     }
   }
 
-  private prepareFrame(settings: JGS2StepSettings, iterations: number): void {
+  private prepareFrame(
+    settings: JGS2StepSettings,
+    iterations: number,
+    stopAfterConvergence: boolean,
+  ): void {
     if (
       this.globalizationEnabled &&
       iterations > JGS2_GLOBALIZATION_HISTORY_CAPACITY
@@ -1628,6 +1644,7 @@ export class JGS2GpuSolver {
         this.dynamicOffsets.posA,
         this.dynamicOffsets.posA,
         this.globalizationEnabled,
+        this.globalizationEnabled && stopAfterConvergence,
         this.sceneScale,
         this.objectiveFlagsValue,
       ),
@@ -1642,6 +1659,7 @@ export class JGS2GpuSolver {
         this.dynamicOffsets.posB,
         this.dynamicOffsets.posA,
         this.globalizationEnabled,
+        this.globalizationEnabled && stopAfterConvergence,
         this.sceneScale,
         this.objectiveFlagsValue,
       ),
@@ -1656,6 +1674,7 @@ export class JGS2GpuSolver {
         this.dynamicOffsets.posA,
         this.dynamicOffsets.posB,
         this.globalizationEnabled,
+        this.globalizationEnabled && stopAfterConvergence,
         this.sceneScale,
         this.objectiveFlagsValue,
       ),
@@ -1847,7 +1866,8 @@ export class JGS2GpuSolver {
   /**
    * Explicitly read each vertex's final nonlinear update record. The x lane is
    * ||delta|| and w is one after a submitted frame (zero before the first
-   * nonlinear iteration); pinned vertices report a zero magnitude.
+   * nonlinear iteration); pinned vertices report a zero magnitude. A stopped
+   * production frame retains the final executed iteration's update.
    */
   async readFinalIterationUpdates(): Promise<Float32Array> {
     this.assertUsable();
@@ -1954,7 +1974,7 @@ export class JGS2GpuSolver {
       }
     }
     const settings = this.resolveStepSettings(overrides);
-    this.prepareFrame(settings, 1);
+    this.prepareFrame(settings, 1, false);
     this.device.queue.writeBuffer(
       this.buffers.dynamic,
       this.dynamicOffsets.posB * 16,
@@ -2120,7 +2140,7 @@ export class JGS2GpuSolver {
     );
     control.set([0, 0, 0, 1], 8);
     const settings = this.resolveStepSettings(overrides);
-    this.prepareFrame(settings, 1);
+    this.prepareFrame(settings, 1, false);
     if (reductionVertexCount !== this.vertexCount) {
       this.device.queue.writeBuffer(
         this.uniforms.base,
@@ -2132,6 +2152,7 @@ export class JGS2GpuSolver {
           this.dynamicOffsets.posA,
           this.dynamicOffsets.posA,
           true,
+          false,
           this.sceneScale,
           this.objectiveFlagsValue,
         ),

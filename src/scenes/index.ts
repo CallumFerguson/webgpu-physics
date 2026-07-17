@@ -84,6 +84,12 @@ const SOFT_MATERIAL: LinearMaterial = {
   color: [0.13, 0.82, 0.7, 1],
 };
 
+const MINIMAL_MATERIAL: LinearMaterial = {
+  ...SOFT_MATERIAL,
+  name: "stable Neo-Hookean soft rubber",
+  model: "stable-neo-hookean",
+};
+
 const STIFF_MATERIAL: LinearMaterial = {
   name: "stiff rubber",
   density: 950,
@@ -94,11 +100,104 @@ const STIFF_MATERIAL: LinearMaterial = {
 
 const DROP_MATERIAL: LinearMaterial = {
   name: "drop block",
+  model: "stable-neo-hookean",
   density: 900,
   youngModulus: 70_000,
   poissonRatio: 0.36,
   color: [0.26, 0.63, 0.96, 1],
 };
+
+export type MinimalScriptedTargetPhase =
+  | "waiting"
+  | "pulling"
+  | "holding"
+  | "released";
+
+export interface MinimalScriptedTargetState {
+  readonly vertex: number;
+  readonly phase: MinimalScriptedTargetPhase;
+  readonly active: boolean;
+  readonly position: readonly [number, number, number];
+  readonly stiffness: number;
+  /** Changes only when the queue-visible objective record must be updated. */
+  readonly revision: number;
+}
+
+export const MINIMAL_SCRIPTED_TARGET_VERTEX = 1;
+export const MINIMAL_SCRIPTED_TARGET_PULL_START_FRAME = 48;
+export const MINIMAL_SCRIPTED_TARGET_PULL_END_FRAME = 90;
+export const MINIMAL_SCRIPTED_TARGET_RELEASE_FRAME = 108;
+const MINIMAL_SCRIPTED_TARGET_KEYFRAME_INTERVAL = 3;
+const MINIMAL_SCRIPTED_TARGET_STIFFNESS = 30_000;
+const MINIMAL_SCRIPTED_TARGET_REST_POSITION = [1, 1.35, -0.4] as const;
+const MINIMAL_SCRIPTED_TARGET_PULL_OFFSET = [0.45, 0.65, 0.25] as const;
+
+/**
+ * Small deterministic user-manipulation stand-in for the public cantilever.
+ * The target moves on coarse keyframes so deterministic test stepping can
+ * batch identical objective records, then becomes a true zero-stiffness
+ * release without touching the simulated position or velocity buffers.
+ */
+export function minimalScriptedTargetAtFrame(
+  frame: number,
+): MinimalScriptedTargetState {
+  if (!Number.isSafeInteger(frame) || frame < 0) {
+    throw new RangeError("Minimal scripted-target frame must be nonnegative.");
+  }
+  if (frame < MINIMAL_SCRIPTED_TARGET_PULL_START_FRAME) {
+    return {
+      vertex: MINIMAL_SCRIPTED_TARGET_VERTEX,
+      phase: "waiting",
+      active: false,
+      position: MINIMAL_SCRIPTED_TARGET_REST_POSITION,
+      stiffness: 0,
+      revision: 0,
+    };
+  }
+
+  const pullFrame = Math.min(frame, MINIMAL_SCRIPTED_TARGET_PULL_END_FRAME);
+  const keyframe = Math.min(
+    MINIMAL_SCRIPTED_TARGET_PULL_END_FRAME,
+    MINIMAL_SCRIPTED_TARGET_PULL_START_FRAME +
+      Math.floor(
+        (pullFrame - MINIMAL_SCRIPTED_TARGET_PULL_START_FRAME) /
+          MINIMAL_SCRIPTED_TARGET_KEYFRAME_INTERVAL,
+      ) * MINIMAL_SCRIPTED_TARGET_KEYFRAME_INTERVAL,
+  );
+  const linearProgress =
+    (keyframe - MINIMAL_SCRIPTED_TARGET_PULL_START_FRAME) /
+    (MINIMAL_SCRIPTED_TARGET_PULL_END_FRAME -
+      MINIMAL_SCRIPTED_TARGET_PULL_START_FRAME);
+  const progress = linearProgress * linearProgress * (3 - 2 * linearProgress);
+  const position: readonly [number, number, number] = [
+    MINIMAL_SCRIPTED_TARGET_REST_POSITION[0] +
+      MINIMAL_SCRIPTED_TARGET_PULL_OFFSET[0] * progress,
+    MINIMAL_SCRIPTED_TARGET_REST_POSITION[1] +
+      MINIMAL_SCRIPTED_TARGET_PULL_OFFSET[1] * progress,
+    MINIMAL_SCRIPTED_TARGET_REST_POSITION[2] +
+      MINIMAL_SCRIPTED_TARGET_PULL_OFFSET[2] * progress,
+  ];
+
+  if (frame >= MINIMAL_SCRIPTED_TARGET_RELEASE_FRAME) {
+    return {
+      vertex: MINIMAL_SCRIPTED_TARGET_VERTEX,
+      phase: "released",
+      active: false,
+      position,
+      stiffness: 0,
+      revision: MINIMAL_SCRIPTED_TARGET_RELEASE_FRAME,
+    };
+  }
+  return {
+    vertex: MINIMAL_SCRIPTED_TARGET_VERTEX,
+    phase:
+      frame < MINIMAL_SCRIPTED_TARGET_PULL_END_FRAME ? "pulling" : "holding",
+    active: true,
+    position,
+    stiffness: MINIMAL_SCRIPTED_TARGET_STIFFNESS,
+    revision: keyframe + 1,
+  };
+}
 
 function minimalDefinition(): SceneDefinition {
   const mesh = generateRegularCuboidMesh({
@@ -114,13 +213,13 @@ function minimalDefinition(): SceneDefinition {
     description:
       "A left-face-fixed tetrahedral beam sags under gravity; its left end must remain still while the free tip moves down.",
     mesh,
-    materials: [SOFT_MATERIAL],
+    materials: [MINIMAL_MATERIAL],
     settings: {
       timestep: 1 / 30,
       gravity: [0, -9.81, 0],
       floorY: 0,
       solverIterations: 7,
-      cubatureSamples: 4,
+      cubatureSamples: 6,
     },
     camera: {
       eye: [4.8, 3.2, 6.2],
@@ -184,7 +283,9 @@ function stiffnessDefinition(): SceneDefinition {
 
 function dropDefinition(): SceneDefinition {
   const centered = generateRegularCuboidMesh({
-    cells: [2, 1, 1],
+    // The public roadmap demo deliberately stays at six tetrahedra so the
+    // nonlinear Cubature may sample the complete tiny mesh at runtime.
+    cells: [1, 1, 1],
     origin: [-0.75, -0.5, -0.45],
     size: [1.5, 1, 0.9],
     materialId: 0,
@@ -192,7 +293,7 @@ function dropDefinition(): SceneDefinition {
   });
   const mesh = transformTetrahedralMesh(centered, {
     translation: [0, 2.45, 0],
-    rotationEuler: [0.18, 0.12, 0.32],
+    rotationEuler: [0, 0.12, 0],
   });
 
   return {

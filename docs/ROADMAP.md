@@ -95,22 +95,29 @@ cloth, and Gauss-Seidel scheduling.
 
 **Must pass before item 2**
 
-- [ ] Minimal scene visibly deforms under gravity without inversion or NaNs.
-- [ ] A scripted target pulls and releases a body without teleporting it or
+- [x] Minimal scene visibly deforms under gravity without inversion or NaNs.
+- [x] A scripted target pulls and releases a body without teleporting it or
       erasing its velocity.
-- [ ] HUD identifies stable Neo-Hookean and reports finite convergence values.
-- [ ] One focused browser test reaches the useful end state and saves the two
+- [x] HUD identifies stable Neo-Hookean and reports finite convergence values.
+- [x] One focused browser test reaches the useful end state and saves the two
       screenshots.
 
 **Work record**
 
-- Status: Not started
-- Started:
-- Completed:
-- Commit:
-- Tests/commands run:
-- Actual time:
-- Notes/blockers:
+- Status: Completed
+- Started: 2026-07-17
+- Completed: 2026-07-17
+- Commit: `feat: complete nonlinear solid demo`
+- Tests/commands run: focused Vitest (67 tests); focused hardware Playwright
+  checks (4 tests); `npm run build`; `npm run test:e2e` (28 tests).
+- Actual time: About 2.5 hours including regression hardening.
+- Notes/blockers: Minimal and drop now use stable Neo-Hookean material. The
+  scripted soft target has an inactive gravity phase, deterministic pull/hold,
+  and state-preserving release. Production stable solves latch convergence on
+  the GPU; exact APIs retain their full requested iteration history. The
+  objective-free drop also uses the existing mass-COM correction, a common x/z
+  translation that preserves deformation gradients and prevents finite JGS
+  momentum drift; active force/target solves disable that correction.
 
 ## Item 2 - Small-scene IPC contact and friction
 

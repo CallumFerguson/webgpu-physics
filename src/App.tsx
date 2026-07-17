@@ -23,8 +23,10 @@ import {
   buildScene,
   buildSceneDefinition,
   generatePhase0ForceFreeInitialStateCorpus,
+  minimalScriptedTargetAtFrame,
   toForceFreeConservationGpuInput,
   toJGS2GpuInput,
+  type MinimalScriptedTargetState,
   type SceneId,
 } from "./scenes";
 import {
@@ -32,6 +34,7 @@ import {
   GpuTimestampFrameProfiler,
   GpuTimestampLiveProfiler,
   JGS2GpuSolver,
+  type JGS2GlobalizationHistoryRecord,
   type GpuTimestampLiveFramePlan,
   type GpuTimestampMeasurement,
 } from "./simulation/gpu";
@@ -70,6 +73,11 @@ interface JGS2TestHarness {
   ): Promise<readonly Phase0ForceFreeCorpusResult[]>;
   /** Test-only camera follow used to make a translated final pose visible. */
   focusOnPrimaryBody(): Promise<readonly [number, number, number]>;
+  /** Queue-coherent state of the public minimal scene's scripted target. */
+  scriptedTarget(): (MinimalScriptedTargetState & {
+    readonly solverTargetActive: boolean;
+    readonly objectiveRevision: number;
+  }) | null;
 }
 
 interface JGS2TestConfiguration {
@@ -126,6 +134,15 @@ interface RuntimeStats {
   readonly adapter: string;
   readonly iterations: number;
   readonly cubatureSamples: number;
+  readonly material: string;
+  readonly convergence: RuntimeConvergence | null;
+}
+
+interface RuntimeConvergence {
+  readonly finite: boolean;
+  readonly converged: boolean;
+  readonly relativeResidual: number;
+  readonly normalizedMaximumUpdate: number;
 }
 
 type LivePerformanceStatus =
@@ -182,6 +199,12 @@ function formatLiveNumber(
   return value === null || value === undefined || !Number.isFinite(value)
     ? "\u2014"
     : value.toFixed(fractionDigits);
+}
+
+function formatConvergenceNumber(value: number | null | undefined): string {
+  return value === null || value === undefined || !Number.isFinite(value)
+    ? "\u2014"
+    : value.toExponential(2);
 }
 
 function livePerformanceStatusLabel(view: LivePerformanceView): string {
@@ -251,6 +274,37 @@ function boundsDiagonal(diagnostics: JGS2Diagnostics): number {
     diagnostics.bounds.max[1] - diagnostics.bounds.min[1],
     diagnostics.bounds.max[2] - diagnostics.bounds.min[2],
   );
+}
+
+function materialLabel(
+  materials: readonly { readonly model?: string }[],
+): string {
+  const models = new Set(
+    materials.map((material) => material.model ?? "corotated-linear"),
+  );
+  if (models.size > 1) {
+    return "Mixed materials";
+  }
+  return models.has("stable-neo-hookean")
+    ? "Stable Neo-Hookean"
+    : "Co-rotated linear";
+}
+
+function convergenceFromHistory(
+  record: JGS2GlobalizationHistoryRecord,
+): RuntimeConvergence {
+  const finite =
+    record.finite &&
+    record.residualDiagnosticsValid &&
+    record.updateDiagnosticsValid &&
+    Number.isFinite(record.relativeResidual) &&
+    Number.isFinite(record.normalizedMaximumUpdate);
+  return {
+    finite,
+    converged: record.converged,
+    relativeResidual: record.relativeResidual,
+    normalizedMaximumUpdate: record.normalizedMaximumUpdate,
+  };
 }
 
 export function App() {
@@ -466,6 +520,89 @@ export function App() {
       }
 
       let simulationFrame = 0;
+      let scriptedTargetState: MinimalScriptedTargetState | null =
+        scene.id === "minimal" && !parityMode
+          ? minimalScriptedTargetAtFrame(0)
+          : null;
+
+      const applyScriptedTargetForFrame = (targetFrame: number): void => {
+        if (!scriptedTargetState) {
+          return;
+        }
+        const next = minimalScriptedTargetAtFrame(targetFrame);
+        if (next.revision === scriptedTargetState.revision) {
+          scriptedTargetState = next;
+          return;
+        }
+        if (next.active) {
+          solver!.setQuadraticTarget(
+            next.vertex,
+            next.position,
+            next.stiffness,
+          );
+        } else if (scriptedTargetState.active) {
+          solver!.releaseQuadraticTarget(next.vertex);
+        }
+        scriptedTargetState = next;
+      };
+
+      const scriptedTargetBatchLength = (maximum: number): number => {
+        if (!scriptedTargetState || maximum <= 1) {
+          return maximum;
+        }
+        const first = minimalScriptedTargetAtFrame(simulationFrame + 1);
+        let frameCount = 1;
+        while (
+          frameCount < maximum &&
+          minimalScriptedTargetAtFrame(simulationFrame + frameCount + 1)
+            .revision === first.revision
+        ) {
+          frameCount += 1;
+        }
+        return frameCount;
+      };
+
+      const publishGlobalizationHistory = (
+        record: JGS2GlobalizationHistoryRecord,
+        historyCount: number,
+      ): void => {
+        if (!active) {
+          return;
+        }
+        const actualIterations = Math.min(
+          historyCount,
+          record.iterationIndex + 1,
+        );
+        setStats((current) =>
+          current
+            ? {
+                ...current,
+                iterations: actualIterations,
+                convergence: convergenceFromHistory(record),
+              }
+            : current,
+        );
+      };
+
+      const readGlobalizationHistory = async (): Promise<
+        JGS2GlobalizationHistoryRecord | null
+      > => {
+        if (
+          !solver!.globalizationEnabled ||
+          solver!.lastSubmittedIterationCount === 0
+        ) {
+          return null;
+        }
+        recordSubmission("readback");
+        const diagnostics = await solver!.readGlobalizationDiagnostics();
+        recordQueueDrained();
+        const record = diagnostics.history[diagnostics.historyCount - 1] ?? null;
+        if (record) {
+          publishGlobalizationHistory(record, diagnostics.historyCount);
+        }
+        return record;
+      };
+
       const readDiagnostics = async (): Promise<JGS2Diagnostics> => {
         recordSubmission("readback");
         const positionsPromise = solver!.readPositions();
@@ -477,13 +614,16 @@ export function App() {
         ]);
         recordQueueDrained();
         const submittedSettings = solver!.lastSubmittedSettings;
-        return diagnosticsFromState(
+        const convergence = await readGlobalizationHistory();
+        const diagnostics = diagnosticsFromState(
           scene,
           positions,
           velocities,
           {
             frame: simulationFrame,
-            lastStepIterations: solver!.lastSubmittedIterationCount,
+            lastStepIterations: convergence
+              ? convergence.iterationIndex + 1
+              : solver!.lastSubmittedIterationCount,
             runtime: {
               parityMode: submittedSettings.parityMode,
               velocityDamping: submittedSettings.velocityDamping,
@@ -494,6 +634,20 @@ export function App() {
             },
           },
         );
+        return convergence
+          ? {
+              ...diagnostics,
+              finite: diagnostics.finite && convergence.finite,
+              relativeResidual: convergence.relativeResidual,
+              relativeResidualValid:
+                convergence.residualDiagnosticsValid &&
+                Number.isFinite(convergence.relativeResidual),
+              maximumUpdate: convergence.maximumUpdate,
+              maximumUpdateValid:
+                convergence.updateDiagnosticsValid &&
+                Number.isFinite(convergence.maximumUpdate),
+            }
+          : diagnostics;
       };
 
       const readPerformanceState = async (): Promise<JGS2PerformanceState> => {
@@ -521,6 +675,7 @@ export function App() {
         };
 
         const submitOneSimulationStep = (): void => {
+          applyScriptedTargetForFrame(simulationFrame + 1);
           if (conservationFixture) {
             solver!.stepFramesExactIterations(
               1,
@@ -768,7 +923,10 @@ export function App() {
             }
             let remaining = frameCount;
             while (remaining > 0) {
-              const batchFrames = Math.min(TEST_BATCH_FRAME_LIMIT, remaining);
+              const batchFrames = scriptedTargetBatchLength(
+                Math.min(TEST_BATCH_FRAME_LIMIT, remaining),
+              );
+              applyScriptedTargetForFrame(simulationFrame + 1);
               if (conservationFixture) {
                 solver!.stepFramesExactIterations(
                   batchFrames,
@@ -791,6 +949,7 @@ export function App() {
             if (!submissionsEnabled) {
               throw new Error("The WebGPU device is no longer available.");
             }
+            applyScriptedTargetForFrame(simulationFrame + 1);
             solver!.stepExactIterations(iterationCount);
             recordSubmission("solver");
             simulationFrame += 1;
@@ -800,6 +959,7 @@ export function App() {
             if (!submissionsEnabled) {
               throw new Error("The WebGPU device is no longer available.");
             }
+            applyScriptedTargetForFrame(simulationFrame + 1);
             recordSubmission("solver");
             const measurement = await solver!.stepWithGpuTimestamp();
             recordQueueDrained();
@@ -895,6 +1055,7 @@ export function App() {
               options.measuredFrameCount,
               async (writes) => {
                 if (writes) {
+                  applyScriptedTargetForFrame(simulationFrame + 1);
                   if (conservationFixture) {
                     solver!.stepExactIterationsWithGpuTimestampWrites(
                       PHASE0_FORCE_FREE_ITERATIONS,
@@ -980,6 +1141,7 @@ export function App() {
                 // These CPU submission samples intentionally include the
                 // timestamp-write instrumentation used by this same pass.
                 if (writes) {
+                  applyScriptedTargetForFrame(simulationFrame + 1);
                   if (conservationFixture) {
                     solver!.stepExactIterationsWithGpuTimestampWrites(
                       PHASE0_FORCE_FREE_ITERATIONS,
@@ -1115,6 +1277,15 @@ export function App() {
             solverBatchFrameLimit: JGS2_MAX_BATCH_FRAMES,
             productionStepsPerSubmission: 1,
           }),
+          scriptedTarget: () =>
+            scriptedTargetState
+              ? {
+                  ...scriptedTargetState,
+                  solverTargetActive:
+                    solver!.objectiveActivity.quadraticTargets,
+                  objectiveRevision: solver!.objectiveRevision,
+                }
+              : null,
           focusOnPrimaryBody: async () => {
             if (!conservationFixture) {
               throw new Error(
@@ -1239,6 +1410,7 @@ export function App() {
             if (accumulator >= frameDuration && inFlightBatches === 0) {
               timestampPlan = liveFrameProfiler!.beginFrame();
               const simulationStart = performance.now();
+              applyScriptedTargetForFrame(simulationFrame + 1);
               if (timestampPlan) {
                 solver!.stepWithGpuTimestampWrites(
                   timestampPlan.writes.simulation,
@@ -1270,17 +1442,24 @@ export function App() {
                 cpuRenderSubmissionMilliseconds,
               );
               inFlightBatches = 1;
-              void solver!.awaitIdle().then(
-                () => {
-                  inFlightBatches = 0;
+              const completedFrame = simulationFrame;
+              void (async () => {
+                try {
+                  await solver!.awaitIdle();
                   recordQueueDrained();
-                },
-                (reason: unknown) => {
-                  inFlightBatches = 0;
+                  if (
+                    completedFrame % 12 === 0 &&
+                    solver!.globalizationEnabled
+                  ) {
+                    await readGlobalizationHistory();
+                  }
+                } catch (reason) {
                   recordQueueDrained();
                   stopAnimationWithError(reason);
-                },
-              );
+                } finally {
+                  inFlightBatches = 0;
+                }
+              })();
               if (simulationFrame % 12 === 0) {
                 setFrame(simulationFrame);
               }
@@ -1322,6 +1501,8 @@ export function App() {
         adapter: adapterDescription(adapter.info),
         iterations: solver.lastSubmittedIterationCount || scene.settings.solverIterations,
         cubatureSamples: gpuInput.cubatureK,
+        material: materialLabel(scene.materials),
+        convergence: null,
       });
       setPhase("ready");
     };
@@ -1376,6 +1557,15 @@ export function App() {
   }, [conservationFixture, parityMode, sceneId, testMode]);
 
   const liveSnapshot = livePerformance.snapshot;
+  const displayedMaterial =
+    stats?.material ?? materialLabel(sceneDefinition.materials);
+  const displayedIterations =
+    stats?.iterations ?? sceneDefinition.settings.solverIterations;
+  const displayedConvergence = stats?.convergence ?? null;
+  const displayedTarget =
+    !conservationFixture && sceneId === "minimal" && !parityMode
+      ? minimalScriptedTargetAtFrame(frame)
+      : null;
   const formatGpuMetric = (
     value: number | null | undefined,
     fractionDigits: number,
@@ -1627,6 +1817,71 @@ export function App() {
                 </div>
               </div>
             </section>
+            <section
+              className="solver-hud"
+              aria-label="Solver status"
+              data-testid="solver-hud"
+              data-material={displayedMaterial}
+              data-iterations={displayedIterations}
+              data-convergence-finite={
+                displayedConvergence
+                  ? String(displayedConvergence.finite)
+                  : "pending"
+              }
+              data-converged={
+                displayedConvergence
+                  ? String(displayedConvergence.converged)
+                  : "pending"
+              }
+              data-relative-residual={
+                displayedConvergence?.relativeResidual ?? ""
+              }
+              data-normalized-update={
+                displayedConvergence?.normalizedMaximumUpdate ?? ""
+              }
+              data-target-phase={displayedTarget?.phase ?? "none"}
+              data-target-active={String(displayedTarget?.active ?? false)}
+            >
+              <div>
+                <span>Material</span>
+                <strong data-testid="active-material">
+                  {displayedMaterial}
+                </strong>
+              </div>
+              <div>
+                <span>Iterations</span>
+                <strong data-testid="actual-iterations">
+                  {displayedIterations}<small> actual</small>
+                </strong>
+              </div>
+              <div>
+                <span>Convergence</span>
+                <strong data-testid="convergence-state">
+                  {displayedConvergence
+                    ? displayedConvergence.finite
+                      ? displayedConvergence.converged
+                        ? "converged"
+                        : "finite"
+                      : "non-finite"
+                    : "pending"}
+                </strong>
+                <small>
+                  r {formatConvergenceNumber(
+                    displayedConvergence?.relativeResidual,
+                  )} · dx {formatConvergenceNumber(
+                    displayedConvergence?.normalizedMaximumUpdate,
+                  )}
+                </small>
+              </div>
+              {displayedTarget && (
+                <div>
+                  <span>Soft target</span>
+                  <strong data-testid="scripted-target-state">
+                    {displayedTarget.phase}
+                  </strong>
+                </div>
+              )}
+            </section>
             <div className="canvas-badge canvas-badge--top">
               <span>Implicit Euler</span>
               <span>JGS2 Jacobi</span>
@@ -1658,7 +1913,7 @@ export function App() {
             </div>
             <div>
               <span>JGS2 iterations</span>
-              <strong>{stats?.iterations ?? sceneDefinition.settings.solverIterations}<small> / step</small></strong>
+              <strong>{displayedIterations}<small> actual / step</small></strong>
             </div>
             <div>
               <span>Cubature</span>

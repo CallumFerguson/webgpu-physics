@@ -407,6 +407,98 @@ describe("JGS2 stable globalization shader contract", () => {
     );
   });
 
+  it("masks the control-only nonlinear stop latch out of validity decoding", () => {
+    expect(jgs2Shader).toContain("const NONLINEAR_STOP_LATCH_BIT: u32 = 16u");
+    const controlBits = functionBody("globalizationControlBits");
+    expect(controlBits).toContain("GLOBALIZATION_CONTROL_BITS_MASK");
+    const validityBits = functionBody("globalizationValidityBits");
+    expect(validityBits).toContain(
+      "globalizationControlBits(packed) & VALIDITY_BITS_MASK",
+    );
+  });
+
+  it("short-circuits every remaining stable solve/globalization pass", () => {
+    const guardedWork = [
+      ["tetPolarRotation", "if (usesStableNeoHookean(tet))"],
+      ["vertexPolarRotation", "let info = vertexData[vertex].info"],
+      ["jgs2Solve", "let vertexItem = vertexData[vertex]"],
+      ["candidateTetrahedron", "let attributes = tetData[tet].attributes"],
+      ["applyCandidate", "let accepted = dynamicData[params.offsets4.x + 1u].x"],
+      ["convergenceGradient", "let base = params.offsets3.w"],
+    ] as const;
+    for (const [name, firstWork] of guardedWork) {
+      const body = functionBody(name);
+      const guard = body.indexOf("if (nonlinearStopLatched())");
+      expect(guard, name).toBeGreaterThanOrEqual(0);
+      expect(guard, name).toBeLessThan(body.indexOf(firstWork));
+    }
+
+    // Workgroup reductions must keep every barrier in uniform control flow.
+    // Only their lane-zero storage side effects are suppressed after latching.
+    for (const name of ["reduceCandidate", "reduceConvergence"] as const) {
+      const body = functionBody(name);
+      expect(body).not.toContain("if (nonlinearStopLatched()) {\n    return;");
+      const lastBarrier = body.lastIndexOf("workgroupBarrier()");
+      const gatedWrite = body.indexOf(
+        "if (lane == 0u && !nonlinearStopLatched())",
+      );
+      expect(lastBarrier, name).toBeGreaterThanOrEqual(0);
+      expect(gatedWrite, name).toBeGreaterThan(lastBarrier);
+    }
+  });
+
+  it("propagates odd- and even-iteration convergence through ping-pong", () => {
+    const solve = functionBody("jgs2Solve");
+    const guard = solve.indexOf("if (nonlinearStopLatched())");
+    const copy = solve.indexOf(
+      "dynamicData[params.offsets2.x + vertex] =\n      dynamicData[params.offsets1.w + vertex]",
+      guard,
+    );
+    expect(copy).toBeGreaterThan(guard);
+    expect(copy).toBeLessThan(solve.indexOf("let vertexItem"));
+    expect(functionBody("copyPosition")).not.toContain(
+      "nonlinearStopLatched",
+    );
+
+    const finalCanonicalPose = (executedIterations: number): string => {
+      let a = "initial-a";
+      let b = "initial-b";
+      const configuredIterations = 5;
+      for (let iteration = 0; iteration < configuredIterations; iteration += 1) {
+        const source = iteration % 2 === 0 ? b : a;
+        const target =
+          iteration < executedIterations ? `accepted-${iteration}` : source;
+        if (iteration % 2 === 0) a = target;
+        else b = target;
+      }
+      return a;
+    };
+    expect(finalCanonicalPose(1)).toBe("accepted-0");
+    expect(finalCanonicalPose(2)).toBe("accepted-1");
+  });
+
+  it("latches only after writing the first converged history record", () => {
+    const stop = functionBody("stopAfterConvergenceEnabled");
+    expect(stop).toContain("params.convergence.w == 1.0");
+
+    const reduction = functionBody("reduceConvergence");
+    const historyWrite = reduction.indexOf(
+      "dynamicData[history] = dynamicData[control]",
+    );
+    const historyCount = reduction.indexOf(
+      "dynamicData[control + 1u].w = f32(historyIndex + 1u)",
+    );
+    const latch = reduction.indexOf(
+      "if (converged && stopAfterConvergenceEnabled())",
+    );
+    expect(historyWrite).toBeGreaterThanOrEqual(0);
+    expect(historyCount).toBeGreaterThan(historyWrite);
+    expect(latch).toBeGreaterThan(historyCount);
+    expect(reduction.slice(latch)).toContain(
+      "controlValidityBits | NONLINEAR_STOP_LATCH_BIT",
+    );
+  });
+
   it("keeps portable workgroup scratch below 16 KiB", () => {
     expect(jgs2Shader).toContain(
       "40 bytes/lane * 128 lanes = 5,120 bytes",

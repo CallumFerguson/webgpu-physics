@@ -388,6 +388,66 @@ canvas {
   color: #879ba4;
 }
 
+.solver-hud {
+  position: absolute;
+  z-index: 2;
+  right: 15px;
+  bottom: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(360px, calc(100% - 32px));
+  overflow: hidden;
+  border: 1px solid rgb(198 224 231 / 12%);
+  border-radius: 7px;
+  color: #84969f;
+  background: rgb(5 14 20 / 78%);
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+  font: 400 0.54rem "DM Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.solver-hud > div {
+  min-width: 0;
+  padding: 7px 9px;
+  border-left: 1px solid rgb(198 224 231 / 8%);
+  border-top: 1px solid rgb(198 224 231 / 8%);
+}
+
+.solver-hud span,
+.solver-hud strong,
+.solver-hud small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.solver-hud span {
+  color: #718791;
+  font-size: 0.48rem;
+  text-transform: uppercase;
+}
+
+.solver-hud strong {
+  margin-top: 3px;
+  color: #d8e6e9;
+  font-size: 0.63rem;
+  font-weight: 500;
+}
+
+.solver-hud small {
+  margin-top: 2px;
+  color: #718791;
+  font-size: 0.46rem;
+  font-weight: 400;
+}
+
+.solver-hud strong small {
+  display: inline;
+  margin: 0;
+}
+
 .canvas-badge,
 .canvas-legend {
   position: absolute;

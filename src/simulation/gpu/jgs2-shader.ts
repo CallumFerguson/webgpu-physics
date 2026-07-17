@@ -41,6 +41,10 @@ const ACCEPTED_MINIMUM_VALID_BIT: u32 =
 const LOCAL_NUMERICS_VALID_BIT: u32 =
   ${JGS2_GLOBALIZATION_LOCAL_NUMERICS_VALID_BIT}u;
 const VALIDITY_BITS_MASK: u32 = ${JGS2_GLOBALIZATION_VALIDITY_BITS_MASK}u;
+// Control-only bit. History records retain the frozen low validity-bit ABI.
+const NONLINEAR_STOP_LATCH_BIT: u32 = 16u;
+const GLOBALIZATION_CONTROL_BITS_MASK: u32 =
+  VALIDITY_BITS_MASK | NONLINEAR_STOP_LATCH_BIT;
 
 const CANDIDATE_REDUCTION_SOURCE_ENERGY_VALID_BIT: u32 = 16u;
 const CANDIDATE_REDUCTION_CANDIDATE_ENERGY_VALID_BIT: u32 = 32u;
@@ -93,7 +97,7 @@ struct SimParams {
   offsets3: vec4u,
   // globalization control, history, history capacity, enabled
   offsets4: vec4u,
-  // residual tolerance, normalized update tolerance, initial scene scale, reserved
+  // residual tolerance, normalized update tolerance, initial scene scale, stop enabled
   convergence: vec4f,
 }
 
@@ -174,16 +178,35 @@ fn globalizationFiniteVec4(value: vec4f) -> bool {
     jgs2_globalization_finite_scalar(value.w);
 }
 
-fn globalizationValidityBits(packed: f32) -> u32 {
+fn globalizationControlBits(packed: f32) -> u32 {
   if (
     !jgs2_globalization_finite_scalar(packed) ||
     packed < 0.0 ||
-    packed > f32(VALIDITY_BITS_MASK) ||
+    packed > f32(GLOBALIZATION_CONTROL_BITS_MASK) ||
     packed != floor(packed)
   ) {
     return 0u;
   }
   return u32(packed);
+}
+
+fn globalizationValidityBits(packed: f32) -> u32 {
+  // The per-frame stop latch must never leak into history validity bits.
+  return globalizationControlBits(packed) & VALIDITY_BITS_MASK;
+}
+
+fn stopAfterConvergenceEnabled() -> bool {
+  return params.convergence.w == 1.0;
+}
+
+fn nonlinearStopLatched() -> bool {
+  if (!stopAfterConvergenceEnabled()) {
+    return false;
+  }
+  let controlBits = globalizationControlBits(
+    dynamicData[params.offsets4.x].w,
+  );
+  return (controlBits & NONLINEAR_STOP_LATCH_BIT) != 0u;
 }
 
 fn finiteNonnegativeInteger(value: f32, maximum: f32) -> bool {
@@ -1075,6 +1098,9 @@ fn tetPolarRotation(@builtin(global_invocation_id) globalId: vec3u) {
   if (tet >= params.counts.y) {
     return;
   }
+  if (nonlinearStopLatched()) {
+    return;
+  }
   if (usesStableNeoHookean(tet)) {
     storeRotation(params.offsets1.z, tet, identityMat3());
     return;
@@ -1098,6 +1124,9 @@ fn tetPolarRotation(@builtin(global_invocation_id) globalId: vec3u) {
 fn vertexPolarRotation(@builtin(global_invocation_id) globalId: vec3u) {
   let vertex = globalId.x;
   if (vertex >= params.counts.x) {
+    return;
+  }
+  if (nonlinearStopLatched()) {
     return;
   }
 
@@ -1127,6 +1156,13 @@ fn vertexPolarRotation(@builtin(global_invocation_id) globalId: vec3u) {
 fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
   let vertex = globalId.x;
   if (vertex >= params.counts.x) {
+    return;
+  }
+  if (nonlinearStopLatched()) {
+    // The command stream is pre-encoded, so carry the final accepted pose
+    // through every remaining ping-pong target without doing solver work.
+    dynamicData[params.offsets2.x + vertex] =
+      dynamicData[params.offsets1.w + vertex];
     return;
   }
 
@@ -1527,6 +1563,9 @@ fn candidateTetrahedron(@builtin(global_invocation_id) globalId: vec3u) {
   if (tet >= params.counts.y) {
     return;
   }
+  if (nonlinearStopLatched()) {
+    return;
+  }
   let attributes = tetData[tet].attributes;
   let sourceF = tetrahedronDeformationGradientAt(tet, params.offsets1.w);
   let candidateF = tetrahedronDeformationGradientAt(tet, params.offsets2.x);
@@ -1846,7 +1885,9 @@ fn reduceCandidate(
     stride /= 2u;
   }
 
-  if (lane == 0u) {
+  // Every invocation must reach the workgroup barriers above. Gate only the
+  // lane-zero storage side effects once the reduction has completed.
+  if (lane == 0u && !nonlinearStopLatched()) {
     let aggregate = candidateReductionLanes[0];
     var validityBits = aggregate.validityBits;
     // A determinant minimum is undefined for an empty tetrahedron set.
@@ -1936,6 +1977,9 @@ fn applyCandidate(@builtin(global_invocation_id) globalId: vec3u) {
   if (vertex >= params.counts.x) {
     return;
   }
+  if (nonlinearStopLatched()) {
+    return;
+  }
   let accepted = dynamicData[params.offsets4.x + 1u].x == 1.0;
   if (!accepted) {
     // Copy the complete vec4 so a rejected assembled pose is byte-identical
@@ -1959,6 +2003,9 @@ fn applyCandidate(@builtin(global_invocation_id) globalId: vec3u) {
 fn convergenceGradient(@builtin(global_invocation_id) globalId: vec3u) {
   let vertex = globalId.x;
   if (vertex >= params.counts.x) {
+    return;
+  }
+  if (nonlinearStopLatched()) {
     return;
   }
   let base = params.offsets3.w + vertex * CONVERGENCE_COMPONENT_STRIDE;
@@ -2230,7 +2277,10 @@ fn reduceConvergence(
     sumStride /= 2u;
   }
 
-  if (lane == 0u) {
+  // Keep all workgroup barriers in uniform control flow. A latched frame may
+  // perform this one-workgroup reduction, but it must not append history or
+  // mutate the accepted control record.
+  if (lane == 0u && !nonlinearStopLatched()) {
     let normalizedSums = convergenceReductionLanes[0];
     var componentNorms: array<f32, 5>;
     componentNorms[0] = firstFourScales.x *
@@ -2386,6 +2436,11 @@ fn reduceConvergence(
       );
     }
     dynamicData[control + 1u].w = f32(historyIndex + 1u);
+    if (converged && stopAfterConvergenceEnabled()) {
+      dynamicData[control].w = f32(
+        controlValidityBits | NONLINEAR_STOP_LATCH_BIT,
+      );
+    }
   }
 }
 

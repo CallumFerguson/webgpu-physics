@@ -43,12 +43,12 @@ export interface JGS2Diagnostics {
   /** False sentinel until a bounded contact-candidate buffer exists. */
   readonly candidateBufferOverflow: boolean;
   readonly candidateBufferOverflowValid: false;
-  /** Finite sentinel; no runtime residual reduction exists yet. */
+  /** GPU convergence residual when explicitly merged into this state readback. */
   readonly relativeResidual: number;
-  readonly relativeResidualValid: false;
-  /** Finite sentinel; no runtime maximum-update reduction exists yet. */
+  readonly relativeResidualValid: boolean;
+  /** GPU convergence update when explicitly merged into this state readback. */
   readonly maximumUpdate: number;
-  readonly maximumUpdateValid: false;
+  readonly maximumUpdateValid: boolean;
   readonly totalLinearMomentum: DiagnosticVec3;
   readonly totalLinearMomentumValid: boolean;
   /** Angular momentum about the world origin. */

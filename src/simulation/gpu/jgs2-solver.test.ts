@@ -526,6 +526,59 @@ describe("JGS2 mutable objective API", () => {
 });
 
 describe("JGS2 batched frame submission", () => {
+  const stopAfterConvergenceFlags = (
+    payloads: readonly Uint8Array[],
+  ): number[] =>
+    payloads.map(
+      (payload) =>
+        new Float32Array(
+          payload.buffer,
+          payload.byteOffset,
+          payload.byteLength / Float32Array.BYTES_PER_ELEMENT,
+        )[43]!,
+    );
+
+  it("enables GPU convergence stopping only for stable production stepping", () => {
+    const stable = createBatchTestSolver(true);
+    stable.solver.step({ iterations: 2 });
+    expect(stable.solver.lastSubmittedIterationCount).toBe(3);
+    expect(stopAfterConvergenceFlags(stable.counters.uniformPayloads)).toEqual([
+      1, 1, 1,
+    ]);
+
+    const legacy = createBatchTestSolver(false);
+    legacy.solver.step({ iterations: 2 });
+    expect(stopAfterConvergenceFlags(legacy.counters.uniformPayloads)).toEqual([
+      0, 0, 0,
+    ]);
+  });
+
+  it("keeps exact-iteration APIs eligible to execute and record full history", () => {
+    const single = createBatchTestSolver(true);
+    single.solver.stepExactIterations(3);
+    expect(single.solver.lastSubmittedIterationCount).toBe(3);
+    expect(stopAfterConvergenceFlags(single.counters.uniformPayloads)).toEqual([
+      0, 0, 0,
+    ]);
+
+    const batched = createBatchTestSolver(true);
+    batched.solver.stepFramesExactIterations(2, 2);
+    expect(batched.solver.lastSubmittedIterationCount).toBe(2);
+    expect(stopAfterConvergenceFlags(batched.counters.uniformPayloads)).toEqual([
+      0, 0, 0,
+    ]);
+
+    const timestamped = createBatchTestSolver(true);
+    timestamped.solver.stepExactIterationsWithGpuTimestampWrites(2, {
+      querySet: {} as GPUQuerySet,
+      startWriteIndex: 2,
+      endWriteIndex: 3,
+    });
+    expect(stopAfterConvergenceFlags(timestamped.counters.uniformPayloads)).toEqual([
+      0, 0, 0,
+    ]);
+  });
+
   it("encodes normalized-iteration frames into exactly one queue submission", () => {
     const { solver, counters } = createBatchTestSolver();
 
@@ -566,10 +619,9 @@ describe("JGS2 batched frame submission", () => {
 
     expect(counters.submissions).toBe(1);
     // predict + one exact-f32 source preflight pair + two (rotations, local
-    // solve, assembled gate, convergence) octets + even-result copy +
-    // finalize. Stable settings forcibly disable the post-feasibility body
-    // translation.
-    expect(counters.computePasses).toBe(21);
+    // solve, assembled gate, convergence) octets + even-result copy + the two
+    // objective-free free-body conservation passes + finalize.
+    expect(counters.computePasses).toBe(23);
     expect(counters.passLabels).toEqual([
       "jgs2-predict-pass",
       "jgs2-source-feasibility-preflight-pass",
@@ -591,8 +643,25 @@ describe("JGS2 batched frame submission", () => {
       "jgs2-convergence-gradient-pass-1",
       "jgs2-reduce-convergence-pass-1",
       "jgs2-copy-even-result-to-canonical-position-pass",
+      "jgs2-body-horizontal-correction-pass",
+      "jgs2-apply-body-horizontal-correction-pass",
       "jgs2-finalize-pass",
     ]);
+    expect(solver.lastSubmittedSettings.horizontalBodyCorrection).toBe(true);
+  });
+
+  it("disables stable free-body correction while an objective is active", () => {
+    const { solver, counters } = createBatchTestSolver(true);
+    solver.setQuadraticTarget(0, [0.25, 0.5, -0.25], 1_000);
+
+    solver.stepExactIterations(1, { horizontalBodyCorrection: true });
+
+    expect(counters.passLabels).not.toContain(
+      "jgs2-body-horizontal-correction-pass",
+    );
+    expect(counters.passLabels).not.toContain(
+      "jgs2-apply-body-horizontal-correction-pass",
+    );
     expect(solver.lastSubmittedSettings.horizontalBodyCorrection).toBe(false);
   });
 
