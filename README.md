@@ -208,11 +208,14 @@ local-solve design. Its corrected stable Neo-Hookean CPU reference and WGSL
 energy, stress, exact current tangent, material dispatch, and deformation-frame
 construction pass the Phase 1 CPU/GPU oracle corpus. Nonlinear current-pose
 Cubature training, held-out update validation, `f32` packing, and production
-GPU update parity also pass on the private capability fixture. The four visible
-demos still use the legacy co-rotated-linear path. Explicit in-app material
-labels, globalization, convergence controls, forces/handles, and stable-
-material demo gates remain before the project claims the paper's complete
-nonlinear solid capability.
+GPU update parity also pass on the private capability fixture. A Float64 CPU
+material-and-inertia reference now covers the documented solve shift,
+feasibility-first Armijo search, whole-pose assembled revert, and convergence
+metric. It is not the production solver: external-force and quadratic-target
+terms, WebGPU globalization/reduction, and convergence histories remain. The
+four visible demos still use the legacy co-rotated-linear path. Explicit in-app
+material labels, forces/handles, and stable-material demo gates also remain
+before the project claims the paper's complete nonlinear solid capability.
 
 Contact here is an implicit quadratic ground penalty with simple viscous
 tangential damping for grounded vertices. It is not a Coulomb friction model.

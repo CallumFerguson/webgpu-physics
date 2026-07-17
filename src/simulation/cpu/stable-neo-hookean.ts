@@ -311,6 +311,76 @@ function tetrahedronDeformationGradient(
   );
 }
 
+/** Geometry-only det(F) for one tetrahedron; no material term is evaluated. */
+export function tetrahedralDeformationDeterminant(
+  mesh: TetrahedralMesh,
+  restData: RestTetraData,
+  tetrahedron: number,
+  positions: Float64Array,
+): number {
+  const tetrahedronCount = getTetrahedronCount(mesh);
+  if (
+    !Number.isSafeInteger(tetrahedron) ||
+    tetrahedron < 0 ||
+    tetrahedron >= tetrahedronCount
+  ) {
+    throw new RangeError("Deformation-determinant tetrahedron is out of range.");
+  }
+  if (positions.length !== getVertexCount(mesh) * 3) {
+    throw new RangeError("Deformation-determinant positions have the wrong length.");
+  }
+  if (restData.inverseRestMatrices.length !== tetrahedronCount * MATRIX_SIZE) {
+    throw new RangeError(
+      "Deformation-determinant rest matrices do not match the mesh.",
+    );
+  }
+  assertFiniteValues(positions, "Deformation-determinant positions");
+  return determinant3(
+    tetrahedronDeformationGradient(
+      mesh,
+      restData,
+      tetrahedron,
+      positions,
+    ),
+  );
+}
+
+/** Geometry-only feasibility oracle; it intentionally evaluates no material energy. */
+export function minimumTetrahedralDeformationDeterminant(
+  mesh: TetrahedralMesh,
+  restData: RestTetraData,
+  positions: Float64Array,
+): number {
+  const vertexCount = getVertexCount(mesh);
+  const tetrahedronCount = getTetrahedronCount(mesh);
+  if (tetrahedronCount < 1) {
+    throw new RangeError("A deformation-determinant query requires a tetrahedron.");
+  }
+  if (positions.length !== vertexCount * 3) {
+    throw new RangeError("Deformation-determinant positions have the wrong length.");
+  }
+  if (restData.inverseRestMatrices.length !== tetrahedronCount * MATRIX_SIZE) {
+    throw new RangeError(
+      "Deformation-determinant rest matrices do not match the mesh.",
+    );
+  }
+  assertFiniteValues(positions, "Deformation-determinant positions");
+
+  let minimum = Number.POSITIVE_INFINITY;
+  for (let tetrahedron = 0; tetrahedron < tetrahedronCount; tetrahedron += 1) {
+    const determinant = tetrahedralDeformationDeterminant(
+      mesh,
+      restData,
+      tetrahedron,
+      positions,
+    );
+    // Do not let Math.min hide +Infinity behind another finite tetrahedron.
+    if (!Number.isFinite(determinant)) return determinant;
+    minimum = Math.min(minimum, determinant);
+  }
+  return minimum;
+}
+
 export function evaluateStableNeoHookeanTetrahedron(
   mesh: TetrahedralMesh,
   restData: RestTetraData,

@@ -7,7 +7,9 @@ Jacobi subproblem, and the paper's precomputed perturbation bases and Cubature
 projection. The runtime can evaluate either the original co-rotated linear
 regression material or the paper's stable Neo-Hookean energy and exact current
 tangent. The stable path now trains and validates nonlinear current-pose
-Cubature; globalization remains Phase 1 work.
+Cubature. A CPU material-and-inertia globalization reference now exists;
+composite force/target terms and the production WebGPU globalization path
+remain Phase 1 work.
 
 ## Algorithm mapping
 
@@ -122,9 +124,14 @@ and parallel local solve. The Phase 1 material path now contains the corrected
 stable Neo-Hookean energy, stress, and exact current tangent on both CPU and
 GPU, plus CPU/GPU checks over a frozen 64-pose material corpus. Its nonlinear
 current-pose Cubature preprocessing, held-out local-update oracle, and
-two-iteration production GPU parity path are also complete. The four public scenes continue
-to use the legacy co-rotated-linear material until explicit labels, local line
-search, convergence diagnostics, and Phase 1 scenes meet their roadmap gates.
+two-iteration production GPU parity path are also complete. The CPU reference
+now additionally covers solve-only shifting, geometry-before-energy Armijo
+trials, whole-pose feasibility/revert, and convergence normalization for its
+material-and-inertia scalar. External-force and quadratic-target terms, WebGPU
+globalization and reductions, and runtime convergence history remain pending.
+The four public scenes continue to use the legacy co-rotated-linear material
+until explicit labels, production local line search, convergence diagnostics,
+and Phase 1 scenes meet their roadmap gates.
 Contact is an implicit quadratic ground penalty with
 simple grounded viscous damping.
 Full incremental potential contact would additionally require broad-phase

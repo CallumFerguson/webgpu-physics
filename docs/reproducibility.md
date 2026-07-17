@@ -35,6 +35,14 @@ and the expected selected tetrahedra and packed weights for every active
 source. This small fixture establishes algorithm and CPU/GPU data-path parity;
 it is not a large-scene performance artifact.
 
+Phase 1 globalization adds
+[`manifests/phase1-globalization.v1.json`](../manifests/phase1-globalization.v1.json).
+It freezes the CPU solve-shift, feasibility-first Armijo, assembled-revert, and
+convergence-metric reference protocol. Its scope is explicitly limited to
+implicit-Euler inertia and stable Neo-Hookean material: composite force/target
+terms and production WebGPU integration are marked pending, and
+`qualifiesPhase1Exit` is false.
+
 ## Validation
 
 `src/reproducibility/manifests.test.ts` parses both JSON files through the
@@ -59,6 +67,15 @@ thresholds, pose anchors, and non-f32 expected weights. The numerical tests
 then independently enforce the all-element dense projection identity,
 nonnegative selection, packed training residual, held-out unregularized update
 RMS, and production WebGPU update parity.
+
+`src/reproducibility/phase1-globalization-manifest.test.ts` rejects unknown
+fields and drift in source-manifest references, policy values, objective terms,
+reference gates, or the exact case inventory. It binds the frozen policy values
+to executable CPU constants; the existing source-manifest suites independently
+validate the referenced manifests. Numerical tests independently exercise the
+restricted scalar, solve-only shift, line search, assembled feasibility, and
+convergence diagnostics; this validation is partial reference evidence and
+does not close a Phase 1 exit criterion.
 
 `scripts/verify-baseline-tests.mjs` independently asks Vitest and Playwright to
 list the tests they actually collect, then matches every frozen source and
@@ -238,6 +255,17 @@ selector verification at 26/134 unit and 7/17 E2E, and all 17 hardware E2E
 tests with zero skips. The corrected two-iteration Cubature oracle reported
 maximum update error `2.113e-9` and predictor error `1.683e-9`; the unchanged
 stress timing test reported `p95 = 4.9 ms`.
+
+The partial CPU globalization-reference evidence is recorded in
+[`docs/evidence/phase1-globalization-reference.md`](evidence/phase1-globalization-reference.md).
+Its focused gate passes 29 tests, including 240 canonical packed
+material/inertia local systems. The manifest and report deliberately leave
+force/target terms, tiny convergence histories, production WebGPU
+globalization, stable public scenes, and performance qualification pending.
+The exact-tree routine gate passed 189 unit tests, the production build,
+frozen selector verification at 26/189 unit and 7/18 E2E, and all 18 hardware
+E2E tests in 46,802.453 ms with zero skips or retries. The full qualification
+tier remains reserved for a roadmap exit or formal performance result.
 
 The later standard-performance-observability gate passed all 149 unit tests,
 the production build, frozen selector verification at 26/149 unit and 7/17

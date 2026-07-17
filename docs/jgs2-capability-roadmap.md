@@ -296,11 +296,11 @@ nonlinear energy gradient and Hessian.
 | Reviewer | TBD |
 | Start date | 2026-07-16 |
 | Completion date | TBD |
-| Branch or PR | main; Phase 0 gate ce478e6; Phase 1 material/runtime gate c0f5456 |
-| Design records | docs/phase1-stable-neo-hookean.md; docs/jgs2-implementation.md; docs/evidence/phase1-nonlinear-cubature.md; manifests/phase1-scenes.v1.json; manifests/phase1-cubature.v1.json |
+| Branch or PR | main; Phase 0 gate ce478e6; Phase 1 material/runtime gate c0f5456; CPU globalization reference milestone (this commit) |
+| Design records | docs/phase1-stable-neo-hookean.md; docs/jgs2-implementation.md; docs/evidence/phase1-nonlinear-cubature.md; docs/evidence/phase1-globalization-reference.md; manifests/phase1-scenes.v1.json; manifests/phase1-cubature.v1.json; manifests/phase1-globalization.v1.json |
 | Primary test command | Routine: npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e. Qualification: npm.cmd run test:e2e:full |
 | Performance result | TBD |
-| Known limitations | CPU/WGSL material derivatives, exact diagnostics, material dispatch, affine-exact frames, nonlinear current-pose Cubature, packed-f32 quality gates, and production update parity are implemented. Dense TypeScript preprocessing is intentionally limited to small fixtures and fails closed when K=6 misses the 1% gate. The shared ABI still carries legacy rest stiffness for stable-only meshes. Globalization and assembled-pose feasibility, explicit public-scene material labels, forces/handles, scenes, and performance evidence remain. |
+| Known limitations | CPU/WGSL material derivatives, exact diagnostics, material dispatch, affine-exact frames, nonlinear current-pose Cubature, packed-f32 quality gates, and production update parity are implemented. A Float64 CPU material-and-inertia reference now covers scale-aware solve-only shifting, geometry-before-energy Armijo trials, whole-pose Jacobi feasibility/revert, and component-aware convergence-metric evaluation. Its restricted scalar does not yet include external-force or quadratic-target terms and none of this globalization path is wired into production WebGPU. GPU convergence/history, public stable scenes and labels, forces/handles, and performance evidence remain. Dense TypeScript preprocessing is intentionally limited to small fixtures. |
 | Exit sign-off | TBD |
 
 ### Required implementation
@@ -323,6 +323,12 @@ nonlinear energy gradient and Hessian.
       Hessian and expose its applied shift as a diagnostic.
 - [ ] Preserve co-rotated linear elasticity only as an explicitly labeled
       regression or debugging material in public scene metadata.
+
+CPU material-and-inertia reference implementations for the solve-only shift,
+restricted line search, assembled feasibility, and convergence metric are
+recorded in `docs/evidence/phase1-globalization-reference.md`. The boxes above
+and P1-EC-05 through P1-EC-10 remain open until the composite objective and
+production WebGPU path are complete.
 
 ### Required scenes
 
@@ -380,7 +386,7 @@ nonlinear energy gradient and Hessian.
 | Neo-Hookean derivative report | CPU 60-pose corpus: worst gradient 8.975e-10; worst Hessian 1.957e-11; exact tangent symmetry and rest-stiffness parity pass | [x] |
 | Objectivity and rest-state report | CPU density, stress, tangent action, translated tetrahedron, internal force/torque, and translational null-mode tests pass; f32-exact GPU quarter turns have rest and rigid energy/force errors 0/0 under the roadmap default zero-reference metric | [x] |
 | CPU-versus-GPU report | Frozen 64-pose material-only hardware corpus: worst relative energy 2.234e-6, gradient 1.161e-6, local Hessian 1.089e-6; total implicit parity also <=1e-3; scaled non-affine vertex-frame error 8.702e-8 | [x] |
-| Convergence history | TBD | [ ] |
+| Convergence history | CPU normalization and protocol unit tests added; tiny-reference and runtime GPU convergence histories TBD | [ ] |
 | Cubature residual report | 12-tet full-rank parity fixture, K=6: packed residual maximum 0.548989%; packed selected-vs-independent-dense update RMS training 3.713075e-5, held-out 3.984377e-5, combined 3.796498e-5; two-iteration production GPU parity 2.113e-9 | [x] |
 | Scene screenshots and diagnostics | TBD | [ ] |
 | Performance report | TBD | [ ] |
@@ -1029,6 +1035,8 @@ later passing run so the history remains visible.
 | P1-GATE-03 | 2026-07-16 | 1 | Phase 1 nonlinear Cubature milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e | i7-13700K / RTX 5090 / Chrome 150 | Pass: 134 unit, build, frozen 26/134 unit and 7/17 E2E selectors, 17/17 hardware E2E; zero skips/errors; stress p95 4.9 ms | docs/reproducibility.md; docs/evidence/phase1-nonlinear-cubature.md | Complete exact-current-code regression; three-agent math/code/gate audits |
 | P0-GATE-02 | 2026-07-16 | 0-1 | Standard performance observability milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e | i7-13700K / RTX 5090 / Chrome 150 | Pass: 149 unit, build, frozen 26/149 unit and 7/17 E2E selectors, 17/17 hardware E2E with zero skips; 414632.785 ms reported suite duration and 17 finite attempt durations; seven complete 600-frame scene reports; isolated stress 270.3 FPS average, 205.5 FPS 1% low, wall mean/p95 3.700/4.500 ms, CPU 0.146 ms/frame, GPU 1.462 ms/frame; necessary compute assessment passed | docs/reproducibility.md; docs/evidence/phase0-performance-baseline.md | Complete exact-current-code regression; three independent performance/schema/gate audits |
 | P0-GATE-03 | 2026-07-16 | 0-1 | Production live-performance HUD milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e | i7-13700K / RTX 5090 / Chrome 150 | Pass: 159 unit, build, frozen 26/159 unit and 7/18 E2E selectors, 18/18 hardware E2E in 252466.729 ms with zero retries/skips/errors; desktop/mobile live HUD, deterministic isolation, tab-resume epoch reset, strict timestamp samples; isolated stress 269.8 FPS average, 198.0 FPS 1% low, wall mean/p95 3.706/4.500 ms, CPU 0.132 ms/frame, GPU frame span 1.434 ms; necessary compute assessment passed | docs/reproducibility.md; docs/evidence/phase0-performance-baseline.md; tests/e2e/jgs2.spec.ts | Complete exact-current-code regression; three independent UI/GPU/gate audits; unused E2E HMR disabled after one reproduced local resource-pressure flake |
+| P1-GLOB-REF-01 | 2026-07-16 | 1 | Phase 1 CPU globalization reference milestone | .\node_modules\.bin\vitest.cmd run src/simulation/cpu/nonlinear-globalization.test.ts src/simulation/cpu/nonlinear-restricted-energy.test.ts src/simulation/cpu/nonlinear-iteration.test.ts src/reproducibility/phase1-globalization-manifest.test.ts --disableConsoleIntercept --reporter=verbose | i7-13700K | Foundation only: 29/29 focused tests; all 240 canonical packed material/inertia systems descend and accept with max shifted residual 3.801004e-16 and minimum accepted J 0.864768; scale/cap/backtrack failure, non-finite determinant propagation, whole-pose revert, energy diagnostics, overflow-safe convergence, zero ABI slots, and frozen objective isolation pass; P1-EC-05 through P1-EC-10 remain open | docs/evidence/phase1-globalization-reference.md; manifests/phase1-globalization.v1.json | Automated partial CPU reference; independent scope/correctness/diff audits; force/target and GPU production pending |
+| P1-GATE-04 | 2026-07-16 | 1 | Phase 1 CPU globalization reference milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e | i7-13700K / RTX 5090 / Chrome 150 | Pass: 189 unit, build, frozen 26/189 unit and 7/18 E2E selectors, 18/18 hardware E2E in 46802.453 ms with zero retries/skips/errors; no Phase 1 exit or formal performance claim | docs/reproducibility.md; docs/evidence/phase1-globalization-reference.md | Complete exact-current-tree routine regression; independent code/evidence audits; full qualification intentionally deferred to roadmap exit |
 
 ## Decision log
 

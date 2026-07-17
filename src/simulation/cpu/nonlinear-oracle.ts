@@ -28,6 +28,15 @@ export interface StableNeoHookeanImplicitEulerComponents {
   readonly quadraticTargets: number;
 }
 
+export interface StableNeoHookeanImplicitEulerGradientComponents {
+  readonly inertia: Float64Array;
+  readonly material: Float64Array;
+  readonly externalForce: Float64Array;
+  readonly quadraticTargets: Float64Array;
+  /** Reserved exact zero until contact terms are introduced in Phase 3. */
+  readonly contact: Float64Array;
+}
+
 export interface QuadraticTargetEnergy {
   readonly id: string;
   readonly energy: number;
@@ -36,6 +45,7 @@ export interface QuadraticTargetEnergy {
 export interface StableNeoHookeanImplicitEulerEvaluation
   extends DenseEnergyEvaluation {
   readonly components: StableNeoHookeanImplicitEulerComponents;
+  readonly gradientComponents: StableNeoHookeanImplicitEulerGradientComponents;
   readonly quadraticTargetEnergies: readonly QuadraticTargetEnergy[];
   /** Exact, unweighted material energy from every tetrahedron in mesh order. */
   readonly tetrahedronEnergies: Float64Array;
@@ -264,6 +274,11 @@ export function createStableNeoHookeanImplicitEulerOracle(
       positions,
     );
     const gradient = new Float64Array(dimension);
+    const inertiaGradient = new Float64Array(dimension);
+    const materialGradient = new Float64Array(dimension);
+    const externalForceGradient = new Float64Array(dimension);
+    const quadraticTargetsGradient = new Float64Array(dimension);
+    const contactGradient = new Float64Array(dimension);
     const hessian = new Float64Array(dimension * dimension);
     let inertiaEnergy = 0;
     let externalForceEnergy = 0;
@@ -279,10 +294,13 @@ export function createStableNeoHookeanImplicitEulerOracle(
         const difference = positions[fullRow]! - predictedPositions[fullRow]!;
         inertiaEnergy += 0.5 * inertia * difference * difference;
         externalForceEnergy -= externalForce[activeRow]! * coordinates[activeRow]!;
+        inertiaGradient[activeRow] = inertia * difference;
+        materialGradient[activeRow] = material.gradient[fullRow]!;
+        externalForceGradient[activeRow] = -externalForce[activeRow]!;
         gradient[activeRow] =
-          material.gradient[fullRow]! +
-          inertia * difference -
-          externalForce[activeRow]!;
+          materialGradient[activeRow]! +
+          inertiaGradient[activeRow]! +
+          externalForceGradient[activeRow]!;
         hessian[activeRow * dimension + activeRow] += inertia;
 
         for (const columnVertex of options.restSystem.activeVertices) {
@@ -311,7 +329,9 @@ export function createStableNeoHookeanImplicitEulerOracle(
           coordinates[coordinate]! - target.target[coordinate]!;
         const stiffness = target.stiffness[coordinate]!;
         targetEnergy += 0.5 * stiffness * displacement * displacement;
-        gradient[coordinate] += stiffness * displacement;
+        const targetGradient = stiffness * displacement;
+        quadraticTargetsGradient[coordinate] += targetGradient;
+        gradient[coordinate] += targetGradient;
         hessian[coordinate * dimension + coordinate] += stiffness;
       }
       quadraticTargetsEnergy += targetEnergy;
@@ -340,6 +360,13 @@ export function createStableNeoHookeanImplicitEulerOracle(
       gradient,
       hessian,
       components,
+      gradientComponents: {
+        inertia: inertiaGradient,
+        material: materialGradient,
+        externalForce: externalForceGradient,
+        quadraticTargets: quadraticTargetsGradient,
+        contact: contactGradient,
+      },
       quadraticTargetEnergies: Object.freeze(quadraticTargetEnergies),
       tetrahedronEnergies: material.tetrahedronEnergies,
       deformationDeterminants: material.deformationDeterminants,

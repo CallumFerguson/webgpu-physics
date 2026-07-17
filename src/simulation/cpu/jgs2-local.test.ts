@@ -138,6 +138,13 @@ describe("exact stable Neo-Hookean JGS2 local reference", () => {
           externalForce: 0,
           quadraticTargets: 0,
         },
+        gradientComponents: {
+          inertia: new Float64Array(dimension),
+          material: gradient.slice(),
+          externalForce: new Float64Array(dimension),
+          quadraticTargets: new Float64Array(dimension),
+          contact: new Float64Array(dimension),
+        },
         quadraticTargetEnergies: [],
         tetrahedronEnergies: new Float64Array(0),
         deformationDeterminants: new Float64Array(0),

@@ -277,6 +277,17 @@ describe("stable Neo-Hookean implicit-Euler oracle", () => {
       expectedInertia + material.energy + expectedExternal + expectedTarget,
       10,
     );
+    for (let coordinate = 0; coordinate < evaluation.gradient.length; coordinate += 1) {
+      expect(evaluation.gradient[coordinate]).toBeCloseTo(
+        evaluation.gradientComponents.inertia[coordinate]! +
+          evaluation.gradientComponents.material[coordinate]! +
+          evaluation.gradientComponents.externalForce[coordinate]! +
+          evaluation.gradientComponents.quadraticTargets[coordinate]! +
+          evaluation.gradientComponents.contact[coordinate]!,
+        12,
+      );
+    }
+    expect(Math.hypot(...evaluation.gradientComponents.contact)).toBe(0);
     expect(evaluation.quadraticTargetEnergies).toEqual([
       { id: "constraint.scripted", energy: evaluation.components.quadraticTargets },
     ]);

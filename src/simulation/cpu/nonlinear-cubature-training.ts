@@ -257,12 +257,63 @@ function copyRestBasisBlocks(
   return blocks;
 }
 
+/** Apply Eq. 14 to the four stored Ubar blocks of one runtime Cubature record. */
+export function buildCurrentCoRotatedCubatureBasisBlocks(
+  context: StableNeoHookeanCubatureContext,
+  positions: Float64Array,
+  tetrahedron: number,
+  restBasisBlocks: ArrayLike<number>,
+): Float64Array {
+  validateContext(context);
+  const vertexCount = getVertexCount(context.mesh);
+  assertFiniteArray(
+    positions,
+    vertexCount * 3,
+    "Cubature basis current positions",
+  );
+  assertFiniteArray(restBasisBlocks, 36, "Cubature rest basis blocks");
+  if (
+    !Number.isSafeInteger(tetrahedron) ||
+    tetrahedron < 0 ||
+    tetrahedron >= getTetrahedronCount(context.mesh)
+  ) {
+    throw new RangeError("Cubature basis tetrahedron is out of range.");
+  }
+
+  const stencil = buildVertexDeformationGradientStencil(
+    context.mesh,
+    context.restData,
+  );
+  const frames = computeVertexPolarFrames(stencil, positions);
+  const rest = Float64Array.from(restBasisBlocks);
+  const inverseSourceFrame = transpose3(
+    frames.subarray(
+      context.sourceVertex * 9,
+      context.sourceVertex * 9 + 9,
+    ),
+  );
+  const current = new Float64Array(36);
+  for (let localVertex = 0; localVertex < 4; localVertex += 1) {
+    const vertex = context.mesh.tetrahedra[tetrahedron * 4 + localVertex]!;
+    const left = multiply3(
+      frames.subarray(vertex * 9, vertex * 9 + 9),
+      rest.subarray(
+        localVertex * 9,
+        localVertex * 9 + 9,
+      ),
+    );
+    current.set(multiply3(left, inverseSourceFrame), localVertex * 9);
+  }
+  return current;
+}
+
 export function evaluateStableNeoHookeanCubatureCandidate(
   context: StableNeoHookeanCubatureContext,
   positions: Float64Array,
   currentBasis: Float64Array,
   incidentCounts: Uint32Array,
   tetrahedron: number,
+  currentBasisBlocksOverride?: Float64Array,
 ): NonlinearCubatureCandidateEvaluation {
   validateContext(context);
   const vertexCount = getVertexCount(context.mesh);
@@ -292,15 +343,25 @@ export function evaluateStableNeoHookeanCubatureCandidate(
   );
   const elementGradient = element.gradient.slice();
   const elementHessian = element.hessian.slice();
-  const currentBasisBlocks = new Float64Array(36);
+  if (currentBasisBlocksOverride) {
+    assertFiniteArray(
+      currentBasisBlocksOverride,
+      36,
+      "Cubature candidate current basis blocks",
+    );
+  }
+  const currentBasisBlocks =
+    currentBasisBlocksOverride?.slice() ?? new Float64Array(36);
   const inverseTimestepSquared = 1 / (context.timestep * context.timestep);
   let sourceSlot = -1;
   for (let localVertex = 0; localVertex < 4; localVertex += 1) {
     const vertex = context.mesh.tetrahedra[tetrahedron * 4 + localVertex]!;
-    currentBasisBlocks.set(
-      currentBasis.subarray(vertex * 9, vertex * 9 + 9),
-      localVertex * 9,
-    );
+    if (!currentBasisBlocksOverride) {
+      currentBasisBlocks.set(
+        currentBasis.subarray(vertex * 9, vertex * 9 + 9),
+        localVertex * 9,
+      );
+    }
     const distributedInertia =
       (context.lumpedMasses[vertex]! * inverseTimestepSquared) /
       incidentCounts[vertex]!;
@@ -532,7 +593,11 @@ function numericalColumnRank(
 export function assembleStableNeoHookeanJGS2LocalSystem(
   context: StableNeoHookeanCubatureContext,
   positions: Float64Array,
-  samples?: readonly Pick<CubatureSample, "tetrahedron" | "weight">[],
+  samples?: readonly (
+    Pick<CubatureSample, "tetrahedron" | "weight"> & {
+      readonly basisBlocks?: ArrayLike<number>;
+    }
+  )[],
 ): StableNeoHookeanJGS2LocalSystem {
   const candidates = evaluateAllCandidates(context, positions);
   const sourceGradient = new Float64Array(3);
@@ -551,6 +616,11 @@ export function assembleStableNeoHookeanJGS2LocalSystem(
     }
   } else {
     const used = new Set<number>();
+    const incidentCounts = buildIncidentCounts(context.mesh);
+    const currentBasis = buildCurrentCoRotatedEquilibriumBasis(
+      context,
+      positions,
+    );
     for (const sample of samples) {
       if (
         !Number.isSafeInteger(sample.tetrahedron) ||
@@ -564,14 +634,29 @@ export function assembleStableNeoHookeanJGS2LocalSystem(
         throw new RangeError("Selected nonlinear Cubature weights must be finite and nonnegative.");
       }
       used.add(sample.tetrahedron);
+      const candidate = sample.basisBlocks
+        ? evaluateStableNeoHookeanCubatureCandidate(
+            context,
+            positions,
+            currentBasis,
+            incidentCounts,
+            sample.tetrahedron,
+            buildCurrentCoRotatedCubatureBasisBlocks(
+              context,
+              positions,
+              sample.tetrahedron,
+              sample.basisBlocks,
+            ),
+          )
+        : candidates[sample.tetrahedron]!;
       addScaled(
         remainderGradient,
-        candidates[sample.tetrahedron]!.remainderGradient,
+        candidate.remainderGradient,
         sample.weight,
       );
       addScaled(
         remainderHessian,
-        candidates[sample.tetrahedron]!.remainderHessian,
+        candidate.remainderHessian,
         sample.weight,
       );
     }

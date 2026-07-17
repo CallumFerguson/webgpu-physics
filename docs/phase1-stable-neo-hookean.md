@@ -3,7 +3,9 @@
 This record freezes the Phase 1 material, feasibility, local-solve, convergence,
 performance, and CPU/GPU/WASM decisions. The exact CPU and WGSL material path,
 material dispatch, deformation frames, and nonlinear Cubature preprocessing
-are implemented. Globalization remains an implementation contract.
+are implemented. A Float64 CPU material-and-inertia globalization reference is
+also implemented; composite force/target terms and production WebGPU
+globalization remain implementation contracts.
 
 ## Primary sources
 
@@ -94,9 +96,10 @@ Production simulation has a stricter feasibility contract:
 - world-space update clamping is not an inversion policy;
 - accepted dynamic checkpoints must report `min J >= J_min`.
 
-The CPU helper `assertStableNeoHookeanFeasible` is the reference form of this
-guard. The GPU line search and iteration-revert path remain Phase 1 runtime
-work.
+CPU geometry-only trial checks and whole-pose assembled Jacobi reversion are
+the reference form of this guard. They use finite validity diagnostics and
+revert the complete pose, not individual vertices. The GPU line search and
+iteration-revert path remain Phase 1 runtime work.
 
 ## Vertex deformation frames
 
@@ -179,8 +182,8 @@ meshes need the later sparse-preprocessing work.
 
 The Stable Neo-Hookean tangent can legitimately be indefinite away from rest;
 "stable" does not mean convex. The exact oracle remains unmodified. For an
-assembled symmetric 3-by-3 local solve matrix `H`, Phase 1 will use one uniform
-diagonal shift:
+assembled symmetric 3-by-3 local solve matrix `H`, the CPU reference uses one
+uniform diagonal shift and the production GPU path must use the same policy:
 
 ```text
 s   = max(max_i abs(H_ii), frobenius(H) / sqrt(3), m_i / h^2)
@@ -201,9 +204,10 @@ threshold decision.
 ## Restricted local line search
 
 The Armijo scalar must be the same restricted JGS2 subproblem whose derivatives
-form the local gradient and Hessian: exact source inertia/targets/incident
-elements plus the weighted complementary Cubature energy, with the same source
-terms subtracted to prevent double counting.
+form the local gradient and Hessian: exact source inertia, external-force and
+quadratic-target contributions, and incident elements plus the weighted
+complementary Cubature energy, with the same source terms subtracted to prevent
+double counting.
 
 ```text
 c1 = 1e-4
@@ -213,11 +217,14 @@ maximum backtracks = 12
 accept iff L(alpha p) <= L(0) + c1 alpha gradient_dot_p
 ```
 
-The implementation records initial energy, accepted energy, Armijo bound,
-accepted alpha, `gradient dot p`, determinant feasibility, and normalized
-shift. The assembled Jacobi energy is a separate diagnostic and is not used to
-accept an individual parallel local step. If no positive alpha passes, the
-local update is zero and the failure is reported.
+The current CPU reference scalar implements the inertia and stable-material
+terms only. It records initial energy, accepted energy, Armijo bound, accepted
+alpha, `gradient dot p`, determinant feasibility, and normalized shift. Its
+assembled Jacobi energy is a separate diagnostic and is not used to accept an
+individual parallel local step. If no positive alpha passes, the local update
+is zero and the failure is reported. External-force and quadratic-target terms
+and all production GPU wiring remain pending, so this reference does not close
+P1-EC-07.
 
 ## Convergence normalization
 
@@ -241,6 +248,11 @@ thresholds may not exceed `1e-3`. Exact-frame and exact-iteration test APIs
 disable early termination without changing the calculations inside an
 iteration.
 
+The CPU helper implements this normalization with overflow-safe finite
+diagnostics, matching xyz dimensions, whole-pose feasibility, and an explicit
+revert gate. No tiny nonlinear convergence history, GPU reduction, or runtime
+early-termination path is implemented yet.
+
 ## Phase 1 performance gate
 
 The Phase 1 development workload is a deterministic `10 x 10 x 8` cell solid
@@ -256,10 +268,13 @@ must still demonstrate a 20,000-30,000-tetrahedron non-contact solid at
 ## CPU, GPU, and WASM
 
 - CPU Float64: exact material/implicit/local oracles, deterministic training,
-  validation, small-scene preprocessing, and artifact construction.
-- WebGPU: every per-frame deformation gradient, material evaluation, Cubature
-  projection, local solve, line search, convergence reduction, state update,
-  and rendering operation.
+  validation, small-scene preprocessing, artifact construction, and the
+  material-and-inertia globalization reference.
+- WebGPU production target: every per-frame deformation gradient, material
+  evaluation, Cubature projection, local solve, line search, convergence
+  reduction, state update, and rendering operation. The existing runtime has
+  the first four through the unglobalized local solve; line search,
+  convergence reduction, and assembled revert remain pending.
 - WASM: not used in Phase 1. It would add a memory boundary without improving
   the GPU-resident hot loop. Reconsider only for large arbitrary in-browser
   sparse preprocessing; fixed larger scenes should load offline artifacts.

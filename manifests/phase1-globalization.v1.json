@@ -1,0 +1,60 @@
+{
+  "schema": "org.jgs2.phase1-globalization",
+  "schemaVersion": 1,
+  "id": "phase1.globalization-material-inertia-reference",
+  "sourceFixtures": {
+    "materialManifest": "manifests/phase1-scenes.v1.json",
+    "cubatureManifest": "manifests/phase1-cubature.v1.json",
+    "cubatureFixtureId": "phase1.nonlinear-cubature-beam"
+  },
+  "positiveDefiniteTreatment": {
+    "f32UnitRoundoff": 5.960464477539063e-8,
+    "eigenvalueFloorMultiplier": 256,
+    "relativeEigenvalueFloor": 0.0000152587890625,
+    "maximumNormalizedShift": 0.001,
+    "scales": [1e-12, 1, 1e12]
+  },
+  "lineSearch": {
+    "armijoC1": 0.0001,
+    "backtrackFactor": 0.5,
+    "maximumBacktracks": 12,
+    "determinantFloor": 0.0001,
+    "feasibilityBeforeEnergy": true,
+    "failureUpdate": "zero"
+  },
+  "convergence": {
+    "tinyReferenceResidualTolerance": 0.00001,
+    "maximumRuntimeTolerance": 0.001,
+    "requiresResidualAndUpdate": true,
+    "sceneScale": "initial-dynamic-aabb-diagonal"
+  },
+  "referenceGates": {
+    "restrictedGradientRelativeError": 0.000002,
+    "restrictedHessianRelativeError": 0.0002,
+    "shiftedLinearResidual": 1e-8,
+    "canonicalPackedLocalSystemCount": 240,
+    "assembledRevertDeterminant": -0.2100000000000002
+  },
+  "caseIds": [
+    "symmetric-spectrum",
+    "scale-covariance",
+    "shift-cap-boundary",
+    "armijo-zero-one-multiple",
+    "infeasible-before-energy",
+    "nonfinite-determinant-propagation",
+    "selected-packed-restricted-energy",
+    "assembled-jacobi-revert",
+    "component-aware-convergence",
+    "canonical-packed-local-systems"
+  ],
+  "restrictedObjectiveTerms": [
+    "implicit-euler-inertia",
+    "stable-neo-hookean-material"
+  ],
+  "runtimeStatus": {
+    "cpuMaterialInertiaReference": "implemented",
+    "compositeForcesAndTargets": "pending",
+    "gpuProduction": "pending",
+    "qualifiesPhase1Exit": false
+  }
+}

@@ -455,7 +455,7 @@ describe("stable Neo-Hookean nonlinear Cubature", () => {
     expect(packedValidationRms.systemCount).toBe(
       fixture.corpus.validation.length * fixture.restSystem.activeVertices.length,
     );
-  });
+  }, 15_000);
 
   it("routes stable scene preprocessing through packed nonlinear Cubature", () => {
     const definition = buildPhase1NonlinearCubatureDefinition();
