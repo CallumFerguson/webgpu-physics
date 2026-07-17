@@ -46,6 +46,16 @@ export {
   type VectorFunction,
 } from "./finite-difference";
 export {
+  buildStaticIpcContactCandidates,
+  evaluateIpcBarrier,
+  ipcFrictionF0,
+  ipcFrictionF1,
+  type IpcBarrierEvaluation,
+  type IpcEdgeEdgeCandidate,
+  type IpcVertexTriangleCandidate,
+  type StaticIpcContactCandidates,
+} from "./ipc-contact";
+export {
   buildVertexDeformationGradientStencil,
   computeVertexPolarFrames,
   evaluateVertexDeformationGradients,
