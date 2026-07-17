@@ -212,20 +212,30 @@ cloth, and Gauss-Seidel scheduling.
 
 **Must pass before item 5**
 
-- [ ] Jacobi and colored Gauss-Seidel both run the same nonlinear-solid scene.
-- [ ] Both remain finite and reach comparable final energy/configuration.
-- [ ] The HUD reports the selected schedule and iteration count.
-- [ ] One focused browser comparison test is sufficient.
+- [x] Jacobi and colored Gauss-Seidel both run the same nonlinear-solid scene.
+- [x] Both remain finite and reach comparable final energy/configuration.
+- [x] The HUD reports the selected schedule and iteration count.
+- [x] One focused browser comparison test is sufficient.
 
 **Work record**
 
-- Status: Not started
-- Started:
-- Completed:
-- Commit:
-- Tests/commands run:
-- Actual time:
-- Notes/blockers:
+- Status: Completed
+- Started: 2026-07-17
+- Completed: 2026-07-17
+- Commit: `feat: add graph-colored Gauss-Seidel schedule`
+- Tests/commands run: focused Vitest (68 tests); full Vitest (326 tests);
+  focused hardware Playwright Jacobi/Gauss-Seidel comparison (1 test);
+  `npm run build`.
+- Actual time: About 1 hour including hardware comparison and scheduler review.
+- Notes/blockers: A deterministic ascending-order CPU coloring covers solid,
+  cloth, hinge, IPC, and nonincident Cubature read/write conflicts. Each sweep
+  preserves one assembled source/target pair, updates the target in place one
+  color at a time, then performs one IPC/globalization/convergence decision.
+  The static schedule appends to the existing Cubature/cloth arena and active
+  colors use distinct uniform bind groups, preserving the seven-storage-buffer
+  and 176-byte uniform ABI. After 12 hardware frames, colored GS and Jacobi
+  differed by 1.97e-5 RMS relative to scene scale; relative exact material and
+  implicit energies differed by 1.96e-4 and 1.87e-4, respectively.
 
 ## Item 5 - Final capability demos and handoff
 

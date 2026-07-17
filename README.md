@@ -28,6 +28,9 @@ Current scene URLs are:
 - `/?scene=cloth`
 - `/?scene=stress`
 
+Append `&schedule=graph-colored-gauss-seidel` to compare the paper's
+CPU-colored GGS2 update schedule with the default parallel Jacobi schedule.
+
 ## Useful commands
 
 ```sh
@@ -47,16 +50,16 @@ paper's full-coordinate JGS2 basis, co-rotated subspaces, nonnegative Cubature,
 co-rotated linear and stable Neo-Hookean materials, nonlinear GPU local solves,
 globalization, external force/target objectives, topology-filtered VT/EE IPC
 contact, lagged friction, StVK triangle cloth with quadratic-dihedral bending,
-deterministic frame stepping, screenshots, and CPU/GPU performance metrics.
+parallel Jacobi and graph-colored Gauss-Seidel schedules, deterministic frame
+stepping, screenshots, and CPU/GPU performance metrics.
 
 Per-frame simulation and rendering stay on the GPU. Small, one-time scene
 precomputation remains in TypeScript on the CPU. WebAssembly is intentionally
 not used because it would not improve the GPU-resident hot loop for these fixed
 small scenes.
 
-Colored Gauss-Seidel scheduling remains to be added. The contact and cloth
-demos use the mesh IPC path; the analytic penalty plane remains only for the
-small non-IPC comparison scenes.
+The contact and cloth demos use the mesh IPC path; the analytic penalty plane
+remains only for the small non-IPC comparison scenes.
 
 See the [implementation roadmap](docs/ROADMAP.md) for the remaining work,
 strict timeboxes, acceptance criteria, and minimal-testing rules.

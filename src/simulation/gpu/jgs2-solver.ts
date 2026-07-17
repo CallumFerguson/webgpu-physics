@@ -45,11 +45,22 @@ import {
   type GpuTimestampMeasurement,
 } from "./gpu-timestamp";
 import { packIpcContactBuffer } from "./ipc-contact-layout";
-import { packJGS2GpuClothArena } from "./cloth-layout";
+import {
+  JGS2_CLOTH_GLOBAL_WORDS,
+  packJGS2GpuClothArena,
+} from "./cloth-layout";
+import { packJGS2ScheduleArena } from "./schedule-layout";
 import { JGS2_WORKGROUP_SIZE, jgs2Shader } from "./jgs2-shader";
-import { minimumStaticIpcContactDistance } from "../cpu/ipc-contact";
+import {
+  buildGreedyVertexColoring,
+  minimumStaticIpcContactDistance,
+} from "../cpu";
+
+export type JGS2Schedule = "jacobi" | "graph-colored-gauss-seidel";
 
 export interface JGS2StepSettings {
+  /** Parallel Jacobi or one CPU-colored Gauss-Seidel sweep per iteration. */
+  readonly schedule: JGS2Schedule;
   readonly timestep: number;
   readonly gravity: readonly [number, number, number];
   readonly iterations: number;
@@ -148,6 +159,7 @@ export const JGS2_DEGENERATE_DYNAMIC_SCENE_SCALE = 1e-12;
 const F32_UNIT_ROUNDOFF = 2 ** -24;
 
 export const DEFAULT_JGS2_STEP_SETTINGS: JGS2StepSettings = {
+  schedule: "jacobi",
   timestep: 1 / 60,
   gravity: [0, -9.81, 0],
   iterations: 9,
@@ -219,7 +231,17 @@ interface JGS2UniformState {
   readonly baseBindGroup: GPUBindGroup;
   readonly fromBToABindGroup: GPUBindGroup;
   readonly fromAToBBindGroup: GPUBindGroup;
+  /** One immutable-address uniform/bind group per direction and active color. */
+  readonly coloredAToA: readonly GPUBuffer[];
+  readonly coloredBToB: readonly GPUBuffer[];
+  readonly coloredAToABindGroups: readonly GPUBindGroup[];
+  readonly coloredBToBBindGroups: readonly GPUBindGroup[];
 }
+
+const JGS2_COLORED_SCHEDULE_FLAG = 0x8000_0000;
+const JGS2_COLORED_SCHEDULE_BODY_MASK = 0x0000_ffff;
+/** This is intentionally a bounded small-scene scheduler, not a general one. */
+const JGS2_COLORED_SCHEDULE_MAX_COLOR = 255;
 
 function alignTo4(value: number): number {
   return Math.ceil(value / 4) * 4;
@@ -269,6 +291,68 @@ function packPinnedVertexMask(input: JGS2GpuInput): Uint8Array {
     pinned[vertex] = Number(input.vertexInfo[vertex * 4 + 2] !== 0);
   }
   return pinned;
+}
+
+/** Deterministic small-scene conflicts used by the graph-colored schedule. */
+export function buildJGS2InputVertexColoring(input: JGS2GpuInput) {
+  const conflictGroups: Array<ArrayLike<number>> = [];
+  for (let tet = 0; tet < input.tetCount; tet += 1) {
+    conflictGroups.push(input.tetIndices.subarray(tet * 4, tet * 4 + 4));
+  }
+  // A trained record may reference a nonincident tet. Couple its source
+  // vertex to every position read by that tet so one in-place color dispatch
+  // never reads a position another lane in the same dispatch is writing.
+  for (let vertex = 0; vertex < input.vertexCount; vertex += 1) {
+    for (let sample = 0; sample < input.cubatureK; sample += 1) {
+      const record = vertex * input.cubatureK + sample;
+      const tet = input.cubatureTetIds[record]!;
+      if (tet === 0xffff_ffff || input.cubatureWeights[record]! <= 0) {
+        continue;
+      }
+      conflictGroups.push([
+        vertex,
+        ...input.tetIndices.subarray(tet * 4, tet * 4 + 4),
+      ]);
+    }
+  }
+  if (input.cloth) {
+    for (
+      let triangle = 0;
+      triangle < input.cloth.triangleIndices.length / 3;
+      triangle += 1
+    ) {
+      conflictGroups.push(
+        input.cloth.triangleIndices.subarray(
+          triangle * 3,
+          triangle * 3 + 3,
+        ),
+      );
+    }
+    for (
+      let hinge = 0;
+      hinge < input.cloth.hingeIndices.length / 4;
+      hinge += 1
+    ) {
+      conflictGroups.push(
+        input.cloth.hingeIndices.subarray(hinge * 4, hinge * 4 + 4),
+      );
+    }
+  }
+  if (input.contactCandidates) {
+    for (
+      let candidate = 0;
+      candidate < input.contactCandidates.packedIndices.length / 4;
+      candidate += 1
+    ) {
+      conflictGroups.push(
+        input.contactCandidates.packedIndices.subarray(
+          candidate * 4,
+          candidate * 4 + 4,
+        ),
+      );
+    }
+  }
+  return buildGreedyVertexColoring(input.vertexCount, conflictGroups);
 }
 
 function finiteF32(value: number, label: string): number {
@@ -332,6 +416,12 @@ function assertStorageBufferFits(
 }
 
 function validateStepSettings(settings: JGS2StepSettings): void {
+  if (
+    settings.schedule !== "jacobi" &&
+    settings.schedule !== "graph-colored-gauss-seidel"
+  ) {
+    throw new RangeError(`Unknown JGS2 schedule: ${String(settings.schedule)}.`);
+  }
   const finiteValues: ReadonlyArray<readonly [string, number]> = [
     ["timestep", settings.timestep],
     ["iterations", settings.iterations],
@@ -512,13 +602,35 @@ function packUniforms(
   stopAfterConvergence: boolean,
   sceneScale: number,
   objectiveFlags: number,
+  activeColor: number | null = null,
 ): Uint8Array {
   const buffer = new ArrayBuffer(JGS2_UNIFORM_BYTES);
   const integers = new Uint32Array(buffer);
   const floats = new Float32Array(buffer);
 
+  let packedBodyCount = input.bodyCount;
+  if (activeColor !== null) {
+    if (input.bodyCount > JGS2_COLORED_SCHEDULE_BODY_MASK) {
+      throw new RangeError(
+        "Colored Gauss-Seidel supports at most 65,535 small-scene bodies.",
+      );
+    }
+    if (
+      !Number.isSafeInteger(activeColor) ||
+      activeColor < 0 ||
+      activeColor > JGS2_COLORED_SCHEDULE_MAX_COLOR
+    ) {
+      throw new RangeError(
+        `Colored Gauss-Seidel active color must be from 0 through ${JGS2_COLORED_SCHEDULE_MAX_COLOR}.`,
+      );
+    }
+    packedBodyCount =
+      (JGS2_COLORED_SCHEDULE_FLAG |
+        (activeColor << 16) |
+        input.bodyCount) >>> 0;
+  }
   integers.set(
-    [input.vertexCount, input.tetCount, input.cubatureK, input.bodyCount],
+    [input.vertexCount, input.tetCount, input.cubatureK, packedBodyCount],
     0,
   );
   integers.set(
@@ -786,6 +898,7 @@ export class JGS2GpuSolver {
   readonly bodyCount: number;
   readonly contactCandidateCount: number;
   readonly clothTriangleCount: number;
+  readonly scheduleColorCount: number;
   readonly globalizationElementCount: number;
   readonly dynamicOffsets: JGS2DynamicOffsets;
   /** True for the stable-material production path governed by Phase 1 policy. */
@@ -821,6 +934,7 @@ export class JGS2GpuSolver {
     initialObjectiveActivity: PackedObjectiveActivity,
     contactCandidateCount: number,
     clothTriangleCount: number,
+    scheduleColorCount: number,
     globalizationEnabled: boolean,
     offsets: JGS2DynamicOffsets,
   ) {
@@ -830,6 +944,7 @@ export class JGS2GpuSolver {
     this.bodyCount = inputShape.bodyCount;
     this.contactCandidateCount = contactCandidateCount;
     this.clothTriangleCount = clothTriangleCount;
+    this.scheduleColorCount = scheduleColorCount;
     this.globalizationElementCount = this.tetCount + clothTriangleCount;
     this.dynamicOffsets = offsets;
     this.globalizationEnabled = globalizationEnabled;
@@ -858,6 +973,13 @@ export class JGS2GpuSolver {
 
     const materialMode = inferJGS2MaterialMode(input);
     const globalizationEnabled = materialMode === "stable-neo-hookean";
+    const vertexColoring = buildJGS2InputVertexColoring(input);
+    if (vertexColoring.colorCount > JGS2_COLORED_SCHEDULE_MAX_COLOR + 1) {
+      throw new RangeError(
+        `Colored Gauss-Seidel supports at most ${JGS2_COLORED_SCHEDULE_MAX_COLOR + 1} colors; ` +
+          `the small-scene conflict graph needs ${vertexColoring.colorCount}.`,
+      );
+    }
     const clothTriangleCount = input.cloth
       ? input.cloth.triangleIndices.length / 3
       : 0;
@@ -968,11 +1090,21 @@ export class JGS2GpuSolver {
     const packedCloth = input.cloth
       ? packJGS2GpuClothArena(input.cloth)
       : undefined;
+    const clothArena = packedCloth?.integers ??
+      new Uint32Array(JGS2_CLOTH_GLOBAL_WORDS);
+    const packedSchedule = packJGS2ScheduleArena(
+      vertexColoring.colors,
+      vertexColoring.colorCount,
+    );
     const cubature = new Uint32Array(
-      cubaturePrefix.length + (packedCloth?.integers.length ?? 0),
+      cubaturePrefix.length + clothArena.length + packedSchedule.integers.length,
     );
     cubature.set(cubaturePrefix);
-    if (packedCloth) cubature.set(packedCloth.integers, cubaturePrefix.length);
+    cubature.set(clothArena, cubaturePrefix.length);
+    cubature.set(
+      packedSchedule.integers,
+      cubaturePrefix.length + clothArena.length,
+    );
 
     const storageSizes: ReadonlyArray<readonly [string, number]> = [
       ["JGS2 dynamic buffer", dynamic.byteLength],
@@ -1195,6 +1327,28 @@ export class JGS2GpuSolver {
       uniformBuffers.push(fromBToA);
       const fromAToB = createUniformBuffer(device, "jgs2-uniform-a-to-b");
       uniformBuffers.push(fromAToB);
+      const coloredAToA = Array.from(
+        { length: vertexColoring.colorCount },
+        (_, color) => {
+          const buffer = createUniformBuffer(
+            device,
+            `jgs2-uniform-colored-a-to-a-${color}`,
+          );
+          uniformBuffers.push(buffer);
+          return buffer;
+        },
+      );
+      const coloredBToB = Array.from(
+        { length: vertexColoring.colorCount },
+        (_, color) => {
+          const buffer = createUniformBuffer(
+            device,
+            `jgs2-uniform-colored-b-to-b-${color}`,
+          );
+          uniformBuffers.push(buffer);
+          return buffer;
+        },
+      );
       const uniforms: JGS2UniformState = {
         base,
         fromBToA,
@@ -1219,6 +1373,26 @@ export class JGS2GpuSolver {
           buffers,
           fromAToB,
           "jgs2-a-to-b-bind-group",
+        ),
+        coloredAToA,
+        coloredBToB,
+        coloredAToABindGroups: coloredAToA.map((uniform, color) =>
+          createBindGroup(
+            device,
+            bindGroupLayout,
+            buffers,
+            uniform,
+            `jgs2-colored-a-to-a-bind-group-${color}`,
+          ),
+        ),
+        coloredBToBBindGroups: coloredBToB.map((uniform, color) =>
+          createBindGroup(
+            device,
+            bindGroupLayout,
+            buffers,
+            uniform,
+            `jgs2-colored-b-to-b-bind-group-${color}`,
+          ),
         ),
       };
 
@@ -1272,6 +1446,7 @@ export class JGS2GpuSolver {
         initialObjectiveActivity,
         packedContacts.candidateCount,
         clothTriangleCount,
+        vertexColoring.colorCount,
         globalizationEnabled,
         offsets,
       );
@@ -1786,7 +1961,14 @@ export class JGS2GpuSolver {
     stopAfterConvergence: boolean,
   ): void {
     if (this.globalizationEnabled) {
-      validateGlobalizedSubmissionWork(frameCount, iterations);
+      const substepsPerIteration =
+        settings.schedule === "graph-colored-gauss-seidel"
+          ? this.scheduleColorCount
+          : 1;
+      validateGlobalizedSubmissionWork(
+        frameCount,
+        iterations * substepsPerIteration,
+      );
     }
     this.prepareFrame(settings, iterations, stopAfterConvergence);
     const encoder = this.device.createCommandEncoder({
@@ -1891,6 +2073,48 @@ export class JGS2GpuSolver {
         this.objectiveFlagsValue,
       ),
     );
+    if (settings.schedule === "graph-colored-gauss-seidel") {
+      if (
+        this.uniforms.coloredAToA.length !== this.scheduleColorCount ||
+        this.uniforms.coloredBToB.length !== this.scheduleColorCount
+      ) {
+        throw new Error("Colored Gauss-Seidel uniforms are unavailable.");
+      }
+      for (let color = 0; color < this.scheduleColorCount; color += 1) {
+        this.device.queue.writeBuffer(
+          this.uniforms.coloredAToA[color]!,
+          0,
+          packUniforms(
+            this.inputShape,
+            this.dynamicOffsets,
+            settings,
+            this.dynamicOffsets.posA,
+            this.dynamicOffsets.posA,
+            this.globalizationEnabled,
+            this.globalizationEnabled && stopAfterConvergence,
+            this.sceneScale,
+            this.objectiveFlagsValue,
+            color,
+          ),
+        );
+        this.device.queue.writeBuffer(
+          this.uniforms.coloredBToB[color]!,
+          0,
+          packUniforms(
+            this.inputShape,
+            this.dynamicOffsets,
+            settings,
+            this.dynamicOffsets.posB,
+            this.dynamicOffsets.posB,
+            this.globalizationEnabled,
+            this.globalizationEnabled && stopAfterConvergence,
+            this.sceneScale,
+            this.objectiveFlagsValue,
+            color,
+          ),
+        );
+      }
+    }
   }
 
   private encodeFrame(
@@ -1952,27 +2176,80 @@ export class JGS2GpuSolver {
         iteration % 2 === 0
           ? this.uniforms.fromBToABindGroup
           : this.uniforms.fromAToBBindGroup;
-      encodeDispatch(
-        encoder,
-        this.pipelines.tetPolarRotation,
-        bindGroup,
-        this.tetCount,
-        `jgs2-tet-polar-pass-${iteration}`,
-      );
-      encodeDispatch(
-        encoder,
-        this.pipelines.vertexPolarRotation,
-        bindGroup,
-        this.vertexCount,
-        `jgs2-vertex-polar-pass-${iteration}`,
-      );
-      encodeDispatch(
-        encoder,
-        this.pipelines.solve,
-        bindGroup,
-        this.vertexCount,
-        `jgs2-solve-pass-${iteration}`,
-      );
+      if (settings.schedule === "graph-colored-gauss-seidel") {
+        // Preserve the complete accepted sweep source for assembled
+        // globalization, then update the target in place one conflict-free
+        // color at a time. Distinct per-color uniforms are required because
+        // queue.writeBuffer calls are not command-stream snapshots.
+        encodeDispatch(
+          encoder,
+          this.pipelines.copyPosition,
+          bindGroup,
+          this.vertexCount,
+          `jgs2-colored-copy-source-pass-${iteration}`,
+        );
+        for (let color = 0; color < this.scheduleColorCount; color += 1) {
+          const colorBindGroup =
+            iteration % 2 === 0
+              ? this.uniforms.coloredAToABindGroups[color]!
+              : this.uniforms.coloredBToBBindGroups[color]!;
+          encodeDispatch(
+            encoder,
+            this.pipelines.tetPolarRotation,
+            colorBindGroup,
+            this.tetCount,
+            `jgs2-colored-tet-polar-pass-${iteration}-${color}`,
+          );
+          encodeDispatch(
+            encoder,
+            this.pipelines.vertexPolarRotation,
+            colorBindGroup,
+            this.vertexCount,
+            `jgs2-colored-vertex-polar-pass-${iteration}-${color}`,
+          );
+          encodeDispatch(
+            encoder,
+            this.pipelines.solve,
+            colorBindGroup,
+            this.vertexCount,
+            `jgs2-colored-solve-pass-${iteration}-${color}`,
+          );
+        }
+        // The in-place color uniforms have source == target. Re-evaluate the
+        // complete sweep against the preserved plain S/T pair after a dispatch
+        // boundary makes every colored write visible.
+        if (this.globalizationEnabled && !contactEnabled) {
+          encodeDispatch(
+            encoder,
+            this.pipelines.assembledVertexEnergy!,
+            bindGroup,
+            this.vertexCount,
+            `jgs2-colored-assembled-energy-pass-${iteration}`,
+          );
+        }
+      } else {
+        encodeDispatch(
+          encoder,
+          this.pipelines.tetPolarRotation,
+          bindGroup,
+          this.tetCount,
+          `jgs2-tet-polar-pass-${iteration}`,
+        );
+        encodeDispatch(
+          encoder,
+          this.pipelines.vertexPolarRotation,
+          bindGroup,
+          this.vertexCount,
+          `jgs2-vertex-polar-pass-${iteration}`,
+        );
+        encodeDispatch(
+          encoder,
+          this.pipelines.solve,
+          bindGroup,
+          this.vertexCount,
+          `jgs2-solve-pass-${iteration}`,
+        );
+      }
       if (contactEnabled) {
         encodeDispatch(
           encoder,
@@ -2653,6 +2930,8 @@ export class JGS2GpuSolver {
     this.uniforms.base.destroy();
     this.uniforms.fromBToA.destroy();
     this.uniforms.fromAToB.destroy();
+    for (const uniform of this.uniforms.coloredAToA) uniform.destroy();
+    for (const uniform of this.uniforms.coloredBToB) uniform.destroy();
     this.oracleEvaluator?.destroy();
     this.timestampTimer.destroy();
   }

@@ -57,6 +57,10 @@ export {
   type StVKTriangleRestData,
 } from "./cloth";
 export {
+  buildGreedyVertexColoring,
+  type GreedyVertexColoring,
+} from "./vertex-coloring";
+export {
   buildStaticIpcContactCandidates,
   evaluateIpcBarrier,
   evaluateIpcEdgeEdgeDistance,

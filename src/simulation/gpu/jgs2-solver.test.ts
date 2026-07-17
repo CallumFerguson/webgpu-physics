@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  buildJGS2InputVertexColoring,
   computeJGS2InitialDynamicSceneScale,
   DEFAULT_JGS2_STEP_SETTINGS,
   JGS2_DEGENERATE_DYNAMIC_SCENE_SCALE,
@@ -154,12 +155,17 @@ function createBatchTestSolver(globalizationEnabled = false): {
       baseBindGroup: bindGroup,
       fromBToABindGroup: bindGroup,
       fromAToBBindGroup: bindGroup,
+      coloredAToA: [uniformBuffer, uniformBuffer, uniformBuffer, uniformBuffer],
+      coloredBToB: [uniformBuffer, uniformBuffer, uniformBuffer, uniformBuffer],
+      coloredAToABindGroups: [bindGroup, bindGroup, bindGroup, bindGroup],
+      coloredBToBBindGroups: [bindGroup, bindGroup, bindGroup, bindGroup],
     },
     defaultSettings: DEFAULT_JGS2_STEP_SETTINGS,
     submittedSettings: DEFAULT_JGS2_STEP_SETTINGS,
     preprocessingTimestep: DEFAULT_JGS2_STEP_SETTINGS.timestep,
     sceneScale: 1,
     globalizationEnabled,
+    scheduleColorCount: 4,
     globalizationRecordsAvailable: false,
     submittedIterations: 0,
     objectiveData: new Float32Array(
@@ -182,6 +188,7 @@ describe("JGS2 runtime settings", () => {
     );
 
     expect(settings.parityMode).toBe(false);
+    expect(settings.schedule).toBe("jacobi");
     expect(settings.velocityDamping).toBeLessThan(1);
     expect(settings.contactTangentialDamping).toBeGreaterThan(0);
     expect(settings.horizontalBodyCorrection).toBe(true);
@@ -202,6 +209,30 @@ describe("JGS2 runtime settings", () => {
     expect(settings.velocityDamping).toBe(1);
     expect(settings.contactTangentialDamping).toBe(0);
     expect(settings.horizontalBodyCorrection).toBe(false);
+  });
+});
+
+describe("JGS2 graph-colored dependencies", () => {
+  it("conflicts a source vertex with every vertex read by nonincident Cubature", () => {
+    const coloring = buildJGS2InputVertexColoring({
+      vertexCount: 5,
+      tetCount: 1,
+      cubatureK: 1,
+      tetIndices: new Uint32Array([0, 1, 2, 3]),
+      cubatureTetIds: new Uint32Array([
+        0xffff_ffff,
+        0xffff_ffff,
+        0xffff_ffff,
+        0xffff_ffff,
+        0,
+      ]),
+      cubatureWeights: new Float32Array([0, 0, 0, 0, 1]),
+    } as JGS2GpuInput);
+
+    expect(coloring.colorCount).toBe(5);
+    for (let tetVertex = 0; tetVertex < 4; tetVertex += 1) {
+      expect(coloring.colors[4]).not.toBe(coloring.colors[tetVertex]);
+    }
   });
 });
 
@@ -650,6 +681,36 @@ describe("JGS2 batched frame submission", () => {
     expect(solver.lastSubmittedSettings.horizontalBodyCorrection).toBe(true);
   });
 
+  it("encodes one in-place parallel pass per color and one assembled sweep", () => {
+    const { solver, counters } = createBatchTestSolver(true);
+
+    solver.stepExactIterations(1, {
+      schedule: "graph-colored-gauss-seidel",
+      horizontalBodyCorrection: false,
+    });
+
+    expect(counters.uniformWrites).toBe(11);
+    expect(counters.computePasses).toBe(23);
+    expect(counters.passLabels).toContain("jgs2-colored-copy-source-pass-0");
+    for (let color = 0; color < 4; color += 1) {
+      expect(counters.passLabels).toContain(
+        `jgs2-colored-solve-pass-0-${color}`,
+      );
+    }
+    expect(counters.passLabels).toContain(
+      "jgs2-colored-assembled-energy-pass-0",
+    );
+    expect(
+      counters.passLabels.filter((label) =>
+        label.startsWith("jgs2-reduce-convergence-pass-"),
+      ),
+    ).toEqual(["jgs2-reduce-convergence-pass-0"]);
+    expect(solver.lastSubmittedIterationCount).toBe(1);
+    expect(solver.lastSubmittedSettings.schedule).toBe(
+      "graph-colored-gauss-seidel",
+    );
+  });
+
   it("disables stable free-body correction while an objective is active", () => {
     const { solver, counters } = createBatchTestSolver(true);
     solver.setQuadraticTarget(0, [0.25, 0.5, -0.25], 1_000);
@@ -951,7 +1012,7 @@ describe("JGS2 create-time cleanup", () => {
     ["storage-map", 3],
     ["pipeline", 7],
     ["uniform", 8],
-    ["bind-group", 10],
+    ["bind-group", 18],
   ] as const)(
     "destroys every allocated buffer after a %s creation failure",
     async (stage, expectedBufferCount) => {

@@ -4,6 +4,7 @@ export {
   JGS2_MAX_BATCH_FRAMES,
   JGS2_MAX_GLOBALIZED_ITERATIONS_PER_SUBMISSION,
   JGS2GpuSolver,
+  buildJGS2InputVertexColoring,
   computeJGS2InitialDynamicSceneScale,
   resolveJGS2StepSettings,
   type JGS2AssembledCandidateTestResult,
@@ -11,6 +12,7 @@ export {
   type JGS2GlobalizationDiagnostics,
   type JGS2ObjectiveActivity,
   type JGS2PositionBufferView,
+  type JGS2Schedule,
   type JGS2StepSettings,
 } from "./jgs2-solver";
 export {
@@ -98,3 +100,9 @@ export {
   type JGS2GpuClothInput,
   type PackedJGS2GpuClothArena,
 } from "./cloth-layout";
+export {
+  JGS2_SCHEDULE_HEADER_WORDS,
+  JGS2_SCHEDULE_MAGIC,
+  packJGS2ScheduleArena,
+  type PackedJGS2ScheduleArena,
+} from "./schedule-layout";

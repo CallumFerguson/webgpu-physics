@@ -13,6 +13,24 @@ function functionBody(name: string): string {
 }
 
 describe("JGS2 stable globalization shader contract", () => {
+  it("guards the packed CPU-colored schedule before in-place vertex work", () => {
+    const tail = functionBody("scheduleTailAvailable");
+    expect(tail).toContain("cubatureWords[base] == SCHEDULE_MAGIC");
+    expect(tail).toContain("packedVertexCount == params.counts.x");
+    expect(tail).toContain(
+      "wordCount - base - SCHEDULE_HEADER_WORDS >= packedColorWords",
+    );
+
+    const solve = functionBody("jgs2Solve");
+    const colorGuard = solve.indexOf("vertexScheduleColor(vertex) != activeScheduleColor()");
+    expect(colorGuard).toBeGreaterThanOrEqual(0);
+    expect(colorGuard).toBeLessThan(solve.indexOf("let vertexItem = vertexData[vertex]"));
+
+    const bodyCount = functionBody("bodyCount");
+    expect(bodyCount).toContain("if (coloredScheduleEnabled())");
+    expect(bodyCount).toContain("params.counts.w & COLORED_SCHEDULE_BODY_MASK");
+  });
+
   it("binds one guarded read-only composite-objective record per vertex", () => {
     expect(jgs2Shader).toContain("struct VertexObjective {");
     expect(jgs2Shader).toContain("externalForce: vec4f");

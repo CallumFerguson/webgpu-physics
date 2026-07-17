@@ -5,6 +5,10 @@ import {
   JGS2_CLOTH_TRIANGLE_WORDS,
 } from "./cloth-layout";
 import {
+  JGS2_SCHEDULE_HEADER_WORDS,
+  JGS2_SCHEDULE_MAGIC,
+} from "./schedule-layout";
+import {
   IPC_CONTACT_CANDIDATE_VEC4S,
   IPC_CONTACT_GLOBAL_VEC4S,
   IPC_CONTACT_TYPE_EDGE_EDGE,
@@ -29,6 +33,11 @@ const CUBATURE_RECORD_WORDS: u32 = ${JGS2_CUBATURE_RECORD_WORDS}u;
 const CLOTH_GLOBAL_WORDS: u32 = ${JGS2_CLOTH_GLOBAL_WORDS}u;
 const CLOTH_TRIANGLE_WORDS: u32 = ${JGS2_CLOTH_TRIANGLE_WORDS}u;
 const CLOTH_HINGE_WORDS: u32 = ${JGS2_CLOTH_HINGE_WORDS}u;
+const SCHEDULE_MAGIC: u32 = ${JGS2_SCHEDULE_MAGIC}u;
+const SCHEDULE_HEADER_WORDS: u32 = ${JGS2_SCHEDULE_HEADER_WORDS}u;
+const COLORED_SCHEDULE_FLAG: u32 = 0x80000000u;
+const COLORED_SCHEDULE_BODY_MASK: u32 = 0x0000ffffu;
+const COLORED_SCHEDULE_COLOR_MASK: u32 = 0x7fffu;
 const EMPTY_TET: u32 = 0xffffffffu;
 const LOCAL_GLOBALIZATION_STRIDE: u32 = 4u;
 const TET_GLOBALIZATION_STRIDE: u32 = 2u;
@@ -982,6 +991,52 @@ fn clothHingeIndicesValid(indices: vec4u) -> bool {
 fn clothHingeRest(hinge: u32) -> vec2f {
   let base = clothHingeBase(hinge) + 4u;
   return vec2f(cubatureFloat(base), cubatureFloat(base + 1u));
+}
+
+fn scheduleArenaBase() -> u32 {
+  return clothArenaBase() + CLOTH_GLOBAL_WORDS +
+    clothTriangleCount() * CLOTH_TRIANGLE_WORDS +
+    clothHingeCount() * CLOTH_HINGE_WORDS;
+}
+
+fn scheduleTailAvailable() -> bool {
+  let base = scheduleArenaBase();
+  let wordCount = arrayLength(&cubatureWords);
+  if (base > wordCount || wordCount - base < SCHEDULE_HEADER_WORDS) {
+    return false;
+  }
+  let packedVertexCount = cubatureWords[base + 1u];
+  let packedColorCount = cubatureWords[base + 2u];
+  let packedColorWords = cubatureWords[base + 3u];
+  return cubatureWords[base] == SCHEDULE_MAGIC &&
+    packedVertexCount == params.counts.x &&
+    packedColorWords == params.counts.x &&
+    packedColorCount > 0u && packedColorCount <= params.counts.x &&
+    wordCount - base - SCHEDULE_HEADER_WORDS >= packedColorWords;
+}
+
+fn coloredScheduleEnabled() -> bool {
+  return (params.counts.w & COLORED_SCHEDULE_FLAG) != 0u;
+}
+
+fn activeScheduleColor() -> u32 {
+  return (params.counts.w >> 16u) & COLORED_SCHEDULE_COLOR_MASK;
+}
+
+fn vertexScheduleColor(vertex: u32) -> u32 {
+  if (!scheduleTailAvailable() || vertex >= params.counts.x) {
+    return 0xffffffffu;
+  }
+  return cubatureWords[
+    scheduleArenaBase() + SCHEDULE_HEADER_WORDS + vertex
+  ];
+}
+
+fn bodyCount() -> u32 {
+  if (coloredScheduleEnabled()) {
+    return params.counts.w & COLORED_SCHEDULE_BODY_MASK;
+  }
+  return params.counts.w;
 }
 
 fn clothTriangleLocalSlot(indices: vec3u, vertex: u32) -> u32 {
@@ -2343,6 +2398,15 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
     // through every remaining ping-pong target without doing solver work.
     dynamicData[params.offsets2.x + vertex] =
       dynamicData[params.offsets1.w + vertex];
+    return;
+  }
+  if (
+    coloredScheduleEnabled() &&
+    vertexScheduleColor(vertex) != activeScheduleColor()
+  ) {
+    // The target was initialized once at the start of this sweep. Wrong-color
+    // lanes leave it and their earlier-color diagnostics untouched while the
+    // selected conflict-free color updates in place.
     return;
   }
 
@@ -3796,7 +3860,7 @@ fn copyPosition(@builtin(global_invocation_id) globalId: vec3u) {
 @compute @workgroup_size(WORKGROUP_SIZE)
 fn bodyHorizontalCorrection(@builtin(global_invocation_id) globalId: vec3u) {
   let body = globalId.x;
-  if (body >= params.counts.w) {
+  if (body >= bodyCount()) {
     return;
   }
 
@@ -3838,7 +3902,7 @@ fn applyBodyHorizontalCorrection(
     return;
   }
   let body = vertexData[vertex].info.w;
-  if (body >= params.counts.w) {
+  if (body >= bodyCount()) {
     return;
   }
   let correction = dynamicData[params.offsets2.y + body].xz;

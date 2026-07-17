@@ -31,10 +31,13 @@ import {
 } from "./scenes";
 import {
   JGS2_MAX_BATCH_FRAMES,
+  JGS2_MAX_GLOBALIZED_ITERATIONS_PER_SUBMISSION,
   GpuTimestampFrameProfiler,
   GpuTimestampLiveProfiler,
   JGS2GpuSolver,
+  normalizeOddIterationCount,
   type JGS2GlobalizationHistoryRecord,
+  type JGS2Schedule,
   type GpuTimestampLiveFramePlan,
   type GpuTimestampMeasurement,
 } from "./simulation/gpu";
@@ -67,6 +70,8 @@ interface JGS2TestHarness {
   /** Read the current packed xyz positions after all prior GPU work completes. */
   positions(): Promise<Float32Array>;
   diagnostics(): Promise<JGS2Diagnostics>;
+  /** Exact all-element implicit energy for no-IPC comparison fixtures. */
+  oracleEnergy(): Promise<number>;
   diagnosticReadbackCount(): number;
   configuration(): JGS2TestConfiguration;
   submissionPolicy(): JGS2SubmissionPolicy;
@@ -97,6 +102,8 @@ interface JGS2TestConfiguration {
   readonly ipcFrictionVelocityEpsilon: number;
   readonly ipcStepSafety: number;
   readonly contactCandidateCount: number;
+  readonly schedule: JGS2Schedule;
+  readonly scheduleColorCount: number;
 }
 
 interface JGS2SubmissionPolicy {
@@ -144,6 +151,7 @@ interface RuntimeStats {
   readonly iterations: number;
   readonly cubatureSamples: number;
   readonly material: string;
+  readonly schedule: JGS2Schedule;
   readonly convergence: RuntimeConvergence | null;
 }
 
@@ -245,6 +253,35 @@ function requestedSceneId(): SceneId {
     : DEFAULT_SCENE_ID;
 }
 
+function requestedSchedule(): JGS2Schedule {
+  return new URLSearchParams(window.location.search).get("schedule") ===
+    "graph-colored-gauss-seidel"
+    ? "graph-colored-gauss-seidel"
+    : "jacobi";
+}
+
+function sceneHref(sceneId: SceneId, schedule: JGS2Schedule): string {
+  const parameters = new URLSearchParams({ scene: sceneId });
+  if (schedule === "graph-colored-gauss-seidel") {
+    parameters.set("schedule", schedule);
+  }
+  return `?${parameters.toString()}`;
+}
+
+function selectSchedule(schedule: JGS2Schedule): void {
+  const parameters = new URLSearchParams(window.location.search);
+  if (schedule === "graph-colored-gauss-seidel") {
+    parameters.set("schedule", schedule);
+  } else {
+    parameters.delete("schedule");
+  }
+  window.location.search = parameters.toString();
+}
+
+function scheduleLabel(schedule: JGS2Schedule): string {
+  return schedule === "graph-colored-gauss-seidel" ? "Colored GS" : "Jacobi";
+}
+
 function adapterDescription(info: GPUAdapterInfo): string {
   return [info.vendor, info.architecture, info.device, info.description]
     .filter((value, index, all) => value && all.indexOf(value) === index)
@@ -321,6 +358,7 @@ function convergenceFromHistory(
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sceneId = useMemo(requestedSceneId, []);
+  const schedule = useMemo(requestedSchedule, []);
   const testMode = useMemo(
     () => new URLSearchParams(window.location.search).get("test") === "1",
     [],
@@ -433,6 +471,7 @@ export function App() {
       const ipcFrictionCoefficient =
         scene.id === "contact" ? 0.45 : scene.id === "cloth" ? 0.3 : 0;
       const solverSettings = {
+        schedule,
         timestep: scene.settings.timestep,
         gravity: scene.settings.gravity,
         iterations: scene.settings.solverIterations,
@@ -584,6 +623,27 @@ export function App() {
           frameCount += 1;
         }
         return frameCount;
+      };
+
+      const stableSolverBatchFrameLimit = (
+        targetSolver: JGS2GpuSolver,
+        iterations: number,
+      ): number => {
+        if (!targetSolver.globalizationEnabled) {
+          return JGS2_MAX_BATCH_FRAMES;
+        }
+        const colorFactor =
+          targetSolver.defaultStepSettings.schedule ===
+          "graph-colored-gauss-seidel"
+            ? targetSolver.scheduleColorCount
+            : 1;
+        return Math.max(
+          1,
+          Math.floor(
+            JGS2_MAX_GLOBALIZED_ITERATIONS_PER_SUBMISSION /
+              (iterations * colorFactor),
+          ),
+        );
       };
 
       const publishGlobalizationHistory = (
@@ -830,6 +890,10 @@ export function App() {
               ) {
                 const batchFrames = Math.min(
                   TEST_BATCH_FRAME_LIMIT,
+                  stableSolverBatchFrameLimit(
+                    corpusSolver,
+                    PHASE0_FORCE_FREE_ITERATIONS,
+                  ),
                   frameCount - completedFrames,
                 );
                 corpusSolver.stepFramesExactIterations(
@@ -947,8 +1011,17 @@ export function App() {
             }
             let remaining = frameCount;
             while (remaining > 0) {
+              const iterationCount = conservationFixture
+                ? PHASE0_FORCE_FREE_ITERATIONS
+                : normalizeOddIterationCount(
+                    scene.settings.solverIterations,
+                  );
               const batchFrames = scriptedTargetBatchLength(
-                Math.min(TEST_BATCH_FRAME_LIMIT, remaining),
+                Math.min(
+                  TEST_BATCH_FRAME_LIMIT,
+                  stableSolverBatchFrameLimit(solver!, iterationCount),
+                  remaining,
+                ),
               );
               applyScriptedTargetForFrame(simulationFrame + 1);
               if (conservationFixture) {
@@ -1282,6 +1355,12 @@ export function App() {
             return positions;
           },
           diagnostics: readDiagnostics,
+          oracleEnergy: async () => {
+            recordSubmission("readback");
+            const diagnostics = await solver!.readOracleDiagnostics();
+            recordQueueDrained();
+            return diagnostics.energy;
+          },
           diagnosticReadbackCount: () =>
             solver!.explicitDiagnosticReadbackCount,
           configuration: () => {
@@ -1308,6 +1387,8 @@ export function App() {
                 submittedSettings.ipcFrictionVelocityEpsilon,
               ipcStepSafety: submittedSettings.ipcStepSafety,
               contactCandidateCount: solver!.contactCandidateCount,
+              schedule,
+              scheduleColorCount: solver!.scheduleColorCount,
             };
           },
           submissionPolicy: () => ({
@@ -1548,6 +1629,7 @@ export function App() {
           scene.id === "cloth"
             ? "StVK membrane + bending"
             : materialLabel(scene.materials),
+        schedule,
         convergence: null,
       });
       setPhase("ready");
@@ -1600,7 +1682,7 @@ export function App() {
       solver?.destroy();
       gpuDevice?.destroy();
     };
-  }, [conservationFixture, parityMode, sceneId, testMode]);
+  }, [conservationFixture, parityMode, sceneId, schedule, testMode]);
 
   const liveSnapshot = livePerformance.snapshot;
   const displayedMaterial =
@@ -1610,6 +1692,7 @@ export function App() {
       : materialLabel(sceneDefinition.materials));
   const displayedIterations =
     stats?.iterations ?? sceneDefinition.settings.solverIterations;
+  const displayedSchedule = stats?.schedule ?? schedule;
   const displayedConvergence = stats?.convergence ?? null;
   const displayedTarget =
     !conservationFixture && sceneId === "minimal" && !parityMode
@@ -1631,7 +1714,7 @@ export function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <a className="brand" href={`?scene=${DEFAULT_SCENE_ID}`}>
+        <a className="brand" href={sceneHref(DEFAULT_SCENE_ID, schedule)}>
           <span className="brand-mark" aria-hidden="true">J²</span>
           <span>
             <strong>JGS2</strong>
@@ -1659,7 +1742,7 @@ export function App() {
             {SCENE_IDS.map((id, index) => (
               <a
                 className={id === sceneId ? "scene-link scene-link--active" : "scene-link"}
-                href={`?scene=${id}`}
+                href={sceneHref(id, schedule)}
                 key={id}
                 aria-current={id === sceneId ? "page" : undefined}
               >
@@ -1668,6 +1751,21 @@ export function App() {
               </a>
             ))}
           </nav>
+
+          <label className="schedule-control">
+            <span>Update schedule</span>
+            <select
+              aria-label="Solver update schedule"
+              data-testid="schedule-selector"
+              value={schedule}
+              onChange={(event) =>
+                selectSchedule(event.currentTarget.value as JGS2Schedule)
+              }
+            >
+              <option value="jacobi">Jacobi</option>
+              <option value="graph-colored-gauss-seidel">Colored Gauss-Seidel</option>
+            </select>
+          </label>
 
           <div className="rail-note">
             <span>Runtime path</span>
@@ -1872,6 +1970,7 @@ export function App() {
               data-testid="solver-hud"
               data-material={displayedMaterial}
               data-iterations={displayedIterations}
+              data-schedule={displayedSchedule}
               data-convergence-finite={
                 displayedConvergence
                   ? String(displayedConvergence.finite)
@@ -1904,6 +2003,12 @@ export function App() {
                 </strong>
               </div>
               <div>
+                <span>Schedule</span>
+                <strong data-testid="active-schedule">
+                  {scheduleLabel(displayedSchedule)}
+                </strong>
+              </div>
+              <div>
                 <span>Convergence</span>
                 <strong data-testid="convergence-state">
                   {displayedConvergence
@@ -1933,7 +2038,12 @@ export function App() {
             </section>
             <div className="canvas-badge canvas-badge--top">
               <span>Implicit Euler</span>
-              <span>JGS2 Jacobi</span>
+              <span
+                data-testid="schedule-badge"
+                data-schedule={displayedSchedule}
+              >
+                JGS2 {scheduleLabel(displayedSchedule)}
+              </span>
             </div>
             <div className="canvas-legend" aria-label="Rendering legend">
               <span><i className="legend-live" />Live FEM surface</span>

@@ -195,6 +195,38 @@ a {
   color: var(--cyan);
 }
 
+.schedule-control {
+  display: grid;
+  gap: 7px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.schedule-control span {
+  color: #657782;
+  font: 500 0.57rem "DM Mono", monospace;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.schedule-control select {
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid rgb(151 184 198 / 18%);
+  border-radius: 7px;
+  color: #b6c5cc;
+  background: #0b171f;
+  cursor: pointer;
+  font: 400 0.61rem "DM Mono", monospace;
+}
+
+.schedule-control select:focus-visible {
+  border-color: rgb(86 224 209 / 55%);
+  outline: 2px solid rgb(86 224 209 / 16%);
+  outline-offset: 2px;
+}
+
 .rail-note {
   display: grid;
   gap: 6px;
@@ -654,6 +686,14 @@ canvas {
   .rail-note,
   .rail-label {
     display: none;
+  }
+
+  .schedule-control {
+    grid-template-columns: auto minmax(170px, 230px);
+    align-items: center;
+    justify-content: end;
+    margin-top: 10px;
+    padding-top: 10px;
   }
 
   .content {
