@@ -27,11 +27,11 @@ no interaction is required.
 npm run build             # strict TypeScript + production bundle
 npm run test:unit         # FEM, basis, Cubature, and renderer tests
 npm run test:baseline-manifest # verify every frozen test selector still exists
-npm run test:screenshot   # full hardware-WebGPU E2E, oracle, and timing suite
+npm run test:e2e          # full hardware-WebGPU E2E, oracle, visual, and timing suite
 ```
 
 Software WebGPU adapters, including SwiftShader, are deliberately rejected.
-The real-time and screenshot tests must exercise a hardware adapter.
+The real-time and hardware E2E tests must exercise a hardware adapter.
 
 ## Demo scenes
 

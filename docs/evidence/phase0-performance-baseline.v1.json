@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "criterion": "P0-EC-13",
   "recordedAtUtc": "2026-07-16T21:08:33.536Z",
-  "command": "npm.cmd run test:screenshot -- tests/e2e/performance-baseline.spec.ts",
+  "command": "npm.cmd run test:e2e -- tests/e2e/performance-baseline.spec.ts",
   "environment": {
     "browser": "Google Chrome 150.0.7871.124",
     "gpu": "NVIDIA GeForce RTX 5090",

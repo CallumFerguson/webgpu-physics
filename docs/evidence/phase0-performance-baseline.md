@@ -9,7 +9,7 @@ The reproducible Playwright test also attaches a versioned JSON report with all
 | Field | Value |
 | --- | --- |
 | Recorded UTC | 2026-07-16T21:08:33.536Z |
-| Command | `npm.cmd run test:screenshot -- tests/e2e/performance-baseline.spec.ts` |
+| Command | `npm.cmd run test:e2e -- tests/e2e/performance-baseline.spec.ts` |
 | Playwright project | `chrome-hardware` |
 | Browser | Google Chrome 150.0.7871.124 |
 | GPU | NVIDIA GeForce RTX 5090, Blackwell, driver 596.21 |

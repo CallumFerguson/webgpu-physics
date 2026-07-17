@@ -78,7 +78,7 @@ The Phase 0 regression gate still runs every command recorded by the baseline:
 npm.cmd run test:unit
 npm.cmd run test:baseline-manifest
 npm.cmd run build
-npm.cmd run test:screenshot
+npm.cmd run test:e2e
 ```
 
 The reported baseline selectors must all be present. Any skipped baseline test

@@ -86,7 +86,7 @@ reports maximum GPU-versus-packed-CPU update error `2.113e-9` against the
 
 ```powershell
 npm.cmd run test:unit -- src/simulation/cpu/cubature.test.ts src/simulation/cpu/jgs2-local.test.ts src/simulation/cpu/nonlinear-cubature.test.ts src/simulation/cpu/nonlinear-cubature-training.test.ts src/reproducibility/phase1-cubature-manifest.test.ts
-npm.cmd run test:screenshot -- tests/e2e/nonlinear-cubature-gpu.spec.ts
+npm.cmd run test:e2e -- tests/e2e/nonlinear-cubature-gpu.spec.ts
 ```
 
 Stable preprocessing fails closed if any packed source residual exceeds 1%.

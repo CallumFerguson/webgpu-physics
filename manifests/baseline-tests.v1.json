@@ -12,7 +12,7 @@
     },
     {
       "id": "e2e",
-      "command": "npm.cmd run test:screenshot",
+      "command": "npm.cmd run test:e2e",
       "expectedTestCount": 7,
       "zeroUnexpectedSkips": true
     }
