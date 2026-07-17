@@ -15,6 +15,7 @@ function createBatchTestSolver(): {
     uniformWrites: number;
     computePasses: number;
     finishes: number;
+    timestampWriteIndices: number[];
   };
 } {
   const counters = {
@@ -22,6 +23,7 @@ function createBatchTestSolver(): {
     uniformWrites: 0,
     computePasses: 0,
     finishes: 0,
+    timestampWriteIndices: [] as number[],
   };
   const computePass = {
     setPipeline: () => undefined,
@@ -31,8 +33,18 @@ function createBatchTestSolver(): {
   } as unknown as GPUComputePassEncoder;
   const commandBuffer = {} as GPUCommandBuffer;
   const encoder = {
-    beginComputePass: () => {
+    beginComputePass: (descriptor?: GPUComputePassDescriptor) => {
       counters.computePasses += 1;
+      if (descriptor?.timestampWrites?.beginningOfPassWriteIndex !== undefined) {
+        counters.timestampWriteIndices.push(
+          descriptor.timestampWrites.beginningOfPassWriteIndex,
+        );
+      }
+      if (descriptor?.timestampWrites?.endOfPassWriteIndex !== undefined) {
+        counters.timestampWriteIndices.push(
+          descriptor.timestampWrites.endOfPassWriteIndex,
+        );
+      }
       return computePass;
     },
     finish: () => {
@@ -163,5 +175,24 @@ describe("JGS2 batched frame submission", () => {
       new RegExp(String(JGS2_MAX_BATCH_FRAMES)),
     );
     expect(counters.submissions).toBe(0);
+  });
+
+  it("retains exact iterations between caller-owned GPU timestamp writes", () => {
+    const { solver, counters } = createBatchTestSolver();
+
+    solver.stepExactIterationsWithGpuTimestampWrites(
+      2,
+      {
+        querySet: {} as GPUQuerySet,
+        startWriteIndex: 4,
+        endWriteIndex: 5,
+      },
+      { horizontalBodyCorrection: false },
+    );
+
+    expect(counters.submissions).toBe(1);
+    expect(counters.timestampWriteIndices).toEqual([4, 5]);
+    expect(counters.computePasses).toBe(11);
+    expect(solver.lastSubmittedIterationCount).toBe(2);
   });
 });

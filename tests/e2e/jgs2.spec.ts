@@ -1,4 +1,5 @@
 import { inflateSync } from "node:zlib";
+import { writeFile } from "node:fs/promises";
 
 import {
   expect,
@@ -6,6 +7,15 @@ import {
   type Page,
   type TestInfo,
 } from "@playwright/test";
+
+import {
+  DEFAULT_JGS2_E2E_PERFORMANCE_OPTIONS,
+  assessJGS2ComputeBudget,
+  buildJGS2PerformanceBenchmark,
+  type JGS2CpuFrameProfile,
+  type JGS2GpuFrameProfile,
+  type JGS2PerformanceProfileOptions,
+} from "../../src/performance";
 
 type Vec3 = readonly [number, number, number];
 
@@ -63,6 +73,12 @@ interface JGS2TestHarness {
   readonly ready: Promise<void>;
   stepFrames(frameCount: number): Promise<void>;
   stepIterations(iterationCount: number): Promise<void>;
+  profileCpuFrames(
+    options: JGS2PerformanceProfileOptions,
+  ): Promise<JGS2CpuFrameProfile>;
+  profileGpuFrames(
+    options: JGS2PerformanceProfileOptions,
+  ): Promise<JGS2GpuFrameProfile>;
   waitForGpu(): Promise<void>;
   diagnostics(): Promise<JGS2Diagnostics>;
   configuration(): {
@@ -174,6 +190,11 @@ const test = base.extend<{ pageErrorGuard: void }>({
     { auto: true },
   ],
 });
+
+// These tests include benchmark intervals. Playwright tracing records page
+// activity even when a successful trace is later discarded, so keep it out of
+// the timing domain. Other E2E files retain the project-level failure traces.
+test.use({ trace: "off" });
 
 test("renders a useful DOM error when WebGPU is unavailable", async ({ page }) => {
   await page.addInitScript(() => {
@@ -345,6 +366,7 @@ test("P0-EC-10/11: a force-free body conserves momentum for 10 seconds", async (
     submissionPolicy.testBatchFrameLimit,
   );
   expect(submissionPolicy.productionStepsPerSubmission).toBe(1);
+  await recordScenePerformance(page, testInfo, sceneId);
 });
 
 test("P0-CORPUS-01: all 32 frozen force-free states conserve momentum on hardware", async ({
@@ -518,6 +540,7 @@ test.describe("deterministic JGS2 scenes", () => {
           `downward landmark motion ${downwardLandmarkMotion.toFixed(5)}, ` +
           `bounds motion ${boundsMotion.toFixed(5)}`,
       );
+      await recordScenePerformance(page, testInfo, scene.id);
     });
   }
 });
@@ -653,6 +676,7 @@ test.describe("long-run settled body stability", () => {
             finalSpeed.toFixed(5),
         );
       }
+      await recordScenePerformance(page, testInfo, scene.id);
     });
   }
 });
@@ -744,11 +768,86 @@ async function waitForTestHarness(page: Page): Promise<void> {
   await page.waitForFunction(
     () =>
       typeof window.__jgs2Test?.stepFrames === "function" &&
+      typeof window.__jgs2Test?.profileCpuFrames === "function" &&
+      typeof window.__jgs2Test?.profileGpuFrames === "function" &&
       typeof window.__jgs2Test?.diagnostics === "function",
   );
   await page.evaluate(async () => {
     await window.__jgs2Test!.ready;
   });
+}
+
+async function recordScenePerformance(
+  page: Page,
+  testInfo: TestInfo,
+  workloadId: string,
+): Promise<void> {
+  const options = DEFAULT_JGS2_E2E_PERFORMANCE_OPTIONS;
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForTestHarness(page);
+  const cpuProfile = await page.evaluate(
+    async (profileOptions) =>
+      window.__jgs2Test!.profileCpuFrames(profileOptions),
+    options,
+  );
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForTestHarness(page);
+  const gpuProfile = await page.evaluate(
+    async (profileOptions) =>
+      window.__jgs2Test!.profileGpuFrames(profileOptions),
+    options,
+  );
+
+  const report = buildJGS2PerformanceBenchmark(cpuProfile, gpuProfile);
+  expect(report.workloadId).toBe(workloadId);
+  expect(report.measuredFrameCount).toBe(options.measuredFrameCount);
+  expect(report.gpuTimestamp.featureEnabled).toBe(
+    report.gpuTimestamp.supported,
+  );
+  expect(report.gpuTimestamp.timestampMapCount).toBe(
+    report.gpuTimestamp.supported ? 1 : 0,
+  );
+  expect(report.stateEquivalent, "timestamp profiling must not change state").toBe(
+    true,
+  );
+
+  const computeBudget = assessJGS2ComputeBudget(report);
+  const artifact = {
+    ...report,
+    budgetAssessment: {
+      ...computeBudget,
+      enforcement:
+        "informational-scene-log; the isolated performance-baseline test owns the enforced hardware budget",
+    },
+  };
+  const artifactPath = testInfo.outputPath("scene-performance.json");
+  await writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
+  await testInfo.attach("scene-performance.json", {
+    path: artifactPath,
+    contentType: "application/json",
+  });
+
+  const gpuSummary = report.gpuFrame
+    ? `GPU ${report.gpuFrame.meanMilliseconds.toFixed(3)} ms/frame, ` +
+      `${report.gpuSimulationStep!.meanMilliseconds.toFixed(3)} ms/step, ` +
+      `${report.gpuRender!.meanMilliseconds.toFixed(3)} ms/render`
+    : `GPU timestamp-query unavailable (${report.gpuTimestamp.reason})`;
+  console.log(
+    `[scene-performance] ${workloadId}: ` +
+      `serialized ${report.endToEndFrame.averageFramesPerSecond!.toFixed(1)} FPS average, ` +
+      `${report.endToEndFrame.onePercentLowFramesPerSecond!.toFixed(1)} FPS 1% low; ` +
+      `wall ${report.endToEndFrame.meanMilliseconds.toFixed(3)} ms/frame ` +
+      `(p95 ${report.endToEndFrame.p95Milliseconds.toFixed(3)}); ` +
+      `CPU submit ${report.cpuFrameSubmission.meanMilliseconds.toFixed(3)} ms/frame, ` +
+      `${report.cpuSimulationSubmission.meanMilliseconds.toFixed(3)} ms/step; ` +
+      `${gpuSummary}; serialized step-compute budget ` +
+      `${computeBudget.serializedStepBudgetMilliseconds.toFixed(3)} ms ` +
+      `(assessment ${computeBudget.passesNecessaryComputeBudget ? "PASS" : "FAIL"}; ` +
+      `wall mean ${computeBudget.meetsSerializedWallMeanBudget ? "PASS" : "FAIL"}, ` +
+      `GPU p95 ${computeBudget.meetsGpuFrameP95Budget === null ? "N/A" : computeBudget.meetsGpuFrameP95Budget ? "PASS" : "FAIL"})`,
+  );
 }
 
 async function waitForCanvasPresentation(page: Page): Promise<void> {

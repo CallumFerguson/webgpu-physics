@@ -81,6 +81,42 @@ npm.cmd run build
 npm.cmd run test:e2e
 ```
 
+The list reporter logs the finalized duration of every non-skipped E2E
+attempt. The built-in JSON reporter preserves per-attempt status, start time,
+duration, retry, errors, and whole-run duration in
+`test-results/playwright-results.json`, including failures and skips. Duration
+values are milliseconds. Discovery-only `--list` runs use only the list
+reporter, so they do not overwrite the last executed test report.
+
+Each of the seven screenshot-producing scene tests additionally attaches
+`scene-performance.json`. It profiles two fresh deterministic replays: 120
+warm-up and 600 measured serialized frames for wall/CPU submission timing,
+then the same frames with GPU simulation/render timestamps. The GPU replay
+resolves 2,400 timestamps with one map and must end with byte-identical f32
+positions and velocities. Average FPS is reciprocal mean wall time; 1% low is
+the reciprocal mean of the slowest `ceil(1%)` wall samples. CPU values are
+explicitly submission time, not wall time minus GPU time. `timestamp-query` is
+optional: unavailable devices still record wall/CPU metrics and explicitly
+report GPU metrics as unavailable rather than failing screenshot correctness.
+The scene tests disable Playwright tracing so trace collection cannot enter the
+timing distribution. Their per-scene budget assessments are logged and stored
+but are informational: shared desktop load must not turn screenshot or physics
+correctness into a performance failure. The isolated
+`performance-baseline.spec.ts` workload owns the enforced hardware compute
+budget.
+
+FPS in these artifacts is serialized benchmark throughput: one simulation
+step, one render, and a queue drain per measured sample. The necessary compute
+gate requires serialized wall mean and, when timestamp-query is available, GPU
+frame p95 to fit `min(16.667 ms, one timestep)`. Serialized wall p95 and 1% low
+remain reported diagnostics rather than hard gates because each sample includes
+an artificial queue drain and browser/event-loop synchronization jitter. This
+does not measure the production `requestAnimationFrame` scheduler or prove that
+simulation time advances at wall-clock speed. The current production loop
+submits at most one simulation step per animation callback, so a `1/120`-second
+scene on a 60 Hz display needs a future catch-up/time-rate gate before it can be
+called real-time in the application.
+
 The reported baseline selectors must all be present. Any skipped baseline test
 must have its stable ID in `allowedSkips`, and the skip condition must match.
 Because the v1 manifest contains no allowed skips, any baseline skip is an
@@ -102,11 +138,15 @@ The checked-in Phase 0 timing summary is
 Its Playwright test generates a versioned JSON attachment containing all raw
 samples on every run; the repository retains a compact machine-readable
 summary beside the report.
-The completion run recorded mean 3.832 ms and p95 5.000 ms end-to-end wall
-frames plus a 1.376256 ms explicit GPU simulation timestamp. These numbers are
-Phase 0 instrumentation evidence, not a performance target for later material
-and contact capabilities. The completion gate passed 74 unit and 14 hardware
-E2E tests with zero skips.
+The refreshed stress run recorded 269.4 average FPS and 173.9 FPS 1% low:
+mean 3.712 ms and p95 4.500 ms end-to-end wall frames, mean CPU submission
+0.132 ms/frame and 0.083 ms/simulation step, and mean GPU timestamp durations
+1.450 ms/frame and 1.432 ms/simulation step. Its 3.712 ms serialized wall mean
+and 1.769 ms GPU-frame p95 fit the scene's 8.333 ms serialized
+`1/120`-second step-compute budget; wall p95 remains a diagnostic at 4.500 ms.
+This is a necessary throughput result, not a production real-time claim. These
+numbers are Phase 0 instrumentation evidence, not the final large
+nonlinear-material/contact performance gate.
 
 The Phase 1 GPU material oracle evaluates all 64 stable Neo-Hookean poses
 against the Float64 nonlinear CPU oracle. Material-only energy, gradient, and
@@ -130,6 +170,16 @@ selector verification at 26/134 unit and 7/17 E2E, and all 17 hardware E2E
 tests with zero skips. The corrected two-iteration Cubature oracle reported
 maximum update error `2.113e-9` and predictor error `1.683e-9`; the unchanged
 stress timing test reported `p95 = 4.9 ms`.
+
+The later standard-performance-observability gate passed all 149 unit tests,
+the production build, frozen selector verification at 26/149 unit and 7/17
+E2E, and all 17 hardware E2E tests with zero skips. The JSON reporter recorded
+17 finite per-attempt durations and a 414,632.785 ms whole-run duration. All
+seven scene reports contained complete 600-frame CPU/GPU replay samples. The
+final isolated stress baseline recorded 270.3 serialized average FPS, 205.5
+FPS 1% low, 3.700 ms wall mean, 4.500 ms diagnostic wall p95, 0.146 ms CPU
+submission per frame, and 1.462 ms GPU mean per frame; its sustained-wall and
+GPU-p95 compute assessment passed.
 
 ## Precomputation artifacts
 

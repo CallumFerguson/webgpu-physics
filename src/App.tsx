@@ -3,6 +3,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { requestWebGPUDevice } from "./renderer";
 import { SceneRenderer, type SceneCamera } from "./rendering/scene-renderer";
 import {
+  validateJGS2PerformanceProfileOptions,
+  type JGS2CpuFrameProfile,
+  type JGS2GpuFrameProfile,
+  type JGS2PerformanceProfileOptions,
+  type JGS2PerformanceState,
+} from "./performance";
+import {
   DEFAULT_SCENE_ID,
   FORCE_FREE_CONSERVATION_FIXTURE_ID,
   PHASE0_FORCE_FREE_CORPUS_CASE_COUNT,
@@ -20,6 +27,7 @@ import {
 } from "./scenes";
 import {
   JGS2_MAX_BATCH_FRAMES,
+  GpuTimestampFrameProfiler,
   JGS2GpuSolver,
   type GpuTimestampMeasurement,
 } from "./simulation/gpu";
@@ -35,6 +43,14 @@ interface JGS2TestHarness {
   stepIterations(iterationCount: number): Promise<void>;
   /** Advance one frame and explicitly time only its GPU simulation commands. */
   timedStepFrame(): Promise<GpuTimestampMeasurement>;
+  /** Profile serialized production-shaped frames on a freshly loaded scene. */
+  profileCpuFrames(
+    options: JGS2PerformanceProfileOptions,
+  ): Promise<JGS2CpuFrameProfile>;
+  /** Profile GPU simulation and rendering with one timestamp-buffer map. */
+  profileGpuFrames(
+    options: JGS2PerformanceProfileOptions,
+  ): Promise<JGS2GpuFrameProfile>;
   waitForGpu(): Promise<void>;
   diagnostics(): Promise<JGS2Diagnostics>;
   diagnosticReadbackCount(): number;
@@ -199,6 +215,7 @@ export function App() {
     let gpuDevice: GPUDevice | undefined;
     let solver: JGS2GpuSolver | undefined;
     let renderer: SceneRenderer | undefined;
+    let frameProfiler: GpuTimestampFrameProfiler | undefined;
     let installedHarness: JGS2TestHarness | undefined;
 
     const recordSubmission = (
@@ -264,7 +281,9 @@ export function App() {
         maxStep: 0.075,
       } as const;
       solver = await JGS2GpuSolver.create(device, gpuInput, solverSettings);
+      frameProfiler = new GpuTimestampFrameProfiler(device, "jgs2-e2e-frame");
       if (!active) {
+        frameProfiler.destroy();
         solver.destroy();
         device.destroy();
         return;
@@ -305,6 +324,7 @@ export function App() {
       recordQueueDrained();
       if (!active) {
         renderer.destroy();
+        frameProfiler.destroy();
         solver.destroy();
         device.destroy();
         return;
@@ -341,6 +361,22 @@ export function App() {
         );
       };
 
+      const readPerformanceState = async (): Promise<JGS2PerformanceState> => {
+        recordSubmission("readback");
+        const positionsPromise = solver!.readPositions();
+        recordSubmission("readback");
+        const velocitiesPromise = solver!.readVelocities();
+        const [positions, velocities] = await Promise.all([
+          positionsPromise,
+          velocitiesPromise,
+        ]);
+        recordQueueDrained();
+        return {
+          positions: Array.from(positions),
+          velocities: Array.from(velocities),
+        };
+      };
+
       if (testMode) {
         const renderAndDrain = async (): Promise<void> => {
           recordSubmission("render");
@@ -348,6 +384,62 @@ export function App() {
           recordQueueDrained();
           setFrame(simulationFrame);
         };
+
+        const submitOneSimulationStep = (): void => {
+          if (conservationFixture) {
+            solver!.stepFramesExactIterations(
+              1,
+              PHASE0_FORCE_FREE_ITERATIONS,
+            );
+          } else {
+            solver!.step();
+          }
+        };
+
+        const advanceSerializedFrame = async (): Promise<{
+          readonly endToEndMilliseconds: number;
+          readonly cpuSimulationSubmissionMilliseconds: number;
+          readonly cpuRenderSubmissionMilliseconds: number;
+        }> => {
+          const frameStart = performance.now();
+          const simulationStart = performance.now();
+          submitOneSimulationStep();
+          const cpuSimulationSubmissionMilliseconds =
+            performance.now() - simulationStart;
+          recordSubmission("solver");
+          simulationFrame += 1;
+
+          const renderStart = performance.now();
+          renderer!.render(simulationFrame);
+          const cpuRenderSubmissionMilliseconds =
+            performance.now() - renderStart;
+          recordSubmission("render");
+          await solver!.awaitIdle();
+          recordQueueDrained();
+          return {
+            endToEndMilliseconds: performance.now() - frameStart,
+            cpuSimulationSubmissionMilliseconds,
+            cpuRenderSubmissionMilliseconds,
+          };
+        };
+
+        const assertFreshPerformanceScene = (): void => {
+          if (simulationFrame !== 0) {
+            throw new Error(
+              "Performance profiles require a freshly loaded scene at simulation frame zero.",
+            );
+          }
+        };
+
+        const profileIdentity = () => ({
+          workloadId: conservationFixture
+            ? FORCE_FREE_CONSERVATION_FIXTURE_ID
+            : scene.id,
+          timestepSeconds: scene.settings.timestep,
+          iterationsPerStep: conservationFixture
+            ? PHASE0_FORCE_FREE_ITERATIONS
+            : scene.settings.solverIterations,
+        });
 
         const runForceFreeCorpus = async (): Promise<
           readonly Phase0ForceFreeCorpusResult[]
@@ -549,6 +641,151 @@ export function App() {
             await renderAndDrain();
             return measurement;
           },
+          profileCpuFrames: async (options) => {
+            if (!submissionsEnabled) {
+              throw new Error("The WebGPU device is no longer available.");
+            }
+            validateJGS2PerformanceProfileOptions(options);
+            assertFreshPerformanceScene();
+            const initialSimulationFrame = simulationFrame;
+            const diagnosticReadbacksBefore =
+              solver!.explicitDiagnosticReadbackCount;
+            for (
+              let frameIndex = 0;
+              frameIndex < options.warmupFrameCount;
+              frameIndex += 1
+            ) {
+              await advanceSerializedFrame();
+            }
+
+            const endToEndFrameMilliseconds: number[] = [];
+            const cpuSimulationSubmissionMilliseconds: number[] = [];
+            const cpuRenderSubmissionMilliseconds: number[] = [];
+            const cpuFrameSubmissionMilliseconds: number[] = [];
+            for (
+              let frameIndex = 0;
+              frameIndex < options.measuredFrameCount;
+              frameIndex += 1
+            ) {
+              const sample = await advanceSerializedFrame();
+              endToEndFrameMilliseconds.push(sample.endToEndMilliseconds);
+              cpuSimulationSubmissionMilliseconds.push(
+                sample.cpuSimulationSubmissionMilliseconds,
+              );
+              cpuRenderSubmissionMilliseconds.push(
+                sample.cpuRenderSubmissionMilliseconds,
+              );
+              cpuFrameSubmissionMilliseconds.push(
+                sample.cpuSimulationSubmissionMilliseconds +
+                  sample.cpuRenderSubmissionMilliseconds,
+              );
+            }
+            setFrame(simulationFrame);
+            if (
+              solver!.explicitDiagnosticReadbackCount !==
+              diagnosticReadbacksBefore
+            ) {
+              throw new Error(
+                "CPU performance interval performed an unexpected diagnostic readback.",
+              );
+            }
+            const finalState = await readPerformanceState();
+            return {
+              ...profileIdentity(),
+              initialSimulationFrame,
+              finalSimulationFrame: simulationFrame,
+              warmupFrameCount: options.warmupFrameCount,
+              measuredFrameCount: options.measuredFrameCount,
+              diagnosticReadbacksBefore,
+              diagnosticReadbacksAfter:
+                solver!.explicitDiagnosticReadbackCount,
+              finalState,
+              samples: {
+                endToEndFrameMilliseconds,
+                cpuSimulationSubmissionMilliseconds,
+                cpuRenderSubmissionMilliseconds,
+                cpuFrameSubmissionMilliseconds,
+              },
+            } satisfies JGS2CpuFrameProfile;
+          },
+          profileGpuFrames: async (options) => {
+            if (!submissionsEnabled) {
+              throw new Error("The WebGPU device is no longer available.");
+            }
+            validateJGS2PerformanceProfileOptions(options);
+            assertFreshPerformanceScene();
+            const initialSimulationFrame = simulationFrame;
+            const diagnosticReadbacksBefore =
+              solver!.explicitDiagnosticReadbackCount;
+            for (
+              let frameIndex = 0;
+              frameIndex < options.warmupFrameCount;
+              frameIndex += 1
+            ) {
+              await advanceSerializedFrame();
+            }
+
+            const measurement = await frameProfiler!.measureFrames(
+              options.measuredFrameCount,
+              async (writes) => {
+                if (writes) {
+                  if (conservationFixture) {
+                    solver!.stepExactIterationsWithGpuTimestampWrites(
+                      PHASE0_FORCE_FREE_ITERATIONS,
+                      writes.simulation,
+                    );
+                  } else {
+                    solver!.stepWithGpuTimestampWrites(writes.simulation);
+                  }
+                } else {
+                  submitOneSimulationStep();
+                }
+                recordSubmission("solver");
+                simulationFrame += 1;
+                renderer!.render(simulationFrame, writes?.render);
+                recordSubmission("render");
+                await solver!.awaitIdle();
+                recordQueueDrained();
+              },
+            );
+            recordQueueDrained();
+            setFrame(simulationFrame);
+            if (
+              solver!.explicitDiagnosticReadbackCount !==
+              diagnosticReadbacksBefore
+            ) {
+              throw new Error(
+                "GPU performance interval performed an unexpected diagnostic readback.",
+              );
+            }
+            const finalState = await readPerformanceState();
+            return {
+              ...profileIdentity(),
+              initialSimulationFrame,
+              finalSimulationFrame: simulationFrame,
+              warmupFrameCount: options.warmupFrameCount,
+              measuredFrameCount: options.measuredFrameCount,
+              diagnosticReadbacksBefore,
+              diagnosticReadbacksAfter:
+                solver!.explicitDiagnosticReadbackCount,
+              finalState,
+              timestamp: {
+                feature: measurement.feature,
+                supported: measurement.supported,
+                featureEnabled: measurement.featureEnabled,
+                reason: measurement.reason,
+                timestampMapCount: measurement.timestampMapCount,
+              },
+              samples: {
+                gpuFrameMilliseconds:
+                  measurement.gpuFrameMilliseconds ?? [],
+                gpuSimulationStepMilliseconds:
+                  measurement.gpuSimulationStepMilliseconds ?? [],
+                gpuRenderMilliseconds:
+                  measurement.gpuRenderMilliseconds ?? [],
+              },
+            } satisfies JGS2GpuFrameProfile;
+          },
           waitForGpu: async () => {
             if (!submissionsEnabled) {
               throw new Error("The WebGPU device is no longer available.");
@@ -688,6 +925,8 @@ export function App() {
         submissionsEnabled = false;
         renderer?.destroy();
         renderer = undefined;
+        frameProfiler?.destroy();
+        frameProfiler = undefined;
         solver?.destroy();
         solver = undefined;
         gpuDevice?.destroy();
@@ -705,6 +944,7 @@ export function App() {
         delete window.__jgs2Test;
       }
       renderer?.destroy();
+      frameProfiler?.destroy();
       solver?.destroy();
       gpuDevice?.destroy();
     };

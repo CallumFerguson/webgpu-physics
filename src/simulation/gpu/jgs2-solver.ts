@@ -19,6 +19,7 @@ import {
 } from "./jgs2-diagnostics";
 import {
   GpuTimestampFrameTimer,
+  type GpuTimestampIntervalWrites,
   type GpuTimestampMeasurement,
 } from "./gpu-timestamp";
 import { JGS2_WORKGROUP_SIZE, jgs2Shader } from "./jgs2-shader";
@@ -232,6 +233,20 @@ function validateFrameBatchCount(frameCount: number): void {
     throw new RangeError(
       `frameCount must be a positive safe integer no greater than ` +
         `${JGS2_MAX_BATCH_FRAMES}; got ${frameCount}.`,
+    );
+  }
+}
+
+function validateTimestampWrites(writes: GpuTimestampIntervalWrites): void {
+  if (
+    !Number.isSafeInteger(writes.startWriteIndex) ||
+    !Number.isSafeInteger(writes.endWriteIndex) ||
+    writes.startWriteIndex < 0 ||
+    writes.endWriteIndex < 0 ||
+    writes.startWriteIndex === writes.endWriteIndex
+  ) {
+    throw new RangeError(
+      "GPU timestamp write indices must be distinct nonnegative safe integers.",
     );
   }
 }
@@ -779,8 +794,90 @@ export class JGS2GpuSolver {
     });
   }
 
+  /**
+   * Submit one production-shaped simulation frame with caller-owned timestamp
+   * writes. The caller resolves/maps the shared query set after its profile.
+   */
+  stepWithGpuTimestampWrites(
+    writes: GpuTimestampIntervalWrites,
+    overrides: Partial<JGS2StepSettings> = {},
+  ): void {
+    this.assertUsable();
+    validateTimestampWrites(writes);
+    if (
+      overrides.timestep !== undefined &&
+      !jgs2TimestepsMatch(this.preprocessingTimestep, overrides.timestep)
+    ) {
+      throw new RangeError(
+        `JGS2 was precomputed for timestep ${this.preprocessingTimestep}, ` +
+          `but stepWithGpuTimestampWrites() requested ${overrides.timestep}. ` +
+          "Regenerate the precomputation before changing timestep.",
+      );
+    }
+    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    this.submitFrameWithGpuTimestampWrites(
+      settings,
+      normalizeOddIterationCount(settings.iterations),
+      writes,
+    );
+  }
+
+  /** Exact-iteration variant used by parity/conservation benchmarks. */
+  stepExactIterationsWithGpuTimestampWrites(
+    iterations: number,
+    writes: GpuTimestampIntervalWrites,
+    overrides: Partial<JGS2StepSettings> = {},
+  ): void {
+    this.assertUsable();
+    validateExactIterationCount(iterations);
+    validateTimestampWrites(writes);
+    if (
+      overrides.timestep !== undefined &&
+      !jgs2TimestepsMatch(this.preprocessingTimestep, overrides.timestep)
+    ) {
+      throw new RangeError(
+        `JGS2 was precomputed for timestep ${this.preprocessingTimestep}, ` +
+          `but stepExactIterationsWithGpuTimestampWrites() requested ${overrides.timestep}. ` +
+          "Regenerate the precomputation before changing timestep.",
+      );
+    }
+    const settings = resolveJGS2StepSettings(this.defaultSettings, overrides);
+    this.submitFrameWithGpuTimestampWrites(settings, iterations, writes);
+  }
+
   private submitFrame(settings: JGS2StepSettings, iterations: number): void {
     this.submitFrames(settings, iterations, 1);
+  }
+
+  private submitFrameWithGpuTimestampWrites(
+    settings: JGS2StepSettings,
+    iterations: number,
+    writes: GpuTimestampIntervalWrites,
+  ): void {
+    this.prepareFrame(settings, iterations);
+    const encoder = this.device.createCommandEncoder({
+      label: "jgs2-profiled-step-command-encoder",
+    });
+    encoder
+      .beginComputePass({
+        label: "jgs2-profiled-step-start",
+        timestampWrites: {
+          querySet: writes.querySet,
+          endOfPassWriteIndex: writes.startWriteIndex,
+        },
+      })
+      .end();
+    this.encodeFrame(encoder, settings, iterations);
+    encoder
+      .beginComputePass({
+        label: "jgs2-profiled-step-end",
+        timestampWrites: {
+          querySet: writes.querySet,
+          beginningOfPassWriteIndex: writes.endWriteIndex,
+        },
+      })
+      .end();
+    this.device.queue.submit([encoder.finish()]);
   }
 
   private submitFrames(

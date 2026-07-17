@@ -17,6 +17,12 @@ export interface SceneCamera {
   readonly floorScale: number;
 }
 
+export interface SceneRenderTimestampWrites {
+  readonly querySet: GPUQuerySet;
+  readonly startWriteIndex: number;
+  readonly endWriteIndex: number;
+}
+
 function normalize(vector: readonly number[]): [number, number, number] {
   const length = Math.hypot(vector[0] ?? 0, vector[1] ?? 0, vector[2] ?? 0);
   if (length < 1e-12) {
@@ -319,12 +325,24 @@ export class SceneRenderer {
     this.camera = camera;
   }
 
-  render(frame = this.frame): void {
+  render(
+    frame = this.frame,
+    timestampWrites?: SceneRenderTimestampWrites,
+  ): void {
     this.frame = frame;
     this.writeUniforms(this.positionOffsetVertices);
     const encoder = this.device.createCommandEncoder({ label: "jgs2-render-encoder" });
     const pass = encoder.beginRenderPass({
       label: "jgs2-render-pass",
+      ...(timestampWrites
+        ? {
+            timestampWrites: {
+              querySet: timestampWrites.querySet,
+              beginningOfPassWriteIndex: timestampWrites.startWriteIndex,
+              endOfPassWriteIndex: timestampWrites.endWriteIndex,
+            },
+          }
+        : {}),
       colorAttachments: [{
         view: this.context.getCurrentTexture().createView(),
         clearValue: { r: 0.012, g: 0.024, b: 0.045, a: 1 },

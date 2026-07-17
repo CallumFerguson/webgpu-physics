@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 const port = 4173;
 const baseURL = `http://127.0.0.1:${port}`;
+const isListOnly = process.argv.includes("--list");
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -10,7 +11,12 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 60_000,
-  reporter: "list",
+  reporter: isListOnly
+    ? [["list"]]
+    : [
+        ["list"],
+        ["json", { outputFile: "test-results/playwright-results.json" }],
+      ],
   preserveOutput: "always",
   expect: {
     timeout: 10_000,

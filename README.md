@@ -32,6 +32,19 @@ npm run test:e2e          # full hardware-WebGPU E2E, oracle, visual, and timing
 
 Software WebGPU adapters, including SwiftShader, are deliberately rejected.
 The real-time and hardware E2E tests must exercise a hardware adapter.
+The E2E run prints Playwright's finalized duration for every non-skipped test
+and writes every result, including skips, to the machine-readable
+`test-results/playwright-results.json`, with per-attempt and total durations in
+milliseconds. Listing tests does not overwrite the last real run report. Every
+visual scene test also logs and attaches 600-sample serialized average FPS, 1%
+low, wall-frame, CPU-submit, and (when `timestamp-query` is available) GPU
+frame/step/render metrics. Serialized throughput is a necessary compute check;
+it is not a measurement of production animation scheduling or simulation time
+rate. Scene budget assessments are informational so unrelated correctness tests
+do not become load-sensitive; the isolated performance-baseline test owns the
+enforced hardware budget using sustained serialized wall throughput and GPU
+frame p95 when timestamps are available. Wall p95 and 1% low remain visible
+diagnostics.
 
 ## Demo scenes
 
@@ -139,7 +152,7 @@ fixed-step test harness that:
    fixed vertices, positive tetrahedron determinants, bounds, landmarks,
    momentum, and visible pixel change.
 
-The 14-test Phase 0 Playwright gate covers all four public scenes, long-running
+The 17-test Playwright gate covers all four public scenes, long-running
 drop/stress behavior, and the visible WebGPU-unavailable path. It also exercises
 the canonical GPU oracles, the base and 32-case force-free conservation corpus,
 submission/readback invariants, and the timestamped performance baseline.

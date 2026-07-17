@@ -7,8 +7,16 @@ export {
   type JGS2StepSettings,
 } from "./jgs2-solver";
 export {
+  MAX_GPU_TIMESTAMP_PROFILE_FRAME_COUNT,
+  MAX_GPU_TIMESTAMP_QUERY_COUNT,
+  MAX_GPU_TIMESTAMP_TIMER_FRAME_COUNT,
   GPU_TIMESTAMP_FEATURE,
   decodeGpuTimestampMeasurement,
+  GpuTimestampFrameProfiler,
+  type GpuTimestampBatchMeasurement,
+  type GpuTimestampFrameProfileMeasurement,
+  type GpuTimestampFrameWrites,
+  type GpuTimestampIntervalWrites,
   type GpuTimestampMeasurement,
 } from "./gpu-timestamp";
 export {

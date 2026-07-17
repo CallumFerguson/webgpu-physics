@@ -1,14 +1,17 @@
 # Phase 0 performance baseline
 
 This is the checked-in evidence summary for roadmap criterion `P0-EC-13`.
-The reproducible Playwright test also attaches a versioned JSON report with all
-600 raw samples to its test result.
+The reproducible Playwright test attaches the complete versioned JSON report,
+including all wall, CPU, and GPU samples, to its test result.
+The compact machine-readable summary is
+[`phase0-performance-baseline.v2.json`](phase0-performance-baseline.v2.json);
+the original v1 single-probe evidence remains unchanged for history.
 
 ## Recorded run
 
 | Field | Value |
 | --- | --- |
-| Recorded UTC | 2026-07-16T21:08:33.536Z |
+| Recorded UTC | 2026-07-17T02:02:19.631Z |
 | Command | `npm.cmd run test:e2e -- tests/e2e/performance-baseline.spec.ts` |
 | Playwright project | `chrome-hardware` |
 | Browser | Google Chrome 150.0.7871.124 |
@@ -19,43 +22,56 @@ The reproducible Playwright test also attaches a versioned JSON report with all
 
 ## Workload and method
 
-- Scene: `stress`.
-- 72 vertices, 72 tetrahedra, 120 surface triangles, 180 surface
-  edges, 6 bodies, and 2 materials.
-- Timestep: `1/120` seconds.
-- 17 JGS2 iterations and 6 Cubature samples per vertex.
-- 120 warm-up frames followed by 600 measured frames.
-- Each wall-clock sample covers one simulation frame, one render, and GPU queue
-  completion through `await window.__jgs2Test.stepFrames(1)`.
-- Preprocessing, explicit diagnostics, the GPU timestamp probe, screenshots,
-  and Playwright tracing are outside the measured interval.
-- Percentiles use nearest rank.
+- Scene: `stress`: 72 vertices, 72 tetrahedra, 120 surface triangles, 180
+  surface edges, 6 bodies, and 2 materials.
+- Timestep: `1/120` seconds, with 17 JGS2 iterations and 6 Cubature samples
+  per vertex.
+- CPU/wall replay: a fresh deterministic scene, 120 warm-up frames, then 600
+  serialized production-shaped simulation-and-render frames.
+- GPU replay: another fresh deterministic scene over the same 720 frames,
+  with distinct simulation and render timestamp intervals for all 600 measured
+  frames. All 2,400 timestamps are resolved and mapped once after measurement.
+- The replays end with byte-identical f32 position and velocity buffers.
+- Diagnostics, timestamp resolve/map, screenshots, preprocessing, and
+  Playwright tracing are outside timed intervals.
+- Percentiles use nearest rank. Average FPS is `1000 / mean wall ms`; 1% low
+  is `1000 / mean(slowest ceil(1%) wall samples)`.
+- “CPU” means main-thread encode/submit time and excludes GPU execution or
+  waiting. The values therefore do not add arithmetically to wall time.
 
 ## Results
 
-| Metric | Result |
+| Metric | Mean | p95 |
+| --- | ---: | ---: |
+| End-to-end wall frame | 3.712 ms | 4.500 ms |
+| CPU frame submission | 0.132 ms | 0.200 ms |
+| CPU simulation-step submission | 0.083 ms | 0.200 ms |
+| GPU frame | 1.450 ms | 1.769 ms |
+| GPU simulation step | 1.432 ms | 1.769 ms |
+| GPU render pass | 0.004 ms | 0.066 ms |
+
+| Throughput metric | Result |
 | --- | ---: |
-| Minimum wall frame | 2.100 ms |
-| Mean wall frame | 3.832 ms |
-| p50 wall frame | 3.700 ms |
-| p95 wall frame | 5.000 ms |
-| p99 wall frame | 6.500 ms |
-| Maximum wall frame | 14.800 ms |
-| Explicit GPU simulation timestamp | 1.376256 ms |
+| Serialized average FPS | 269.4 |
+| Serialized 1% low FPS | 173.9 |
+| Serialized step-compute budget | 8.333 ms/frame |
+| Serialized wall-mean budget result | Pass (3.712 ms) |
+| GPU-frame p95 budget result | Pass (1.769 ms) |
 
-The adapter advertised and enabled `timestamp-query`. The GPU value brackets
-the simulation command stream with empty timestamped compute passes; it omits
-rendering and readback, so it is reported separately from end-to-end wall time.
-
-The run ended at frame 721 with finite state, no browser errors, and no fallback
-adapter. Explicit diagnostic-readback counts were `0 -> 2 -> 2 -> 4`: the count
-did not change during the timestamp probe, warm-up, measurement, simulation, or
-rendering, and changed only for the two intentional diagnostic checkpoints.
+The wall distribution ranged from 2.600 ms to 8.500 ms, with p50 3.600 ms
+and p99 4.600 ms. Both replays ended at frame 720 with finite state, no
+browser errors, no diagnostic readback during measurement, and exactly one
+timestamp-buffer map after the GPU interval.
 
 ## Interpretation
 
-This is a Phase 0 instrumentation baseline, not the final paper-capability
-performance gate. The workload is intentionally small and has no general
-body-body collision pipeline. Later phase reports replace it with their
-canonical material, collision, IPC, friction, and cloth workloads and apply the
-roadmap's recorded p95 targets.
+This remains a small Phase 0 instrumentation baseline rather than the final
+paper-capability performance gate. Later phase reports replace it with their
+canonical nonlinear material, collision, IPC, friction, and cloth workloads.
+The pass is a necessary serialized compute-throughput condition only: sustained
+wall mean and GPU-frame p95 fit the step budget. Serialized wall p95 and 1% low
+remain diagnostics because each wall sample includes a queue drain and
+browser/event-loop synchronization jitter. The result does not exercise
+production `requestAnimationFrame` scheduling or establish that the
+`1/120`-second stress scene advances simulation time at wall-clock speed on a
+60 Hz display.

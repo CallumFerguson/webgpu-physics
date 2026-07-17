@@ -91,6 +91,22 @@ These definitions apply unless a phase explicitly overrides them.
   least 600 measured frames.
 - Performance measurements exclude screenshots, diagnostics readbacks, test
   traces, and preprocessing.
+- Average FPS is `1000 / mean(frame milliseconds)`. The 1% low is
+  `1000 / mean(the slowest ceil(1%) frame milliseconds)`; instantaneous FPS
+  values are never averaged.
+- FPS from the serialized test harness is compute throughput, not monitor FPS
+  or production simulation time rate. The instrumentation gate requires
+  serialized wall mean and, when timestamp-query is available, GPU-frame p95
+  to fit the step budget; serialized wall p95 and 1% low remain diagnostics
+  because every sample includes a queue drain. This gate is necessary but not
+  sufficient for a real-time claim; any such claim must also exercise
+  production animation scheduling and bounded catch-up behavior.
+- CPU performance values mean main-thread preparation, command encoding, and
+  queue submission time. They exclude GPU execution/waiting and are never
+  inferred by subtracting GPU timestamps from wall time.
+- GPU frame, simulation-step, and render distributions use a fresh replay of
+  the wall/CPU interval, one timestamp-buffer map, and byte-identical final
+  f32 state relative to the uninstrumented replay.
 - Collision detection, CCD, contact assembly, solve, velocity update, and
   rendering are included in frame time.
 - The runtime may have no more than two GPU submissions in flight.
@@ -324,8 +340,9 @@ nonlinear energy gradient and Hessian.
 - [ ] P1-EC-15: Start, peak-deformation, and released screenshots are saved and their
       semantic diagnostics pass.
 - [ ] P1-EC-16: The canonical Phase 1 performance scene and exact sampled
-      frame range are recorded in the manifest and meet the recorded
-      non-contact real-time gate.
+      frame range are recorded in the manifest, meet the serialized
+      non-contact compute gate, and pass a production-scheduler simulation
+      time-rate gate.
 
 ### Required evidence
 
@@ -967,6 +984,7 @@ later passing run so the history remains visible.
 | P0-EC-11 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:e2e -- --grep "force-free|frozen force-free" | RTX 5090 / Chrome 150 | Pass: base relative angular error 6.200642e-4; 32-state corpus worst 3.312243e-3 over 1,200 frames | tests/e2e/jgs2.spec.ts | Automated conservation corpus; independent gate audit |
 | P0-EC-12 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e | i7-13700K / RTX 5090 | Pass: 74 unit, build, frozen 26/74 unit and 7/14 E2E selectors, 14/14 hardware E2E; zero skips/errors | docs/reproducibility.md | Complete exact-current-code regression; independent gate audit |
 | P0-EC-13 | 2026-07-16 | 0 | Phase 0 completion milestone | npm.cmd run test:e2e -- tests/e2e/performance-baseline.spec.ts | i7-13700K / RTX 5090 | Pass: mean 3.832 ms, p95 5.000 ms wall; GPU simulation timestamp 1.376256 ms; finite frame 721 | docs/evidence/phase0-performance-baseline.md | Automated performance evidence; independent gate audit |
+| P0-EC-13 | 2026-07-16 | 0 | E2E performance metrics milestone | npm.cmd run test:e2e -- tests/e2e/performance-baseline.spec.ts | i7-13700K / RTX 5090 / Chrome 150 | Pass: serialized 269.4 FPS average, 173.9 FPS 1% low; wall mean 3.712 ms/p95 4.500 ms; CPU 0.132 ms/frame and 0.083 ms/step; GPU 1.450 ms/frame, 1.769 ms p95, and 1.432 ms/step; one timestamp map; byte-identical replay; wall mean and GPU p95 <= 8.333 ms necessary compute budget | docs/evidence/phase0-performance-baseline.md | Automated standard metrics; wall p95 diagnostic; production scheduler/time rate explicitly out of scope; independent audit findings resolved |
 | P1-EC-01 | 2026-07-16 | 1 | Phase 1 CPU material milestone | npm.cmd run test:unit -- src/simulation/cpu/stable-neo-hookean.test.ts | i7-13700K | Partial pass: CPU rest-normalized energy and force are below 1e-10; GPU pending | src/simulation/cpu/stable-neo-hookean.test.ts | Automated CPU oracle; reviewer pending |
 | P1-EC-02 | 2026-07-16 | 1 | Phase 1 CPU material milestone | npm.cmd run test:unit -- src/simulation/cpu/stable-neo-hookean.test.ts | i7-13700K | Partial pass: CPU energy, stress, tangent action, and tetrahedral response are objective; GPU pending | src/simulation/cpu/stable-neo-hookean.test.ts | Automated CPU oracle; reviewer pending |
 | P1-EC-03 | 2026-07-16 | 1 | Phase 1 CPU material milestone | .\\node_modules\\.bin\\vitest.cmd run src/simulation/cpu/stable-neo-hookean.test.ts --disableConsoleIntercept --reporter=verbose | i7-13700K | Pass: 60 deformed poses; worst gradient 8.975e-10 and Hessian 1.957e-11 | src/simulation/cpu/stable-neo-hookean.test.ts | Automated derivative oracle; reviewer pending |
@@ -980,6 +998,7 @@ later passing run so the history remains visible.
 | P1-EC-11 | 2026-07-16 | 1 | Phase 1 nonlinear Cubature milestone | npm.cmd run test:unit -- src/simulation/cpu/nonlinear-cubature-training.test.ts src/reproducibility/phase1-cubature-manifest.test.ts | i7-13700K | Pass: every active source has 12 Float64/f32-ranked candidates, retains K=6, and has conservative packed-vs-f64-target residual <=0.548989%; all 16 normalized targets valid | docs/evidence/phase1-nonlinear-cubature.md; manifests/phase1-cubature.v1.json | Automated independent dense/manifest gates; three-agent audit findings resolved |
 | P1-EC-12 | 2026-07-16 | 1 | Phase 1 nonlinear Cubature milestone | npm.cmd run test:unit -- src/simulation/cpu/nonlinear-cubature-training.test.ts; npm.cmd run test:e2e -- tests/e2e/nonlinear-cubature-gpu.spec.ts | i7-13700K / RTX 5090 / Chrome 150 | Pass: packed selected-vs-independent-dense update RMS training 3.713075e-5, held-out 3.984377e-5, combined 3.796498e-5; two-iteration production f32 predictor/GPU update parity 2.113e-9 | docs/evidence/phase1-nonlinear-cubature.md | Automated CPU/GPU oracle; three-agent audit findings resolved |
 | P1-GATE-03 | 2026-07-16 | 1 | Phase 1 nonlinear Cubature milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e | i7-13700K / RTX 5090 / Chrome 150 | Pass: 134 unit, build, frozen 26/134 unit and 7/17 E2E selectors, 17/17 hardware E2E; zero skips/errors; stress p95 4.9 ms | docs/reproducibility.md; docs/evidence/phase1-nonlinear-cubature.md | Complete exact-current-code regression; three-agent math/code/gate audits |
+| P0-GATE-02 | 2026-07-16 | 0-1 | Standard performance observability milestone | npm.cmd run test:unit; npm.cmd run build; npm.cmd run test:baseline-manifest; npm.cmd run test:e2e | i7-13700K / RTX 5090 / Chrome 150 | Pass: 149 unit, build, frozen 26/149 unit and 7/17 E2E selectors, 17/17 hardware E2E with zero skips; 414632.785 ms reported suite duration and 17 finite attempt durations; seven complete 600-frame scene reports; isolated stress 270.3 FPS average, 205.5 FPS 1% low, wall mean/p95 3.700/4.500 ms, CPU 0.146 ms/frame, GPU 1.462 ms/frame; necessary compute assessment passed | docs/reproducibility.md; docs/evidence/phase0-performance-baseline.md | Complete exact-current-code regression; three independent performance/schema/gate audits |
 
 ## Decision log
 
