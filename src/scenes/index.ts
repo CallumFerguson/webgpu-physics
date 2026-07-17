@@ -1,5 +1,6 @@
 import {
   appendTetrahedralMeshes,
+  buildStaticIpcContactCandidates,
   buildPrecomputedScene,
   computeStableNeoHookeanParameters,
   generateRegularCuboidMesh,
@@ -65,7 +66,13 @@ export {
   type Phase1StableNeoHookeanPose,
 } from "./phase1";
 
-export const SCENE_IDS = ["minimal", "stiffness", "drop", "stress"] as const;
+export const SCENE_IDS = [
+  "minimal",
+  "stiffness",
+  "drop",
+  "contact",
+  "stress",
+] as const;
 export type SceneId = (typeof SCENE_IDS)[number];
 export const DEFAULT_SCENE_ID: SceneId = "minimal";
 
@@ -105,6 +112,42 @@ const DROP_MATERIAL: LinearMaterial = {
   youngModulus: 70_000,
   poissonRatio: 0.36,
   color: [0.26, 0.63, 0.96, 1],
+};
+
+const CONTACT_SLAB_MATERIAL: LinearMaterial = {
+  name: "pinned contact slab",
+  model: "stable-neo-hookean",
+  density: 1_000,
+  youngModulus: 120_000,
+  poissonRatio: 0.34,
+  color: [0.34, 0.4, 0.48, 1],
+};
+
+const CONTACT_LOWER_MATERIAL: LinearMaterial = {
+  name: "lower contact block",
+  model: "stable-neo-hookean",
+  density: 900,
+  youngModulus: 65_000,
+  poissonRatio: 0.36,
+  color: [0.15, 0.74, 0.66, 1],
+};
+
+const CONTACT_UPPER_MATERIAL: LinearMaterial = {
+  name: "sliding contact block",
+  model: "stable-neo-hookean",
+  density: 850,
+  youngModulus: 75_000,
+  poissonRatio: 0.35,
+  color: [0.97, 0.48, 0.2, 1],
+};
+
+const CONTACT_SELF_MATERIAL: LinearMaterial = {
+  name: "self-contact pair",
+  model: "stable-neo-hookean",
+  density: 825,
+  youngModulus: 62_000,
+  poissonRatio: 0.35,
+  color: [0.72, 0.38, 0.92, 1],
 };
 
 export type MinimalScriptedTargetPhase =
@@ -324,6 +367,102 @@ function dropDefinition(): SceneDefinition {
   };
 }
 
+function contactDefinition(): SceneDefinition {
+  const slab = generateRegularCuboidMesh({
+    cells: [1, 1, 1],
+    origin: [-1.4, -0.18, -0.7],
+    size: [2.8, 0.18, 1.4],
+    materialId: 0,
+    bodyId: 0,
+    fixed: () => true,
+  });
+  const lowerBlock = generateRegularCuboidMesh({
+    cells: [1, 1, 1],
+    origin: [-0.45, 0.08, -0.38],
+    size: [0.9, 0.56, 0.76],
+    materialId: 1,
+    bodyId: 1,
+  });
+  const upperBlock = generateRegularCuboidMesh({
+    cells: [1, 1, 1],
+    origin: [-0.42, 0.74, -0.34],
+    size: [0.84, 0.52, 0.68],
+    materialId: 2,
+    bodyId: 2,
+  });
+  // Two disconnected components deliberately share one body id. The upper
+  // component falls onto its pinned mate, exercising topology-filtered
+  // same-body candidates as a compact self-contact regression.
+  const selfContactAnchor: TetrahedralMesh = {
+    positions: new Float64Array([
+      -1.22, 0.02, -0.58,
+      -1.22, 0.24, -0.58,
+      -1.22, 0.24, -0.16,
+      -0.76, 0.24, -0.58,
+    ]),
+    tetrahedra: new Uint32Array([0, 1, 2, 3]),
+    materialIds: new Uint16Array([3]),
+    fixed: new Uint8Array([1, 1, 1, 1]),
+    bodyIds: new Uint16Array([3, 3, 3, 3]),
+  };
+  const selfContactFaller: TetrahedralMesh = {
+    positions: new Float64Array([
+      -1.2, 0.28, -0.56,
+      -1.2, 0.28, -0.18,
+      -0.78, 0.28, -0.56,
+      -1.2, 0.5, -0.56,
+    ]),
+    tetrahedra: new Uint32Array([0, 1, 2, 3]),
+    materialIds: new Uint16Array([3]),
+    fixed: new Uint8Array(4),
+    bodyIds: new Uint16Array([3, 3, 3, 3]),
+  };
+
+  return {
+    id: "contact",
+    title: "IPC collision and friction",
+    description:
+      "Two deformable blocks collide and slide on a pinned slab while a small same-body pair exercises self-contact; the floor plane is visual only.",
+    mesh: appendTetrahedralMeshes([
+      slab,
+      lowerBlock,
+      upperBlock,
+      selfContactAnchor,
+      selfContactFaller,
+    ]),
+    materials: [
+      CONTACT_SLAB_MATERIAL,
+      CONTACT_LOWER_MATERIAL,
+      CONTACT_UPPER_MATERIAL,
+      CONTACT_SELF_MATERIAL,
+    ],
+    settings: {
+      timestep: 1 / 60,
+      gravity: [0, -9.81, 0],
+      floorY: -0.18,
+      solverIterations: 7,
+      cubatureSamples: 6,
+      initialBodyVelocities: [
+        [0, 0, 0],
+        [0, 0, 0],
+        [0.8, 0, 0],
+        [0, 0, 0],
+      ],
+    },
+    camera: {
+      eye: [3.4, 2.25, 4.7],
+      target: [0.15, 0.46, 0],
+      up: [0, 1, 0],
+      fovYRadians: Math.PI / 4,
+    },
+    landmark: {
+      vertex: 17,
+      label: "sliding upper block corner",
+      expectedMotion: [1, -1, 0],
+    },
+  };
+}
+
 function stressBlock(body: number): TetrahedralMesh {
   const base = generateRegularCuboidMesh({
     cells: [2, 1, 1],
@@ -389,6 +528,8 @@ export function buildSceneDefinition(id: SceneId): SceneDefinition {
       return stiffnessDefinition();
     case "drop":
       return dropDefinition();
+    case "contact":
+      return contactDefinition();
     case "stress":
       return stressDefinition();
   }
@@ -462,6 +603,10 @@ function packJGS2GpuInput(
     throw new RangeError("The packed Cubature width must be a positive integer.");
   }
   const positions = new Float32Array(vertexCount * 4);
+  const bodyVelocities = scene.settings.initialBodyVelocities;
+  const velocities = bodyVelocities
+    ? new Float32Array(vertexCount * 4)
+    : undefined;
   const vertexRest = new Float32Array(vertexCount * 4);
   const adjacency = buildAdjacency(scene.mesh);
   const vertexInfo = new Uint32Array(vertexCount * 4);
@@ -473,6 +618,13 @@ function packJGS2GpuInput(
       vertexRest[vertex * 4 + coordinate] = value;
     }
     positions[vertex * 4 + 3] = 1;
+    if (velocities) {
+      const bodyId = scene.mesh.bodyIds[vertex]!;
+      const velocity = bodyVelocities?.[bodyId] ?? [0, 0, 0];
+      for (let coordinate = 0; coordinate < 3; coordinate += 1) {
+        velocities[vertex * 4 + coordinate] = velocity[coordinate];
+      }
+    }
     vertexRest[vertex * 4 + 3] = scene.lumpedMasses[vertex]!;
     vertexInfo.set(
       [
@@ -541,6 +693,7 @@ function packJGS2GpuInput(
     tetCount,
     cubatureK,
     positions,
+    ...(velocities ? { velocities } : {}),
     vertexRest,
     vertexColors: computeVertexColors(scene),
     vertexInfo,
@@ -554,6 +707,14 @@ function packJGS2GpuInput(
     cubatureTetIds,
     cubatureWeights,
     cubatureBasis,
+    ...(scene.id === "contact"
+      ? {
+          contactCandidates: buildStaticIpcContactCandidates(
+            vertexCount,
+            scene.surface,
+          ),
+        }
+      : {}),
   };
   validateJGS2GpuInput(input);
   return input;

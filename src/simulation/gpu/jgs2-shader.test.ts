@@ -23,6 +23,10 @@ describe("JGS2 stable globalization shader contract", () => {
     expect(jgs2Shader).toContain(
       "@group(0) @binding(7)\nvar<uniform> params: SimParams",
     );
+    expect(jgs2Shader).toContain("fn ipcContactBase() -> u32");
+    expect(jgs2Shader).toContain(
+      "return dynamicData[ipcContactBase() + 1u]",
+    );
     expect(jgs2Shader).toContain(
       "const OBJECTIVE_FORCE_ENABLED_BIT: u32 = 1u",
     );

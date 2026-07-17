@@ -64,6 +64,8 @@ interface JGS2TestHarness {
     readonly gpuProfile: JGS2GpuFrameProfile;
   }>;
   waitForGpu(): Promise<void>;
+  /** Read the current packed xyz positions after all prior GPU work completes. */
+  positions(): Promise<Float32Array>;
   diagnostics(): Promise<JGS2Diagnostics>;
   diagnosticReadbackCount(): number;
   configuration(): JGS2TestConfiguration;
@@ -88,6 +90,13 @@ interface JGS2TestConfiguration {
   readonly velocityDamping: number;
   readonly contactTangentialDamping: number;
   readonly horizontalBodyCorrection: boolean;
+  readonly ipcActivationDistance: number;
+  readonly ipcMinimumDistance: number;
+  readonly ipcBarrierStiffness: number;
+  readonly ipcFrictionCoefficient: number;
+  readonly ipcFrictionVelocityEpsilon: number;
+  readonly ipcStepSafety: number;
+  readonly contactCandidateCount: number;
 }
 
 interface JGS2SubmissionPolicy {
@@ -224,6 +233,7 @@ const sceneLabels: Record<SceneId, string> = {
   minimal: "Minimal beam",
   stiffness: "Soft / stiff",
   drop: "Floor impact",
+  contact: "IPC contact",
   stress: "Stress test",
 };
 
@@ -416,16 +426,27 @@ export function App() {
         return;
       }
       const format = gpu.getPreferredCanvasFormat();
+      const ipcContactScene = scene.id === "contact";
+      const ipcFrictionEnabled =
+        new URLSearchParams(window.location.search).get("friction") !== "0";
       const solverSettings = {
         timestep: scene.settings.timestep,
         gravity: scene.settings.gravity,
         iterations: scene.settings.solverIterations,
         floorHeight: scene.settings.floorY,
-        floorStiffness: conservationFixture ? 0 : 250_000,
+        floorStiffness:
+          conservationFixture || ipcContactScene ? 0 : 250_000,
         velocityDamping: 0.997,
-        contactTangentialDamping: 12,
+        contactTangentialDamping: ipcContactScene ? 0 : 12,
         contactMargin: 0.01,
-        horizontalBodyCorrection: true,
+        horizontalBodyCorrection: !ipcContactScene,
+        ipcActivationDistance: 0.08,
+        ipcMinimumDistance: 0.003,
+        ipcBarrierStiffness: ipcContactScene ? 100_000 : 0,
+        ipcFrictionCoefficient:
+          ipcContactScene && ipcFrictionEnabled ? 0.45 : 0,
+        ipcFrictionVelocityEpsilon: 0.05,
+        ipcStepSafety: 0.9,
         parityMode,
         regularization: 1e-6,
         rotationEpsilon: 1e-7,
@@ -1248,6 +1269,15 @@ export function App() {
             await solver!.awaitIdle();
             recordQueueDrained();
           },
+          positions: async () => {
+            if (!submissionsEnabled) {
+              throw new Error("The WebGPU device is no longer available.");
+            }
+            recordSubmission("readback");
+            const positions = await solver!.readPositions();
+            recordQueueDrained();
+            return positions;
+          },
           diagnostics: readDiagnostics,
           diagnosticReadbackCount: () =>
             solver!.explicitDiagnosticReadbackCount,
@@ -1265,6 +1295,16 @@ export function App() {
                 submittedSettings.contactTangentialDamping,
               horizontalBodyCorrection:
                 submittedSettings.horizontalBodyCorrection,
+              ipcActivationDistance:
+                submittedSettings.ipcActivationDistance,
+              ipcMinimumDistance: submittedSettings.ipcMinimumDistance,
+              ipcBarrierStiffness: submittedSettings.ipcBarrierStiffness,
+              ipcFrictionCoefficient:
+                submittedSettings.ipcFrictionCoefficient,
+              ipcFrictionVelocityEpsilon:
+                submittedSettings.ipcFrictionVelocityEpsilon,
+              ipcStepSafety: submittedSettings.ipcStepSafety,
+              contactCandidateCount: solver!.contactCandidateCount,
             };
           },
           submissionPolicy: () => ({

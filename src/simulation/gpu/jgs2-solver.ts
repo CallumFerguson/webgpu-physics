@@ -44,7 +44,9 @@ import {
   type GpuTimestampIntervalWrites,
   type GpuTimestampMeasurement,
 } from "./gpu-timestamp";
+import { packIpcContactBuffer } from "./ipc-contact-layout";
 import { JGS2_WORKGROUP_SIZE, jgs2Shader } from "./jgs2-shader";
+import { minimumStaticIpcContactDistance } from "../cpu/ipc-contact";
 
 export interface JGS2StepSettings {
   readonly timestep: number;
@@ -64,6 +66,18 @@ export interface JGS2StepSettings {
   readonly contactTangentialDamping: number;
   /** Distance above the floor at which tangential damping becomes active. */
   readonly contactMargin: number;
+  /** IPC barrier activation distance; the barrier is zero at and above it. */
+  readonly ipcActivationDistance: number;
+  /** Strict collision-safe separation maintained by the global step cap. */
+  readonly ipcMinimumDistance: number;
+  /** Nonnegative multiplier applied to the IPC barrier potential. */
+  readonly ipcBarrierStiffness: number;
+  /** Coulomb coefficient used by the frame-lagged dissipative potential. */
+  readonly ipcFrictionCoefficient: number;
+  /** Velocity magnitude below which friction is C1-smoothed. */
+  readonly ipcFrictionVelocityEpsilon: number;
+  /** Fraction of the conservative collision-safe step bound in [0, 1]. */
+  readonly ipcStepSafety: number;
   /** Project-specific correction that restores each free body's predicted x/z COM. */
   readonly horizontalBodyCorrection: boolean;
   /** Disable project-specific damping and momentum-altering corrections. */
@@ -130,6 +144,7 @@ export const JGS2_MAX_GLOBALIZED_ITERATIONS_PER_SUBMISSION = 2048;
  * division by zero without letting distant fixed anchors relax convergence.
  */
 export const JGS2_DEGENERATE_DYNAMIC_SCENE_SCALE = 1e-12;
+const F32_UNIT_ROUNDOFF = 2 ** -24;
 
 export const DEFAULT_JGS2_STEP_SETTINGS: JGS2StepSettings = {
   timestep: 1 / 60,
@@ -145,9 +160,23 @@ export const DEFAULT_JGS2_STEP_SETTINGS: JGS2StepSettings = {
   normalizedUpdateTolerance: 1e-3,
   contactTangentialDamping: 8,
   contactMargin: 0.01,
+  ipcActivationDistance: 0.05,
+  ipcMinimumDistance: 0.001,
+  ipcBarrierStiffness: 0,
+  ipcFrictionCoefficient: 0,
+  ipcFrictionVelocityEpsilon: 0.01,
+  ipcStepSafety: 0.9,
   horizontalBodyCorrection: true,
   parityMode: false,
 };
+
+const EMPTY_IPC_CONTACT_CANDIDATES = Object.freeze({
+  vertexTriangleCandidates: Object.freeze([]),
+  edgeEdgeCandidates: Object.freeze([]),
+  packedIndices: new Uint32Array(0),
+  vertexTriangleCount: 0,
+  edgeEdgeCount: 0,
+});
 
 interface JGS2GpuBuffers {
   readonly dynamic: GPUBuffer;
@@ -171,6 +200,11 @@ interface JGS2Pipelines {
   readonly applyCandidate?: GPUComputePipeline;
   readonly convergenceGradient?: GPUComputePipeline;
   readonly reduceConvergence?: GPUComputePipeline;
+  readonly lagContact?: GPUComputePipeline;
+  readonly candidateContactStep?: GPUComputePipeline;
+  readonly validateContactStep?: GPUComputePipeline;
+  readonly reduceContactStep?: GPUComputePipeline;
+  readonly applyContactStep?: GPUComputePipeline;
   readonly copyPosition: GPUComputePipeline;
   readonly bodyHorizontalCorrection: GPUComputePipeline;
   readonly applyBodyHorizontalCorrection: GPUComputePipeline;
@@ -310,6 +344,12 @@ function validateStepSettings(settings: JGS2StepSettings): void {
     ["normalizedUpdateTolerance", settings.normalizedUpdateTolerance],
     ["contactTangentialDamping", settings.contactTangentialDamping],
     ["contactMargin", settings.contactMargin],
+    ["ipcActivationDistance", settings.ipcActivationDistance],
+    ["ipcMinimumDistance", settings.ipcMinimumDistance],
+    ["ipcBarrierStiffness", settings.ipcBarrierStiffness],
+    ["ipcFrictionCoefficient", settings.ipcFrictionCoefficient],
+    ["ipcFrictionVelocityEpsilon", settings.ipcFrictionVelocityEpsilon],
+    ["ipcStepSafety", settings.ipcStepSafety],
     ["gravity.x", settings.gravity[0]],
     ["gravity.y", settings.gravity[1]],
     ["gravity.z", settings.gravity[2]],
@@ -355,6 +395,29 @@ function validateStepSettings(settings: JGS2StepSettings): void {
     settings.contactTangentialDamping,
     settings.contactMargin,
   );
+  if (!(settings.ipcActivationDistance > 0)) {
+    throw new RangeError("ipcActivationDistance must be positive.");
+  }
+  if (
+    settings.ipcMinimumDistance < 0 ||
+    settings.ipcMinimumDistance >= settings.ipcActivationDistance
+  ) {
+    throw new RangeError(
+      "ipcMinimumDistance must be nonnegative and below ipcActivationDistance.",
+    );
+  }
+  if (settings.ipcBarrierStiffness < 0) {
+    throw new RangeError("ipcBarrierStiffness must be nonnegative.");
+  }
+  if (settings.ipcFrictionCoefficient < 0) {
+    throw new RangeError("ipcFrictionCoefficient must be nonnegative.");
+  }
+  if (!(settings.ipcFrictionVelocityEpsilon > 0)) {
+    throw new RangeError("ipcFrictionVelocityEpsilon must be positive.");
+  }
+  if (!(settings.ipcStepSafety > 0) || !(settings.ipcStepSafety < 1)) {
+    throw new RangeError("ipcStepSafety must be strictly between zero and one.");
+  }
   if (typeof settings.horizontalBodyCorrection !== "boolean") {
     throw new TypeError("horizontalBodyCorrection must be a boolean.");
   }
@@ -504,7 +567,12 @@ function packUniforms(
     24,
   );
   floats.set(
-    [settings.contactTangentialDamping, settings.contactMargin, 0, 0],
+    [
+      settings.contactTangentialDamping,
+      settings.contactMargin,
+      settings.ipcActivationDistance,
+      settings.ipcBarrierStiffness,
+    ],
     28,
   );
   integers.set(
@@ -534,7 +602,6 @@ function packUniforms(
     ],
     40,
   );
-
   return new Uint8Array(buffer);
 }
 
@@ -716,6 +783,7 @@ export class JGS2GpuSolver {
   readonly tetCount: number;
   readonly cubatureK: number;
   readonly bodyCount: number;
+  readonly contactCandidateCount: number;
   readonly dynamicOffsets: JGS2DynamicOffsets;
   /** True for the stable-material production path governed by Phase 1 policy. */
   readonly globalizationEnabled: boolean;
@@ -748,6 +816,7 @@ export class JGS2GpuSolver {
     private readonly objectiveData: Float32Array,
     private readonly pinnedVertices: Uint8Array,
     initialObjectiveActivity: PackedObjectiveActivity,
+    contactCandidateCount: number,
     globalizationEnabled: boolean,
     offsets: JGS2DynamicOffsets,
   ) {
@@ -755,6 +824,7 @@ export class JGS2GpuSolver {
     this.tetCount = inputShape.tetCount;
     this.cubatureK = inputShape.cubatureK;
     this.bodyCount = inputShape.bodyCount;
+    this.contactCandidateCount = contactCandidateCount;
     this.dynamicOffsets = offsets;
     this.globalizationEnabled = globalizationEnabled;
     this.objectiveFlagsValue = initialObjectiveActivity.flags;
@@ -774,13 +844,22 @@ export class JGS2GpuSolver {
     validateJGS2GpuInput(input);
     if (device.limits.maxStorageBuffersPerShaderStage < 7) {
       throw new Error(
-        "JGS2 requires seven storage buffers in the compute stage, but this " +
+        "JGS2 requires seven storage buffers " +
+          "in the compute stage, but this " +
           `adapter supports ${device.limits.maxStorageBuffersPerShaderStage}.`,
       );
     }
 
     const materialMode = inferJGS2MaterialMode(input);
     const globalizationEnabled = materialMode === "stable-neo-hookean";
+    const packedContacts = packIpcContactBuffer(
+      input.contactCandidates ?? EMPTY_IPC_CONTACT_CANDIDATES,
+    );
+    if (!globalizationEnabled && packedContacts.candidateCount !== 0) {
+      throw new RangeError(
+        "IPC contact candidates require the stable Neo-Hookean production path.",
+      );
+    }
     const packedObjectives = packJGS2VertexObjectives(input);
     const initialObjectiveActivity = computePackedObjectiveActivity(
       packedObjectives,
@@ -802,6 +881,34 @@ export class JGS2GpuSolver {
       DEFAULT_JGS2_STEP_SETTINGS,
       settings,
     );
+    if (packedContacts.candidateCount > 0) {
+      const minimumContactDistance = minimumStaticIpcContactDistance(
+        input.positions,
+        input.contactCandidates!,
+        4,
+      );
+      const contactSourceMargin =
+        8 *
+        F32_UNIT_ROUNDOFF *
+        Math.max(
+          1,
+          resolvedSettings.ipcActivationDistance,
+          Math.abs(minimumContactDistance),
+        );
+      const requiredContactDistance =
+        resolvedSettings.ipcMinimumDistance + contactSourceMargin;
+      if (
+        !Number.isFinite(minimumContactDistance) ||
+        !(minimumContactDistance > requiredContactDistance)
+      ) {
+        throw new RangeError(
+          "IPC candidates require an initially feasible source pose with " +
+            `distance greater than ${requiredContactDistance} (minimum plus ` +
+            "an f32 safety margin); " +
+            `got ${minimumContactDistance}.`,
+        );
+      }
+    }
     if (globalizationEnabled) {
       const minimumDeterminant =
         minimumJGS2InputDeformationDeterminant(input);
@@ -823,8 +930,22 @@ export class JGS2GpuSolver {
       input.tetCount,
       bodyCount,
       globalizationEnabled,
+      packedContacts.byteLength / 16,
     );
     const dynamic = packJGS2InitialDynamic(input, offsets);
+    new Uint32Array(dynamic.buffer).set(
+      packedContacts.integers,
+      offsets.ipcContact * 4,
+    );
+    new Float32Array(dynamic.buffer).set(
+      [
+        resolvedSettings.ipcMinimumDistance,
+        resolvedSettings.ipcFrictionCoefficient,
+        resolvedSettings.ipcFrictionVelocityEpsilon,
+        resolvedSettings.ipcStepSafety,
+      ],
+      (offsets.ipcContact + 1) * 4,
+    );
     const vertices = packJGS2VertexStatic(input);
     const tets = packJGS2TetStatic(input);
     const cubature = packJGS2Cubature(input);
@@ -992,6 +1113,28 @@ export class JGS2GpuSolver {
             ),
           ])
         : undefined;
+      const contactPipelines =
+        globalizationEnabled && packedContacts.candidateCount > 0
+          ? await Promise.all([
+              createPipeline("lagContact", "jgs2-ipc-lag-contact-pipeline"),
+              createPipeline(
+                "candidateContactStep",
+                "jgs2-ipc-candidate-step-pipeline",
+              ),
+              createPipeline(
+                "validateContactStep",
+                "jgs2-ipc-validate-step-pipeline",
+              ),
+              createPipeline(
+                "reduceContactStep",
+                "jgs2-ipc-reduce-step-pipeline",
+              ),
+              createPipeline(
+                "applyContactStep",
+                "jgs2-ipc-apply-step-pipeline",
+              ),
+            ])
+          : undefined;
       const pipelines: JGS2Pipelines = {
         predict,
         tetPolarRotation,
@@ -1005,6 +1148,15 @@ export class JGS2GpuSolver {
               applyCandidate: globalizationPipelines[3],
               convergenceGradient: globalizationPipelines[4],
               reduceConvergence: globalizationPipelines[5],
+            }
+          : {}),
+        ...(contactPipelines
+          ? {
+              lagContact: contactPipelines[0],
+              candidateContactStep: contactPipelines[1],
+              validateContactStep: contactPipelines[2],
+              reduceContactStep: contactPipelines[3],
+              applyContactStep: contactPipelines[4],
             }
           : {}),
         copyPosition,
@@ -1094,6 +1246,7 @@ export class JGS2GpuSolver {
         uploadedObjectives,
         pinnedVertices,
         initialObjectiveActivity,
+        packedContacts.candidateCount,
         globalizationEnabled,
         offsets,
       );
@@ -1560,13 +1713,27 @@ export class JGS2GpuSolver {
   private resolveStepSettings(
     overrides: Partial<JGS2StepSettings>,
   ): JGS2StepSettings {
+    if (
+      this.contactCandidateCount > 0 &&
+      overrides.ipcMinimumDistance !== undefined &&
+      Math.fround(overrides.ipcMinimumDistance) !==
+        Math.fround(this.defaultSettings.ipcMinimumDistance)
+    ) {
+      throw new RangeError(
+        "ipcMinimumDistance is fixed when an IPC solver is created; recreate " +
+          "the solver before changing it.",
+      );
+    }
     const resolved = resolveJGS2StepSettings(this.defaultSettings, overrides);
     // The free-body correction is one common x/z translation per body, so it
     // preserves every deformation gradient and determinant on the horizontal
-    // debug plane. Active force/target objectives are not translation
-    // invariant, however, and must retain their solved center-of-mass motion.
+    // debug plane. Active force/target objectives and mesh contacts are not
+    // independently translation invariant per body, however, and must retain
+    // their solved center-of-mass motion.
     return this.globalizationEnabled &&
-      this.objectiveFlagsValue !== 0 &&
+      (this.objectiveFlagsValue !== 0 ||
+        (this.contactCandidateCount > 0 &&
+          resolved.ipcBarrierStiffness > 0)) &&
       resolved.horizontalBodyCorrection
       ? { ...resolved, horizontalBodyCorrection: false }
       : resolved;
@@ -1632,6 +1799,26 @@ export class JGS2GpuSolver {
       );
     }
     this.submittedIterations = iterations;
+    const previousSettings = this.submittedSettings;
+    if (
+      settings.ipcMinimumDistance !== previousSettings.ipcMinimumDistance ||
+      settings.ipcFrictionCoefficient !==
+        previousSettings.ipcFrictionCoefficient ||
+      settings.ipcFrictionVelocityEpsilon !==
+        previousSettings.ipcFrictionVelocityEpsilon ||
+      settings.ipcStepSafety !== previousSettings.ipcStepSafety
+    ) {
+      this.device.queue.writeBuffer(
+        this.buffers.dynamic,
+        (this.dynamicOffsets.ipcContact + 1) * 16,
+        new Float32Array([
+          settings.ipcMinimumDistance,
+          settings.ipcFrictionCoefficient,
+          settings.ipcFrictionVelocityEpsilon,
+          settings.ipcStepSafety,
+        ]),
+      );
+    }
     this.submittedSettings = settings;
 
     this.device.queue.writeBuffer(
@@ -1687,6 +1874,8 @@ export class JGS2GpuSolver {
     iterations: number,
     timestampWrites?: GpuTimestampIntervalWrites,
   ): void {
+    const contactEnabled =
+      this.contactCandidateCount > 0 && settings.ipcBarrierStiffness > 0;
     encodeDispatch(
       encoder,
       this.pipelines.predict,
@@ -1699,7 +1888,17 @@ export class JGS2GpuSolver {
             beginningOfPassWriteIndex: timestampWrites.startWriteIndex,
           }
         : undefined,
-    );
+      );
+
+    if (contactEnabled) {
+      encodeDispatch(
+        encoder,
+        this.pipelines.lagContact!,
+        this.uniforms.baseBindGroup,
+        this.contactCandidateCount,
+        "jgs2-ipc-lag-contact-pass",
+      );
+    }
 
     if (this.globalizationEnabled) {
       // The local shader consumes stable material only after this exact-f32
@@ -1749,6 +1948,61 @@ export class JGS2GpuSolver {
         this.vertexCount,
         `jgs2-solve-pass-${iteration}`,
       );
+      if (contactEnabled) {
+        encodeDispatch(
+          encoder,
+          this.pipelines.candidateContactStep!,
+          bindGroup,
+          this.contactCandidateCount,
+          `jgs2-ipc-candidate-step-pass-${iteration}`,
+        );
+        encodeDispatch(
+          encoder,
+          this.pipelines.reduceContactStep!,
+          bindGroup,
+          1,
+          `jgs2-ipc-reduce-step-pass-${iteration}`,
+        );
+        encodeDispatch(
+          encoder,
+          this.pipelines.applyContactStep!,
+          bindGroup,
+          this.vertexCount,
+          `jgs2-ipc-apply-step-pass-${iteration}`,
+        );
+        // Verify the actual f32 pose after scaling. A failed candidate writes
+        // alpha zero, and the second apply pass reverts every vertex to the
+        // iteration source before assembled material acceptance runs.
+        encodeDispatch(
+          encoder,
+          this.pipelines.validateContactStep!,
+          bindGroup,
+          this.contactCandidateCount,
+          `jgs2-ipc-validate-scaled-step-pass-${iteration}`,
+        );
+        encodeDispatch(
+          encoder,
+          this.pipelines.reduceContactStep!,
+          bindGroup,
+          1,
+          `jgs2-ipc-reduce-scaled-step-pass-${iteration}`,
+        );
+        encodeDispatch(
+          encoder,
+          this.pipelines.applyContactStep!,
+          bindGroup,
+          this.vertexCount,
+          `jgs2-ipc-apply-validated-step-pass-${iteration}`,
+        );
+        // jgs2Solve stored energy before the assembled safe-step scaling.
+        encodeDispatch(
+          encoder,
+          this.pipelines.assembledVertexEnergy!,
+          bindGroup,
+          this.vertexCount,
+          `jgs2-ipc-rescaled-energy-pass-${iteration}`,
+        );
+      }
       if (this.globalizationEnabled) {
         encodeDispatch(
           encoder,
@@ -2219,6 +2473,15 @@ export class JGS2GpuSolver {
   async readOracleDiagnostics(): Promise<JGS2GpuOracleDiagnostics> {
     this.assertUsable();
     const settings = this.submittedSettings;
+    if (
+      this.contactCandidateCount > 0 &&
+      settings.ipcBarrierStiffness > 0
+    ) {
+      throw new Error(
+        "Exact oracle diagnostics do not yet include IPC contact energy; " +
+          "disable IPC before requesting this diagnostic.",
+      );
+    }
     const evaluator = await this.getOracleEvaluator();
     this.assertUsable();
     this.diagnosticReadbackCount += 1;

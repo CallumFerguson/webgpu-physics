@@ -90,6 +90,8 @@ export interface SimulationSettings {
   readonly floorY: number;
   readonly solverIterations: number;
   readonly cubatureSamples: 4 | 6;
+  /** Initial linear velocity indexed by body id; omitted body entries are zero. */
+  readonly initialBodyVelocities?: readonly Vec3[];
 }
 
 export interface SceneDefinition {

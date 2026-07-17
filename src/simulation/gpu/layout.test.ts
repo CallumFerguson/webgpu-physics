@@ -275,6 +275,7 @@ describe("JGS2 per-body bookkeeping", () => {
       convergenceGradient: 36,
       globalizationControl: 46,
       globalizationHistory: 50,
+      ipcContact: 562,
       vec4Count: 562,
     });
   });

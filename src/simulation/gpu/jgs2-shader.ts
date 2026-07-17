@@ -1,5 +1,12 @@
 import { JGS2_CUBATURE_RECORD_WORDS } from "./layout";
 import {
+  IPC_CONTACT_CANDIDATE_VEC4S,
+  IPC_CONTACT_GLOBAL_VEC4S,
+  IPC_CONTACT_TYPE_EDGE_EDGE,
+  IPC_CONTACT_TYPE_VERTEX_TRIANGLE,
+} from "./ipc-contact-layout";
+import { jgs2IpcContactWgsl } from "./ipc-contact-wgsl";
+import {
   JGS2_GLOBALIZATION_ACCEPTED_MINIMUM_VALID_BIT,
   JGS2_GLOBALIZATION_CANDIDATE_GEOMETRY_VALID_BIT,
   JGS2_GLOBALIZATION_LOCAL_NUMERICS_VALID_BIT,
@@ -22,6 +29,10 @@ const GLOBALIZATION_CONTROL_STRIDE: u32 = 4u;
 const GLOBALIZATION_HISTORY_STRIDE: u32 = 8u;
 const OBJECTIVE_FORCE_ENABLED_BIT: u32 = 1u;
 const OBJECTIVE_TARGET_ENABLED_BIT: u32 = 2u;
+const IPC_GLOBAL_VEC4S: u32 = ${IPC_CONTACT_GLOBAL_VEC4S}u;
+const IPC_CANDIDATE_VEC4S: u32 = ${IPC_CONTACT_CANDIDATE_VEC4S}u;
+const IPC_TYPE_VERTEX_TRIANGLE: u32 = ${IPC_CONTACT_TYPE_VERTEX_TRIANGLE}u;
+const IPC_TYPE_EDGE_EDGE: u32 = ${IPC_CONTACT_TYPE_EDGE_EDGE}u;
 
 const LOCAL_STATUS_ACCEPTED: u32 = 0u;
 const LOCAL_STATUS_PINNED: u32 = 1u;
@@ -150,9 +161,11 @@ var<workgroup> candidateReductionLanes:
   array<CandidateReductionLane, WORKGROUP_SIZE>;
 var<workgroup> convergenceReductionLanes:
   array<ConvergenceReductionLane, WORKGROUP_SIZE>;
+var<workgroup> ipcStepReductionLanes: array<vec4f, WORKGROUP_SIZE>;
 
 ${stableNeoHookeanWgsl}
 ${jgs2GlobalizationWgsl}
+${jgs2IpcContactWgsl}
 
 fn zeroMat3() -> mat3x3f {
   return mat3x3f(vec3f(0.0), vec3f(0.0), vec3f(0.0));
@@ -164,6 +177,339 @@ fn identityMat3() -> mat3x3f {
     vec3f(0.0, 1.0, 0.0),
     vec3f(0.0, 0.0, 1.0),
   );
+}
+
+fn ipcContactBase() -> u32 {
+  return params.offsets4.y +
+    params.offsets4.z * GLOBALIZATION_HISTORY_STRIDE;
+}
+
+fn ipcParameters() -> vec4f {
+  return dynamicData[ipcContactBase() + 1u];
+}
+
+fn ipcCandidateCount() -> u32 {
+  let base = ipcContactBase();
+  if (arrayLength(&dynamicData) < base + IPC_GLOBAL_VEC4S) {
+    return 0u;
+  }
+  let packedCount = bitcast<u32>(dynamicData[base].x);
+  let capacity =
+    (arrayLength(&dynamicData) - base - IPC_GLOBAL_VEC4S) /
+      IPC_CANDIDATE_VEC4S;
+  return min(packedCount, capacity);
+}
+
+fn ipcCandidateBase(candidate: u32) -> u32 {
+  return ipcContactBase() + IPC_GLOBAL_VEC4S +
+    candidate * IPC_CANDIDATE_VEC4S;
+}
+
+fn ipcCandidateIndices(candidate: u32) -> vec4u {
+  return bitcast<vec4u>(dynamicData[ipcCandidateBase(candidate)]);
+}
+
+fn ipcCandidateMeta(candidate: u32) -> vec4u {
+  return bitcast<vec4u>(dynamicData[ipcCandidateBase(candidate) + 1u]);
+}
+
+fn ipcLaggedNormalForce(candidate: u32) -> vec4f {
+  return dynamicData[ipcCandidateBase(candidate) + 2u];
+}
+
+fn ipcLaggedWeights(candidate: u32) -> vec4f {
+  return dynamicData[ipcCandidateBase(candidate) + 3u];
+}
+
+fn ipcStoreLaggedContact(
+  candidate: u32,
+  normalForce: vec4f,
+  weights: vec4f,
+) {
+  let base = ipcCandidateBase(candidate);
+  dynamicData[base + 2u] = normalForce;
+  dynamicData[base + 3u] = weights;
+}
+
+fn ipcStoreCandidateScratch(candidate: u32, value: vec4f) {
+  dynamicData[ipcCandidateBase(candidate) + 4u] = value;
+}
+
+fn ipcCandidateScratch(candidate: u32) -> vec4f {
+  return dynamicData[ipcCandidateBase(candidate) + 4u];
+}
+
+fn ipcEnabled() -> bool {
+  if (params.offsets4.w == 0u || !(params.contact.w > 0.0)) {
+    return false;
+  }
+  if (ipcCandidateCount() == 0u) { return false; }
+  return params.contact.z > ipcParameters().x;
+}
+
+fn ipcContactAt(candidate: u32, positionOffset: u32) -> jgs2_ipc_contact_data {
+  let indices = ipcCandidateIndices(candidate);
+  let candidateMeta = ipcCandidateMeta(candidate);
+  if (candidateMeta.y == 0u || indices.x >= params.counts.x ||
+      indices.y >= params.counts.x || indices.z >= params.counts.x ||
+      indices.w >= params.counts.x) {
+    return jgs2_ipc_invalid_contact();
+  }
+  let position0 = loadPosition(positionOffset, indices.x);
+  let position1 = loadPosition(positionOffset, indices.y);
+  let position2 = loadPosition(positionOffset, indices.z);
+  let position3 = loadPosition(positionOffset, indices.w);
+  if (candidateMeta.x == IPC_TYPE_VERTEX_TRIANGLE) {
+    return jgs2_ipc_point_triangle_contact(
+      position0,
+      position1,
+      position2,
+      position3,
+    );
+  }
+  if (candidateMeta.x == IPC_TYPE_EDGE_EDGE) {
+    return jgs2_ipc_edge_edge_contact(
+      position0,
+      position1,
+      position2,
+      position3,
+    );
+  }
+  return jgs2_ipc_invalid_contact();
+}
+
+fn ipcPositionWithOverride(
+  positionOffset: u32,
+  vertex: u32,
+  movedVertex: u32,
+  movedPosition: vec3f,
+) -> vec3f {
+  return select(
+    loadPosition(positionOffset, vertex),
+    movedPosition,
+    vertex == movedVertex,
+  );
+}
+
+fn ipcContactAtOverride(
+  candidate: u32,
+  positionOffset: u32,
+  movedVertex: u32,
+  movedPosition: vec3f,
+) -> jgs2_ipc_contact_data {
+  let indices = ipcCandidateIndices(candidate);
+  let candidateMeta = ipcCandidateMeta(candidate);
+  if (candidateMeta.y == 0u || indices.x >= params.counts.x ||
+      indices.y >= params.counts.x || indices.z >= params.counts.x ||
+      indices.w >= params.counts.x) {
+    return jgs2_ipc_invalid_contact();
+  }
+  let position0 = ipcPositionWithOverride(
+    positionOffset, indices.x, movedVertex, movedPosition,
+  );
+  let position1 = ipcPositionWithOverride(
+    positionOffset, indices.y, movedVertex, movedPosition,
+  );
+  let position2 = ipcPositionWithOverride(
+    positionOffset, indices.z, movedVertex, movedPosition,
+  );
+  let position3 = ipcPositionWithOverride(
+    positionOffset, indices.w, movedVertex, movedPosition,
+  );
+  if (candidateMeta.x == IPC_TYPE_VERTEX_TRIANGLE) {
+    return jgs2_ipc_point_triangle_contact(
+      position0, position1, position2, position3,
+    );
+  }
+  if (candidateMeta.x == IPC_TYPE_EDGE_EDGE) {
+    return jgs2_ipc_edge_edge_contact(
+      position0, position1, position2, position3,
+    );
+  }
+  return jgs2_ipc_invalid_contact();
+}
+
+fn ipcCandidateWeightForVertex(
+  indices: vec4u,
+  weights: vec4f,
+  vertex: u32,
+) -> f32 {
+  var weight = 0.0;
+  if (indices.x == vertex) { weight += weights.x; }
+  if (indices.y == vertex) { weight += weights.y; }
+  if (indices.z == vertex) { weight += weights.z; }
+  if (indices.w == vertex) { weight += weights.w; }
+  return weight;
+}
+
+fn ipcWeightedDisplacement(
+  candidate: u32,
+  weights: vec4f,
+  positionOffset: u32,
+  movedVertex: u32,
+  movedPosition: vec3f,
+) -> vec3f {
+  let indices = ipcCandidateIndices(candidate);
+  var result = vec3f(0.0);
+  let position0 = ipcPositionWithOverride(
+    positionOffset, indices.x, movedVertex, movedPosition,
+  );
+  let position1 = ipcPositionWithOverride(
+    positionOffset, indices.y, movedVertex, movedPosition,
+  );
+  let position2 = ipcPositionWithOverride(
+    positionOffset, indices.z, movedVertex, movedPosition,
+  );
+  let position3 = ipcPositionWithOverride(
+    positionOffset, indices.w, movedVertex, movedPosition,
+  );
+  result += weights.x * (position0 - loadPosition(params.offsets1.x, indices.x));
+  result += weights.y * (position1 - loadPosition(params.offsets1.x, indices.y));
+  result += weights.z * (position2 - loadPosition(params.offsets1.x, indices.z));
+  result += weights.w * (position3 - loadPosition(params.offsets1.x, indices.w));
+  return result;
+}
+
+fn ipcCandidateEnergyFromContact(
+  candidate: u32,
+  contactData: jgs2_ipc_contact_data,
+  positionOffset: u32,
+  movedVertex: u32,
+  movedPosition: vec3f,
+) -> f32 {
+  if (contactData.valid == 0u || !(contactData.distance > ipcParameters().x)) {
+    return jgs2_ipc_f32_max;
+  }
+  var energy = params.contact.w * jgs2_ipc_barrier_value(
+    contactData.distance,
+    params.contact.z,
+  );
+  let lagged = ipcLaggedNormalForce(candidate);
+  let laggedWeights = ipcLaggedWeights(candidate);
+  if (ipcParameters().y > 0.0 && lagged.w > 0.0) {
+    let normal = jgs2_ipc_safe_unit(lagged.xyz, contactData.normal);
+    let relative = ipcWeightedDisplacement(
+      candidate,
+      laggedWeights,
+      positionOffset,
+      movedVertex,
+      movedPosition,
+    );
+    let tangential = relative - normal * dot(normal, relative);
+    let slipVelocity = length(tangential) * params.time.y;
+    energy += params.time.x * jgs2_ipc_lagged_friction_dissipation(
+      slipVelocity,
+      ipcParameters().z,
+      ipcParameters().y,
+      lagged.w,
+    );
+  }
+  return energy;
+}
+
+fn ipcCandidateEnergy(candidate: u32, positionOffset: u32) -> f32 {
+  return ipcCandidateEnergyFromContact(
+    candidate,
+    ipcContactAt(candidate, positionOffset),
+    positionOffset,
+    0xffffffffu,
+    vec3f(0.0),
+  );
+}
+
+fn ipcEnergyOwner(indices: vec4u) -> u32 {
+  if (vertexData[indices.x].info.z == 0u) { return indices.x; }
+  if (vertexData[indices.y].info.z == 0u) { return indices.y; }
+  if (vertexData[indices.z].info.z == 0u) { return indices.z; }
+  if (vertexData[indices.w].info.z == 0u) { return indices.w; }
+  return indices.x;
+}
+
+fn ipcOwnedEnergy(vertex: u32, positionOffset: u32) -> f32 {
+  if (!ipcEnabled()) { return 0.0; }
+  var result = 0.0;
+  for (var candidate = 0u; candidate < ipcCandidateCount(); candidate += 1u) {
+    let indices = ipcCandidateIndices(candidate);
+    if (ipcEnergyOwner(indices) == vertex) {
+      let energy = ipcCandidateEnergy(candidate, positionOffset);
+      if (!jgs2_ipc_finite_scalar(energy)) { return jgs2_ipc_f32_max; }
+      result += energy;
+    }
+  }
+  return result;
+}
+
+struct IpcLocalContribution {
+  gradient: vec3f,
+  hessian: mat3x3f,
+}
+
+fn ipcLocalContribution(vertex: u32, positionOffset: u32) -> IpcLocalContribution {
+  var result = IpcLocalContribution(vec3f(0.0), zeroMat3());
+  if (!ipcEnabled()) { return result; }
+  for (var candidate = 0u; candidate < ipcCandidateCount(); candidate += 1u) {
+    let indices = ipcCandidateIndices(candidate);
+    let contactData = ipcContactAt(candidate, positionOffset);
+    if (contactData.valid == 0u) { continue; }
+    let weight = ipcCandidateWeightForVertex(
+      indices, contactData.weights, vertex,
+    );
+    if (weight != 0.0 && jgs2_ipc_barrier_active(
+      contactData.distance, params.contact.z,
+    )) {
+      let first = jgs2_ipc_barrier_first_derivative(
+        contactData.distance, params.contact.z,
+      );
+      let second = jgs2_ipc_barrier_second_derivative(
+        contactData.distance, params.contact.z,
+      );
+      result.gradient += jgs2_ipc_normal_gradient_scalar(
+        weight, params.contact.w, first,
+      ) * contactData.normal;
+      result.hessian += jgs2_ipc_psd_normal_hessian(
+        contactData.normal,
+        jgs2_ipc_psd_normal_hessian_scalar(
+          weight, params.contact.w, second,
+        ),
+      );
+    }
+
+    let lagged = ipcLaggedNormalForce(candidate);
+    let laggedWeights = ipcLaggedWeights(candidate);
+    let laggedWeight = ipcCandidateWeightForVertex(
+      indices, laggedWeights, vertex,
+    );
+    if (ipcParameters().y > 0.0 && lagged.w > 0.0 && laggedWeight != 0.0) {
+      let normal = jgs2_ipc_safe_unit(lagged.xyz, contactData.normal);
+      let relative = ipcWeightedDisplacement(
+        candidate,
+        laggedWeights,
+        positionOffset,
+        0xffffffffu,
+        vec3f(0.0),
+      );
+      let tangential = relative - normal * dot(normal, relative);
+      let slip = length(tangential);
+      let slipVelocity = slip * params.time.y;
+      let frictionScale = ipcParameters().y * lagged.w;
+      var tangentDirection = vec3f(0.0);
+      if (slip > 1.0e-12) {
+        tangentDirection = tangential / slip;
+      }
+      let f1 = jgs2_ipc_friction_f1(slipVelocity, ipcParameters().z);
+      result.gradient +=
+        laggedWeight * frictionScale * f1 * tangentDirection;
+      let projector = identityMat3() - jgs2_ipc_psd_normal_hessian(normal, 1.0);
+      var tangentCurvature = 2.0 * frictionScale /
+        max(ipcParameters().z * params.time.x, 1.0e-12);
+      if (slip > 1.0e-12) {
+        tangentCurvature = frictionScale * f1 / slip;
+      }
+      result.hessian += laggedWeight * laggedWeight *
+        max(tangentCurvature, 0.0) * projector;
+    }
+  }
+  return result;
 }
 
 fn finiteSquaredLength(value: vec3f) -> bool {
@@ -663,6 +1009,35 @@ fn restrictedMinimumDeformationDeterminant(
     // restricted minimum.
     minimumDeterminant = preflightGeometry.z;
   }
+  if (ipcEnabled()) {
+    let trialPosition = loadPosition(params.offsets1.w, sourceVertex) +
+      displacement;
+    for (
+      var candidate = 0u;
+      candidate < ipcCandidateCount();
+      candidate += 1u
+    ) {
+      let indices = ipcCandidateIndices(candidate);
+      let weight = ipcCandidateWeightForVertex(
+        indices,
+        vec4f(1.0),
+        sourceVertex,
+      );
+      if (weight == 0.0) { continue; }
+      let trialContact = ipcContactAtOverride(
+        candidate,
+        params.offsets1.w,
+        sourceVertex,
+        trialPosition,
+      );
+      if (trialContact.valid == 0u) {
+        return RestrictedGeometryResult(0.0, 0u);
+      }
+      if (!(trialContact.distance > ipcParameters().x)) {
+        return RestrictedGeometryResult(0.0, 1u);
+      }
+    }
+  }
   for (var adjacent = 0u; adjacent < sourceItem.info.y; adjacent += 1u) {
     let tet = adjacency[sourceItem.info.x + adjacent];
     let determinantValue = snh_determinant(
@@ -714,6 +1089,47 @@ fn restrictedEnergyDelta(
       sourcePosition,
       displacement,
     );
+  }
+  if (ipcEnabled()) {
+    let trialPosition = sourcePosition + displacement;
+    for (
+      var candidate = 0u;
+      candidate < ipcCandidateCount();
+      candidate += 1u
+    ) {
+      let indices = ipcCandidateIndices(candidate);
+      if (
+        ipcCandidateWeightForVertex(
+          indices,
+          vec4f(1.0),
+          sourceVertex,
+        ) == 0.0
+      ) {
+        continue;
+      }
+      let sourceContact = ipcContactAt(candidate, params.offsets1.w);
+      let trialContact = ipcContactAtOverride(
+        candidate,
+        params.offsets1.w,
+        sourceVertex,
+        trialPosition,
+      );
+      let sourceContactEnergy = ipcCandidateEnergyFromContact(
+        candidate,
+        sourceContact,
+        params.offsets1.w,
+        0xffffffffu,
+        vec3f(0.0),
+      );
+      let trialContactEnergy = ipcCandidateEnergyFromContact(
+        candidate,
+        trialContact,
+        params.offsets1.w,
+        sourceVertex,
+        trialPosition,
+      );
+      result += trialContactEnergy - sourceContactEnergy;
+    }
   }
 
   for (var adjacent = 0u; adjacent < sourceItem.info.y; adjacent += 1u) {
@@ -1018,30 +1434,34 @@ fn storeLocalGlobalizationDiagnostic(
 }
 
 fn vertexImplicitEnergyAt(positionOffset: u32, vertex: u32) -> f32 {
-  if (vertexData[vertex].info.z != 0u) {
-    return 0.0;
-  }
+  let pinned = vertexData[vertex].info.z != 0u;
   let position = loadPosition(positionOffset, vertex);
   let predicted = loadPosition(params.offsets0.z, vertex);
-  let inertia = vertexData[vertex].restMass.w * params.time.z;
-  let residual = position - predicted;
-  var energy = 0.5 * inertia * dot(residual, residual);
+  var energy = 0.0;
+  if (!pinned) {
+    let inertia = vertexData[vertex].restMass.w * params.time.z;
+    let residual = position - predicted;
+    energy += 0.5 * inertia * dot(residual, residual);
+  }
   if (params.offsets2.w != 0u) {
-    if (objectiveForceEnabled()) {
-      energy -= dot(vertexExternalForce(vertex), position);
-    }
-    if (objectiveTargetEnabled()) {
-      let targetRecord = vertexTargetPositionStiffness(vertex);
-      if (targetRecord.w > 0.0) {
-        let targetResidual = position - targetRecord.xyz;
-        energy += 0.5 * targetRecord.w * dot(targetResidual, targetResidual);
+    if (!pinned) {
+      if (objectiveForceEnabled()) {
+        energy -= dot(vertexExternalForce(vertex), position);
+      }
+      if (objectiveTargetEnabled()) {
+        let targetRecord = vertexTargetPositionStiffness(vertex);
+        if (targetRecord.w > 0.0) {
+          let targetResidual = position - targetRecord.xyz;
+          energy += 0.5 * targetRecord.w * dot(targetResidual, targetResidual);
+        }
       }
     }
   }
-  if (params.solver.x > 0.0) {
+  if (!pinned && params.solver.x > 0.0) {
     let penetration = min(0.0, position.y - params.gravityFloor.w);
     energy += 0.5 * params.solver.x * penetration * penetration;
   }
+  energy += ipcOwnedEnergy(vertex, positionOffset);
   return energy;
 }
 
@@ -1090,6 +1510,154 @@ fn predict(@builtin(global_invocation_id) globalId: vec3u) {
       dynamicData[params.offsets4.x + record] = vec4f(0.0);
     }
   }
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE)
+fn lagContact(@builtin(global_invocation_id) globalId: vec3u) {
+  let candidate = globalId.x;
+  if (candidate >= ipcCandidateCount()) { return; }
+  let contactData = ipcContactAt(candidate, params.offsets0.x);
+  var normalForce = vec4f(0.0);
+  var weights = vec4f(0.0);
+  if (contactData.valid != 0u && contactData.distance > ipcParameters().x) {
+    let first = jgs2_ipc_barrier_first_derivative(
+      contactData.distance,
+      params.contact.z,
+    );
+    let force = max(0.0, -params.contact.w * first);
+    if (jgs2_ipc_finite_scalar(force)) {
+      normalForce = vec4f(contactData.normal, force);
+      weights = contactData.weights;
+    }
+  }
+  ipcStoreLaggedContact(candidate, normalForce, weights);
+  ipcStoreCandidateScratch(candidate, vec4f(1.0, 0.0, 0.0, 0.0));
+  if (candidate == 0u) {
+    dynamicData[ipcContactBase()].w = 1.0;
+  }
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE)
+fn candidateContactStep(@builtin(global_invocation_id) globalId: vec3u) {
+  let candidate = globalId.x;
+  if (candidate >= ipcCandidateCount()) { return; }
+  if (nonlinearStopLatched()) {
+    ipcStoreCandidateScratch(candidate, vec4f(1.0, 0.0, 0.0, 1.0));
+    return;
+  }
+  let indices = ipcCandidateIndices(candidate);
+  let candidateMeta = ipcCandidateMeta(candidate);
+  let sourceContact = ipcContactAt(candidate, params.offsets1.w);
+  let trialContact = ipcContactAt(candidate, params.offsets2.x);
+  let displacement0 = loadPosition(params.offsets2.x, indices.x) -
+    loadPosition(params.offsets1.w, indices.x);
+  let displacement1 = loadPosition(params.offsets2.x, indices.y) -
+    loadPosition(params.offsets1.w, indices.y);
+  let displacement2 = loadPosition(params.offsets2.x, indices.z) -
+    loadPosition(params.offsets1.w, indices.z);
+  let displacement3 = loadPosition(params.offsets2.x, indices.w) -
+    loadPosition(params.offsets1.w, indices.w);
+  var lipschitzBound = 0.0;
+  if (candidateMeta.x == IPC_TYPE_VERTEX_TRIANGLE) {
+    lipschitzBound = length(displacement0) + max(
+      length(displacement1),
+      max(length(displacement2), length(displacement3)),
+    );
+  } else if (candidateMeta.x == IPC_TYPE_EDGE_EDGE) {
+    lipschitzBound = max(length(displacement0), length(displacement1)) +
+      max(length(displacement2), length(displacement3));
+  }
+  let valid = sourceContact.valid != 0u && trialContact.valid != 0u &&
+    sourceContact.distance > ipcParameters().x &&
+    jgs2_ipc_finite_scalar(lipschitzBound);
+  let alpha = select(
+    0.0,
+    jgs2_ipc_candidate_safe_step_cap(
+      sourceContact.distance,
+      ipcParameters().x,
+      lipschitzBound,
+      ipcParameters().w,
+    ),
+    valid,
+  );
+  ipcStoreCandidateScratch(
+    candidate,
+    vec4f(
+      alpha,
+      select(0.0, sourceContact.distance, sourceContact.valid != 0u),
+      select(0.0, trialContact.distance, trialContact.valid != 0u),
+      select(0.0, 1.0, valid),
+    ),
+  );
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE)
+fn validateContactStep(@builtin(global_invocation_id) globalId: vec3u) {
+  let candidate = globalId.x;
+  if (candidate >= ipcCandidateCount()) { return; }
+  let contactData = ipcContactAt(candidate, params.offsets2.x);
+  let valid = contactData.valid != 0u &&
+    jgs2_ipc_finite_scalar(contactData.distance) &&
+    contactData.distance > ipcParameters().x;
+  let distance = select(0.0, contactData.distance, valid);
+  ipcStoreCandidateScratch(
+    candidate,
+    vec4f(1.0, distance, distance, select(0.0, 1.0, valid)),
+  );
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE)
+fn reduceContactStep(@builtin(local_invocation_index) lane: u32) {
+  var reduction = vec4f(1.0, jgs2_ipc_f32_max, jgs2_ipc_f32_max, 1.0);
+  for (
+    var candidate = lane;
+    candidate < ipcCandidateCount();
+    candidate += WORKGROUP_SIZE
+  ) {
+    let scratch = ipcCandidateScratch(candidate);
+    let valid = scratch.w == 1.0 &&
+      jgs2_ipc_finite_scalar(scratch.x) &&
+      jgs2_ipc_finite_scalar(scratch.y) &&
+      jgs2_ipc_finite_scalar(scratch.z);
+    reduction.x = min(reduction.x, select(0.0, scratch.x, valid));
+    reduction.y = min(reduction.y, select(0.0, scratch.y, valid));
+    reduction.z = min(reduction.z, select(0.0, scratch.z, valid));
+    reduction.w *= select(0.0, 1.0, valid);
+  }
+  ipcStepReductionLanes[lane] = reduction;
+  workgroupBarrier();
+  var stride = WORKGROUP_SIZE / 2u;
+  loop {
+    if (lane < stride) {
+      ipcStepReductionLanes[lane] = min(
+        ipcStepReductionLanes[lane],
+        ipcStepReductionLanes[lane + stride],
+      );
+    }
+    workgroupBarrier();
+    if (stride == 1u) { break; }
+    stride /= 2u;
+  }
+  if (lane == 0u) {
+    let aggregate = ipcStepReductionLanes[0];
+    let alpha = select(
+      0.0,
+      clamp(aggregate.x, 0.0, 1.0),
+      aggregate.w == 1.0,
+    );
+    dynamicData[ipcContactBase()].w = alpha;
+  }
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE)
+fn applyContactStep(@builtin(global_invocation_id) globalId: vec3u) {
+  let vertex = globalId.x;
+  if (vertex >= params.counts.x || nonlinearStopLatched()) { return; }
+  let alpha = clamp(dynamicData[ipcContactBase()].w, 0.0, 1.0);
+  let source = loadPosition(params.offsets1.w, vertex);
+  let candidate = loadPosition(params.offsets2.x, vertex);
+  dynamicData[params.offsets2.x + vertex] =
+    vec4f(source + alpha * (candidate - source), 1.0);
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -1271,6 +1839,10 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
     gradient.y += params.solver.x * (position.y - params.gravityFloor.w);
     hessian[1][1] += params.solver.x;
   }
+
+  let ipcContribution = ipcLocalContribution(vertex, params.offsets1.w);
+  gradient += ipcContribution.gradient;
+  hessian += ipcContribution.hessian;
 
   // Cubature supplies the complementary gradient and Hessian in Eq. 15-17.
   for (var sample = 0u; sample < params.counts.z; sample += 1u) {
@@ -2048,6 +2620,7 @@ fn convergenceGradient(@builtin(global_invocation_id) globalId: vec3u) {
   if (params.solver.x > 0.0 && position.y < params.gravityFloor.w) {
     contact.y = params.solver.x * (position.y - params.gravityFloor.w);
   }
+  contact += ipcLocalContribution(vertex, params.offsets2.x).gradient;
   dynamicData[base] = vec4f(inertia, 0.0);
   dynamicData[base + 1u] = vec4f(material, 0.0);
   dynamicData[base + 2u] = vec4f(externalForce, 0.0);

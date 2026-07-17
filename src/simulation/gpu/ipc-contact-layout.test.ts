@@ -43,7 +43,8 @@ describe("IPC GPU contact buffer layout", () => {
     expect(packed.vertexTriangleCount).toBe(1);
     expect(packed.edgeEdgeCount).toBe(1);
     expect([...packed.integers.subarray(0, IPC_CONTACT_GLOBAL_WORDS)]).toEqual([
-      2, 1, 1, 0,
+      2, 1, 1, 0x3f80_0000,
+      0, 0, 0, 0,
     ]);
 
     const vtBase = candidateWordBase(0);
@@ -88,7 +89,7 @@ describe("IPC GPU contact buffer layout", () => {
     }
   });
 
-  it("always emits the 16-byte global record for an empty candidate set", () => {
+  it("always emits the 32-byte global records for an empty candidate set", () => {
     const packed = packIpcContactBuffer({
       vertexTriangleCandidates: [],
       edgeEdgeCandidates: [],
@@ -97,9 +98,12 @@ describe("IPC GPU contact buffer layout", () => {
       edgeEdgeCount: 0,
     });
 
-    expect(packed.byteLength).toBe(16);
+    expect(packed.byteLength).toBe(32);
     expect(packed.candidateCount).toBe(0);
-    expect([...packed.integers]).toEqual([0, 0, 0, 0]);
+    expect([...packed.integers]).toEqual([
+      0, 0, 0, 0x3f80_0000,
+      0, 0, 0, 0,
+    ]);
     expect(packed.integers.buffer).toBe(packed.floats.buffer);
   });
 

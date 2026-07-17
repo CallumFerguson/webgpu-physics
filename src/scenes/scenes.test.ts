@@ -27,7 +27,13 @@ import {
 
 describe("procedural demo scenes", () => {
   it("uses the UI scene IDs and defaults to the minimal cantilever", () => {
-    expect(SCENE_IDS).toEqual(["minimal", "stiffness", "drop", "stress"]);
+    expect(SCENE_IDS).toEqual([
+      "minimal",
+      "stiffness",
+      "drop",
+      "contact",
+      "stress",
+    ]);
     expect(DEFAULT_SCENE_ID).toBe("minimal");
     expect(buildSceneDefinition(DEFAULT_SCENE_ID).id).toBe("minimal");
   });
@@ -290,12 +296,14 @@ describe("procedural demo scenes", () => {
       minimal: 1,
       stiffness: 2,
       drop: 1,
+      contact: 4,
       stress: 6,
     };
     const expectedPinnedBodyCounts: Record<SceneId, number> = {
       minimal: 1,
       stiffness: 2,
       drop: 0,
+      contact: 2,
       stress: 0,
     };
 
@@ -337,5 +345,72 @@ describe("procedural demo scenes", () => {
         }
       }
     }
+  }, 20_000);
+
+  it("packs the small public IPC contact scene and its body velocities", () => {
+    const scene = buildScene("contact");
+    const input = toJGS2GpuInput(scene);
+
+    expect(
+      scene.materials.every(
+        (material) => material.model === "stable-neo-hookean",
+      ),
+    ).toBe(true);
+    expect(getVertexCount(scene.mesh)).toBe(32);
+    expect(getTetrahedronCount(scene.mesh)).toBe(20);
+    expect(scene.settings).toMatchObject({
+      timestep: 1 / 60,
+      solverIterations: 7,
+      cubatureSamples: 6,
+    });
+
+    const candidates = input.contactCandidates;
+    expect(candidates).toBeDefined();
+    expect(candidates!.vertexTriangleCount).toBeGreaterThan(0);
+    expect(candidates!.edgeEdgeCount).toBeGreaterThan(0);
+    expect(candidates!.packedIndices).toHaveLength(
+      (candidates!.vertexTriangleCount + candidates!.edgeEdgeCount) * 4,
+    );
+    expect(Math.max(...candidates!.packedIndices)).toBeLessThan(
+      input.vertexCount,
+    );
+    expect(
+      toJGS2GpuInput(buildScene("minimal")).contactCandidates,
+    ).toBeUndefined();
+
+    const slabVertices: number[] = [];
+    for (let vertex = 0; vertex < input.vertexCount; vertex += 1) {
+      const bodyId = scene.mesh.bodyIds[vertex]!;
+      if (bodyId === 0) {
+        slabVertices.push(vertex);
+      }
+      expect(scene.mesh.fixed[vertex] !== 0).toBe(
+        bodyId === 0 || (bodyId === 3 && vertex < 28),
+      );
+      const expectedVelocity = scene.settings.initialBodyVelocities![bodyId]!;
+      for (let axis = 0; axis < 3; axis += 1) {
+        expect(input.velocities![vertex * 4 + axis]).toBeCloseTo(
+          expectedVelocity[axis],
+          6,
+        );
+      }
+      expect(input.velocities![vertex * 4 + 3]).toBe(0);
+    }
+    expect(slabVertices).toHaveLength(8);
+    expect(
+      Math.max(
+        ...slabVertices.map(
+          (vertex) => scene.mesh.positions[vertex * 3 + 1]!,
+        ),
+      ),
+    ).toBeCloseTo(0, 12);
+    expect(scene.settings.initialBodyVelocities![2]![0]).toBeGreaterThan(0);
+    const selfContactCandidates = [
+      ...candidates!.vertexTriangleCandidates,
+      ...candidates!.edgeEdgeCandidates,
+    ].filter((candidate) =>
+      candidate.every((vertex) => scene.mesh.bodyIds[vertex] === 3),
+    );
+    expect(selfContactCandidates.length).toBeGreaterThan(0);
   }, 20_000);
 });

@@ -138,22 +138,28 @@ cloth, and Gauss-Seidel scheduling.
 
 **Must pass before item 3**
 
-- [ ] Two deformable bodies collide and settle without visible interpenetration.
-- [ ] A self-contact example does not pass through itself in its scripted case.
-- [ ] With friction enabled, a body on the level floor loses tangential speed;
+- [x] Two deformable bodies collide and settle without visible interpenetration.
+- [x] A self-contact example does not pass through itself in its scripted case.
+- [x] With friction enabled, a body on the level floor loses tangential speed;
       with friction disabled, the same body travels visibly farther.
-- [ ] One focused numeric test checks barrier value/gradient and one browser
+- [x] One focused numeric test checks barrier value/gradient and one browser
       test covers the short collision/friction scene.
 
 **Work record**
 
-- Status: Not started
-- Started:
-- Completed:
-- Commit:
-- Tests/commands run:
-- Actual time:
-- Notes/blockers:
+- Status: Completed
+- Started: 2026-07-17
+- Completed: 2026-07-17
+- Commit: `feat: add small-scene IPC contact and friction`
+- Tests/commands run: focused Vitest (102 tests); focused hardware Playwright
+  contact demo (1 test); existing hardware GPU oracle (1 test); `npm run build`.
+- Actual time: About 3 hours including hardware review and ABI hardening.
+- Notes/blockers: The public contact scene disables the analytic plane penalty
+  and uses CPU-enumerated topology-filtered VT/EE candidates, GPU barrier and
+  lagged-friction terms, conservative safe-step caps, and post-scale f32
+  feasibility validation. The small same-body pair exercises self-contact.
+  Contact records append to the existing dynamic buffer, preserving the frozen
+  Phase 1 seven-storage-buffer and 176-byte uniform ABI.
 
 ## Item 3 - Cloth through the same JGS2 solver
 
@@ -262,8 +268,8 @@ sizes, are present:
 - [x] nonnegative Cubature sampling and full-coordinate precomputation;
 - [x] stable Neo-Hookean tetrahedral solids;
 - [x] external forces and target objectives;
-- [ ] collision candidates, IPC barrier terms, and collision-safe line search;
-- [ ] frictional contact;
+- [x] collision candidates, IPC barrier terms, and collision-safe line search;
+- [x] frictional contact;
 - [ ] triangle cloth with stretching and bending;
 - [ ] parallel colored Gauss-Seidel as well as Jacobi; and
 - [ ] small integrated scenes demonstrating all of the above at interactive

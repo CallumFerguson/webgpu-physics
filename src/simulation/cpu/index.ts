@@ -48,10 +48,14 @@ export {
 export {
   buildStaticIpcContactCandidates,
   evaluateIpcBarrier,
+  evaluateIpcEdgeEdgeDistance,
+  evaluateIpcVertexTriangleDistance,
   ipcFrictionF0,
   ipcFrictionF1,
+  minimumStaticIpcContactDistance,
   type IpcBarrierEvaluation,
   type IpcEdgeEdgeCandidate,
+  type IpcPositionStride,
   type IpcVertexTriangleCandidate,
   type StaticIpcContactCandidates,
 } from "./ipc-contact";

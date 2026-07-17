@@ -6,6 +6,8 @@ import {
   JGS2_GLOBALIZATION_TET_DIAGNOSTIC_VEC4S,
   JGS2_CONVERGENCE_COMPONENT_VEC4S,
 } from "./jgs2-globalization";
+import type { StaticIpcContactCandidates } from "../cpu/ipc-contact";
+import { validateIpcContactCandidatesForGpu } from "./ipc-contact-layout";
 
 export const JGS2_VERTEX_STATIC_WORDS = 12;
 /** Two vec4 records: external force and isotropic quadratic target. */
@@ -50,6 +52,8 @@ export interface JGS2GpuInput {
   readonly vertexInfo: Uint32Array;
   /** Optional per-vertex linear forces and soft quadratic targets. */
   readonly objectives?: JGS2GpuObjectivesInput;
+  /** Optional static VT/EE broad-phase superset for small-scene IPC contact. */
+  readonly contactCandidates?: StaticIpcContactCandidates;
 
   /** Four vertex indices per tetrahedron. */
   readonly tetIndices: Uint32Array;
@@ -103,6 +107,8 @@ export interface JGS2DynamicOffsets {
   readonly globalizationControl: number;
   /** Fixed-capacity, eight-vec4 records for each nonlinear iteration. */
   readonly globalizationHistory: number;
+  /** Append-only IPC global/candidate arena. */
+  readonly ipcContact: number;
   readonly vec4Count: number;
 }
 
@@ -222,6 +228,16 @@ export function validateJGS2GpuInput(input: JGS2GpuInput): void {
   assertLength("vertexColors", input.vertexColors, vertexCount * 4);
   assertLength("vertexInfo", input.vertexInfo, vertexCount * 4);
   validateJGS2GpuObjectives(input);
+  if (input.contactCandidates) {
+    validateIpcContactCandidatesForGpu(input.contactCandidates);
+    for (const vertex of input.contactCandidates.packedIndices) {
+      if (vertex >= vertexCount) {
+        throw new RangeError(
+          `IPC candidate references vertex ${vertex}, but vertexCount is ${vertexCount}.`,
+        );
+      }
+    }
+  }
   inferJGS2BodyCount(input.vertexInfo, vertexCount);
   assertLength("tetIndices", input.tetIndices, tetCount * 4);
   assertLength("tetInverseDm", input.tetInverseDm, tetCount * 12);
@@ -389,10 +405,12 @@ export function computeJGS2DynamicOffsets(
   tetCount: number,
   bodyCount = 0,
   globalizationEnabled = true,
+  ipcContactVec4Count = 0,
 ): JGS2DynamicOffsets {
   assertInteger("vertexCount", vertexCount, 1);
   assertInteger("tetCount", tetCount, 1);
   assertInteger("bodyCount", bodyCount, 0);
+  assertInteger("ipcContactVec4Count", ipcContactVec4Count, 0);
 
   const posA = 0;
   const posB = posA + vertexCount;
@@ -426,7 +444,8 @@ export function computeJGS2DynamicOffsets(
       convergenceGradient: localGlobalization,
       globalizationControl: localGlobalization,
       globalizationHistory: localGlobalization,
-      vec4Count: localGlobalization,
+      ipcContact: localGlobalization,
+      vec4Count: localGlobalization + ipcContactVec4Count,
     };
   }
   const tetGlobalization =
@@ -439,6 +458,10 @@ export function computeJGS2DynamicOffsets(
     convergenceGradient + vertexCount * JGS2_CONVERGENCE_COMPONENT_VEC4S;
   const globalizationHistory =
     globalizationControl + JGS2_GLOBALIZATION_CONTROL_VEC4S;
+  const ipcContact =
+    globalizationHistory +
+    JGS2_GLOBALIZATION_HISTORY_CAPACITY *
+      JGS2_GLOBALIZATION_HISTORY_VEC4S;
 
   return {
     posA,
@@ -456,10 +479,8 @@ export function computeJGS2DynamicOffsets(
     convergenceGradient,
     globalizationControl,
     globalizationHistory,
-    vec4Count:
-      globalizationHistory +
-      JGS2_GLOBALIZATION_HISTORY_CAPACITY *
-        JGS2_GLOBALIZATION_HISTORY_VEC4S,
+    ipcContact,
+    vec4Count: ipcContact + ipcContactVec4Count,
   };
 }
 

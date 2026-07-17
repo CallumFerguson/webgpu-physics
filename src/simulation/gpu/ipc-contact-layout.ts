@@ -2,7 +2,8 @@ import type { StaticIpcContactCandidates } from "../cpu/ipc-contact";
 
 export const IPC_CONTACT_WORD_BYTES = 4;
 export const IPC_CONTACT_VEC4_WORDS = 4;
-export const IPC_CONTACT_GLOBAL_VEC4S = 1;
+/** Counts/control followed by runtime contact parameters. */
+export const IPC_CONTACT_GLOBAL_VEC4S = 2;
 export const IPC_CONTACT_CANDIDATE_VEC4S = 5;
 export const IPC_CONTACT_GLOBAL_WORDS =
   IPC_CONTACT_GLOBAL_VEC4S * IPC_CONTACT_VEC4_WORDS;
@@ -18,8 +19,11 @@ export const IPC_CONTACT_GLOBAL_WORD_OFFSETS = {
   candidateCount: 0,
   vertexTriangleCount: 1,
   edgeEdgeCount: 2,
-  reserved: 3,
+  safeAlpha: 3,
 } as const;
+
+/** Vec4 offset of (minimum distance, friction, smoothing, step safety). */
+export const IPC_CONTACT_PARAMETERS_VEC4_OFFSET = 1;
 
 /** Vec4 offsets relative to the start of one candidate record. */
 export const IPC_CONTACT_CANDIDATE_VEC4_OFFSETS = {
@@ -155,7 +159,8 @@ export function validateIpcContactCandidatesForGpu(
  * Packs static IPC candidates into a storage-buffer-ready mixed u32/f32 ABI.
  *
  * Word layout:
- * - global u32 vec4: total count, VT count, EE count, reserved;
+ * - global u32 vec4: total count, VT count, EE count, safe-step alpha;
+ * - global f32 vec4: minimum distance, friction, smoothing, step safety;
  * - five vec4s per candidate: indices, metadata, lagged normal/force,
  *   lagged weights, and per-iteration scratch.
  *
@@ -181,6 +186,7 @@ export function packIpcContactBuffer(
   integers[IPC_CONTACT_GLOBAL_WORD_OFFSETS.vertexTriangleCount] =
     vertexTriangleCount;
   integers[IPC_CONTACT_GLOBAL_WORD_OFFSETS.edgeEdgeCount] = edgeEdgeCount;
+  floats[IPC_CONTACT_GLOBAL_WORD_OFFSETS.safeAlpha] = 1;
 
   for (let candidateIndex = 0; candidateIndex < candidateCount; candidateIndex += 1) {
     const recordBase =

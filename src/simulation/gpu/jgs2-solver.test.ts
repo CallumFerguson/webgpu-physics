@@ -824,7 +824,7 @@ describe("JGS2 objective creation requirements", () => {
       },
     };
     const device = {
-      limits: { maxStorageBuffersPerShaderStage: 7 },
+      limits: { maxStorageBuffersPerShaderStage: 8 },
     } as unknown as GPUDevice;
 
     await expect(JGS2GpuSolver.create(device, input)).rejects.toThrow(
@@ -968,7 +968,7 @@ describe("JGS2 create-time cleanup", () => {
     },
   );
 
-  it("binds the objective storage slot at 6 and moves uniforms to 7", async () => {
+  it("appends IPC state to dynamic storage and keeps uniforms at 7", async () => {
     const {
       device,
       failure,

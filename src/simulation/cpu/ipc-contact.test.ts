@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   buildStaticIpcContactCandidates,
   evaluateIpcBarrier,
+  evaluateIpcEdgeEdgeDistance,
+  evaluateIpcVertexTriangleDistance,
   ipcFrictionF0,
   ipcFrictionF1,
+  minimumStaticIpcContactDistance,
 } from "./ipc-contact";
 
 describe("IPC contact scalar kernels", () => {
@@ -139,5 +142,117 @@ describe("static IPC contact candidate enumeration", () => {
     expect(connectedPatch.vertexTriangleCandidates).toEqual([]);
     expect(connectedPatch.edgeEdgeCandidates).toEqual([]);
     expect(connectedPatch.packedIndices).toHaveLength(0);
+  });
+});
+
+describe("static IPC contact distances", () => {
+  it("evaluates point-triangle distances and deterministic degeneracies", () => {
+    const xyz = new Float64Array([
+      0.25, 1, 0.25,
+      0, 0, 0,
+      1, 0, 0,
+      0, 0, 1,
+      2, 0, 0,
+      1, 0, 0,
+      0, 0, 0,
+    ]);
+
+    expect(evaluateIpcVertexTriangleDistance(xyz, [0, 1, 2, 3], 3)).toBe(1);
+    expect(evaluateIpcVertexTriangleDistance(xyz, [0, 1, 4, 5], 3)).toBeCloseTo(
+      Math.sqrt(1.0625),
+      14,
+    );
+    expect(evaluateIpcVertexTriangleDistance(xyz, [0, 6, 6, 6], 3)).toBeCloseTo(
+      Math.sqrt(1.125),
+      14,
+    );
+  });
+
+  it("evaluates crossing, parallel, and collapsed edge pairs", () => {
+    const xyz = new Float64Array([
+      -1, 0, 0,
+      1, 0, 0,
+      0, -1, 0,
+      0, 1, 0,
+      -1, 2, 0,
+      1, 2, 0,
+      0, 0, 0,
+      0, 0, 0,
+      0, 3, 0,
+      0, 4, 0,
+    ]);
+
+    expect(evaluateIpcEdgeEdgeDistance(xyz, [0, 1, 2, 3], 3)).toBe(0);
+    expect(evaluateIpcEdgeEdgeDistance(xyz, [0, 1, 4, 5], 3)).toBe(2);
+    expect(evaluateIpcEdgeEdgeDistance(xyz, [6, 7, 8, 9], 3)).toBe(3);
+    expect(evaluateIpcEdgeEdgeDistance(xyz, [6, 7, 6, 7], 3)).toBe(0);
+  });
+
+  it("finds the minimum in xyz and vec4 layouts and keeps empty finite", () => {
+    const candidates = {
+      vertexTriangleCandidates: [[0, 1, 2, 3] as const],
+      edgeEdgeCandidates: [[4, 5, 6, 7] as const],
+      packedIndices: new Uint32Array([0, 1, 2, 3, 4, 5, 6, 7]),
+      vertexTriangleCount: 1,
+      edgeEdgeCount: 1,
+    };
+    const xyz = new Float64Array([
+      0.25, 0.5, 0.25,
+      0, 0, 0,
+      1, 0, 0,
+      0, 0, 1,
+      -1, 2, 0,
+      1, 2, 0,
+      -1, 3, 0,
+      1, 3, 0,
+    ]);
+    const vec4 = new Float32Array(8 * 4);
+    for (let vertex = 0; vertex < 8; vertex += 1) {
+      vec4.set(xyz.slice(vertex * 3, vertex * 3 + 3), vertex * 4);
+      vec4[vertex * 4 + 3] = 1;
+    }
+
+    expect(minimumStaticIpcContactDistance(xyz, candidates, 3)).toBe(0.5);
+    expect(minimumStaticIpcContactDistance(vec4, candidates)).toBe(0.5);
+    expect(
+      minimumStaticIpcContactDistance(new Float32Array(0), {
+        vertexTriangleCandidates: [],
+        edgeEdgeCandidates: [],
+        packedIndices: new Uint32Array(0),
+        vertexTriangleCount: 0,
+        edgeEdgeCount: 0,
+      }),
+    ).toBe(Number.MAX_VALUE);
+    expect(Number.isFinite(minimumStaticIpcContactDistance(xyz, candidates, 3))).toBe(
+      true,
+    );
+  });
+
+  it("rejects malformed packed position and candidate inputs", () => {
+    expect(() =>
+      evaluateIpcVertexTriangleDistance(
+        new Float32Array([0, 0, 0]),
+        [0, 0, 0, 0],
+        4,
+      ),
+    ).toThrow(/divisible/);
+    expect(() =>
+      evaluateIpcEdgeEdgeDistance(
+        new Float32Array([0, 0, 0, 1]),
+        [0, 0, 0, 1],
+      ),
+    ).toThrow(/outside/);
+    expect(() =>
+      minimumStaticIpcContactDistance(
+        new Float32Array([0, 0, 0, 1]),
+        {
+          vertexTriangleCandidates: [],
+          edgeEdgeCandidates: [],
+          packedIndices: new Uint32Array([0]),
+          vertexTriangleCount: 0,
+          edgeEdgeCount: 0,
+        },
+      ),
+    ).toThrow(/four indices/);
   });
 });
