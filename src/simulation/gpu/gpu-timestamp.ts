@@ -484,3 +484,363 @@ export class GpuTimestampFrameProfiler {
     }
   }
 }
+
+export const DEFAULT_LIVE_GPU_TIMESTAMP_BATCH_FRAME_COUNT = 60;
+export const LIVE_GPU_TIMESTAMP_SLOT_COUNT = 3;
+
+export interface GpuTimestampQueryResolve {
+  readonly querySet: GPUQuerySet;
+  readonly queryCount: number;
+  readonly resolveBuffer: GPUBuffer;
+  readonly readbackBuffer: GPUBuffer;
+  readonly byteLength: number;
+}
+
+export interface GpuTimestampLiveFramePlan {
+  readonly token: number;
+  readonly writes: GpuTimestampFrameWrites;
+  readonly resolveAfterRender: GpuTimestampQueryResolve | null;
+}
+
+export interface GpuTimestampLiveBatch {
+  readonly feature: typeof GPU_TIMESTAMP_FEATURE;
+  readonly frameCount: number;
+  readonly gpuFrameMilliseconds: readonly number[];
+  readonly gpuSimulationStepMilliseconds: readonly number[];
+  readonly gpuRenderMilliseconds: readonly number[];
+  readonly timestampMapCount: 1;
+}
+
+type GpuTimestampLiveSlotState = "idle" | "recording" | "mapping";
+
+interface GpuTimestampLiveSlot {
+  readonly querySet: GPUQuerySet;
+  readonly resolve: GPUBuffer;
+  readonly readback: GPUBuffer;
+  state: GpuTimestampLiveSlotState;
+  frameCount: number;
+  generation: number;
+}
+
+/**
+ * Non-blocking live GPU profiler. Timestamp queries are accumulated across a
+ * batch of produced frames, resolved in the final render command buffer, and
+ * mapped asynchronously. Three rotating slots let rendering continue while
+ * prior readbacks are pending; if all are busy, frames remain uninstrumented.
+ */
+export class GpuTimestampLiveProfiler {
+  private readonly slots: GpuTimestampLiveSlot[];
+  private readonly completedBatches: GpuTimestampLiveBatch[] = [];
+  private recordingSlotIndex: number | null = null;
+  private pendingPlan: { readonly token: number; readonly slotIndex: number } | null =
+    null;
+  private nextToken = 1;
+  private mapCount = 0;
+  private skippedFrames = 0;
+  private measurementGeneration = 0;
+  private failureReason: string | null = null;
+  private destroyed = false;
+
+  constructor(
+    private readonly device: GPUDevice,
+    private readonly label: string,
+    readonly batchFrameCount = DEFAULT_LIVE_GPU_TIMESTAMP_BATCH_FRAME_COUNT,
+  ) {
+    if (
+      !Number.isSafeInteger(batchFrameCount) ||
+      batchFrameCount < 1 ||
+      batchFrameCount > MAX_GPU_TIMESTAMP_PROFILE_FRAME_COUNT
+    ) {
+      throw new RangeError(
+        `batchFrameCount must be a positive safe integer no greater than ${MAX_GPU_TIMESTAMP_PROFILE_FRAME_COUNT}.`,
+      );
+    }
+    this.slots = this.featureSupported
+      ? Array.from({ length: LIVE_GPU_TIMESTAMP_SLOT_COUNT }, (_unused, index) =>
+          this.createSlot(index),
+        )
+      : [];
+  }
+
+  get featureSupported(): boolean {
+    return this.device.features.has(GPU_TIMESTAMP_FEATURE);
+  }
+
+  get available(): boolean {
+    return this.featureSupported && this.failureReason === null && !this.destroyed;
+  }
+
+  get reason(): string | null {
+    if (!this.featureSupported) {
+      return "The WebGPU device does not have the timestamp-query feature enabled.";
+    }
+    return this.failureReason;
+  }
+
+  get timestampMapCount(): number {
+    return this.mapCount;
+  }
+
+  get skippedFrameCount(): number {
+    return this.skippedFrames;
+  }
+
+  beginFrame(): GpuTimestampLiveFramePlan | null {
+    this.assertUsable();
+    if (!this.available) {
+      return null;
+    }
+    if (this.pendingPlan) {
+      throw new Error("The prior live GPU timestamp frame has not been finished.");
+    }
+    if (this.recordingSlotIndex === null) {
+      const availableSlotIndex = this.slots.findIndex(
+        (slot) => slot.state === "idle",
+      );
+      if (availableSlotIndex < 0) {
+        this.skippedFrames += 1;
+        return null;
+      }
+      const slot = this.slots[availableSlotIndex]!;
+      slot.state = "recording";
+      slot.frameCount = 0;
+      slot.generation = this.measurementGeneration;
+      this.recordingSlotIndex = availableSlotIndex;
+    }
+
+    const slotIndex = this.recordingSlotIndex;
+    const slot = this.slots[slotIndex]!;
+    const queryBase = slot.frameCount * FRAME_PROFILE_QUERIES_PER_FRAME;
+    const token = this.nextToken;
+    this.nextToken += 1;
+    const isFinalFrame = slot.frameCount + 1 === this.batchFrameCount;
+    const queryCount =
+      this.batchFrameCount * FRAME_PROFILE_QUERIES_PER_FRAME;
+    const plan: GpuTimestampLiveFramePlan = {
+      token,
+      writes: {
+        simulation: {
+          querySet: slot.querySet,
+          startWriteIndex: queryBase,
+          endWriteIndex: queryBase + 1,
+        },
+        render: {
+          querySet: slot.querySet,
+          startWriteIndex: queryBase + 2,
+          endWriteIndex: queryBase + 3,
+        },
+      },
+      resolveAfterRender: isFinalFrame
+        ? {
+            querySet: slot.querySet,
+            queryCount,
+            resolveBuffer: slot.resolve,
+            readbackBuffer: slot.readback,
+            byteLength: timestampByteLength(queryCount),
+          }
+        : null,
+    };
+    this.pendingPlan = { token, slotIndex };
+    return plan;
+  }
+
+  finishFrame(plan: GpuTimestampLiveFramePlan): void {
+    this.assertUsable();
+    if (
+      !this.pendingPlan ||
+      this.pendingPlan.token !== plan.token ||
+      this.pendingPlan.slotIndex !== this.recordingSlotIndex
+    ) {
+      throw new Error("The live GPU timestamp frame plan is stale or unknown.");
+    }
+    const slotIndex = this.pendingPlan.slotIndex;
+    const slot = this.slots[slotIndex]!;
+    this.pendingPlan = null;
+    slot.frameCount += 1;
+    if (slot.frameCount < this.batchFrameCount) {
+      if (plan.resolveAfterRender !== null) {
+        throw new Error("A partial live GPU timestamp batch cannot be resolved.");
+      }
+      return;
+    }
+    if (plan.resolveAfterRender === null) {
+      throw new Error("The final live GPU timestamp frame must resolve its batch.");
+    }
+    slot.state = "mapping";
+    this.recordingSlotIndex = null;
+    this.mapCount += 1;
+    void this.mapSlot(slot, slot.generation);
+  }
+
+  /**
+   * Start a fresh visible measurement epoch without waiting for older maps.
+   * Completed or in-flight batches from the prior epoch are discarded.
+   */
+  resetMeasurementWindow(): void {
+    this.assertUsable();
+    if (this.pendingPlan) {
+      throw new Error(
+        "Cannot reset live GPU timestamps while a frame plan is pending.",
+      );
+    }
+    this.measurementGeneration += 1;
+    this.completedBatches.length = 0;
+    this.skippedFrames = 0;
+    if (this.recordingSlotIndex !== null) {
+      const slot = this.slots[this.recordingSlotIndex]!;
+      slot.state = "idle";
+      slot.frameCount = 0;
+      slot.generation = this.measurementGeneration;
+      this.recordingSlotIndex = null;
+    }
+  }
+
+  /**
+   * Permanently disable this profiler when a caller cannot complete a frame
+   * plan. Partially written queries are deliberately abandoned and never
+   * resolved or reused.
+   */
+  abortFrame(plan: GpuTimestampLiveFramePlan, reason: unknown): void {
+    this.assertUsable();
+    if (!this.pendingPlan || this.pendingPlan.token !== plan.token) {
+      throw new Error("The live GPU timestamp frame plan is stale or unknown.");
+    }
+    const slot = this.slots[this.pendingPlan.slotIndex]!;
+    this.pendingPlan = null;
+    this.recordingSlotIndex = null;
+    slot.state = "idle";
+    slot.frameCount = 0;
+    this.disable(
+      reason instanceof Error
+        ? `Live GPU timestamp frame aborted: ${reason.message}`
+        : `Live GPU timestamp frame aborted: ${String(reason)}`,
+    );
+  }
+
+  /** Disable live timing without destroying resources that may still be in use. */
+  disable(reason: unknown): void {
+    if (this.destroyed || this.failureReason !== null) {
+      return;
+    }
+    this.failureReason =
+      reason instanceof Error ? reason.message : String(reason);
+    this.pendingPlan = null;
+    this.recordingSlotIndex = null;
+  }
+
+  consumeCompletedBatches(): readonly GpuTimestampLiveBatch[] {
+    if (this.completedBatches.length === 0) {
+      return [];
+    }
+    return this.completedBatches.splice(0, this.completedBatches.length);
+  }
+
+  destroy(): void {
+    if (this.destroyed) {
+      return;
+    }
+    this.destroyed = true;
+    this.completedBatches.length = 0;
+    this.pendingPlan = null;
+    this.recordingSlotIndex = null;
+    for (const slot of this.slots) {
+      slot.querySet.destroy();
+      slot.resolve.destroy();
+      slot.readback.destroy();
+    }
+  }
+
+  private createSlot(index: number): GpuTimestampLiveSlot {
+    const queryCount =
+      this.batchFrameCount * FRAME_PROFILE_QUERIES_PER_FRAME;
+    const byteLength = timestampByteLength(queryCount);
+    return {
+      querySet: this.device.createQuerySet({
+        label: `${this.label}-live-query-set-${index}`,
+        type: "timestamp",
+        count: queryCount,
+      }),
+      resolve: this.device.createBuffer({
+        label: `${this.label}-live-resolve-${index}`,
+        size: byteLength,
+        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+      }),
+      readback: this.device.createBuffer({
+        label: `${this.label}-live-readback-${index}`,
+        size: byteLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      }),
+      state: "idle",
+      frameCount: 0,
+      generation: this.measurementGeneration,
+    };
+  }
+
+  private async mapSlot(
+    slot: GpuTimestampLiveSlot,
+    batchGeneration: number,
+  ): Promise<void> {
+    let mapped = false;
+    try {
+      await slot.readback.mapAsync(GPUMapMode.READ);
+      mapped = true;
+      const timestamps = new BigUint64Array(slot.readback.getMappedRange());
+      const gpuFrameMilliseconds: number[] = [];
+      const gpuSimulationStepMilliseconds: number[] = [];
+      const gpuRenderMilliseconds: number[] = [];
+      for (let frame = 0; frame < this.batchFrameCount; frame += 1) {
+        const queryBase = frame * FRAME_PROFILE_QUERIES_PER_FRAME;
+        const simulation = decodeGpuTimestampMeasurement(
+          timestamps[queryBase]!,
+          timestamps[queryBase + 1]!,
+        );
+        const render = decodeGpuTimestampMeasurement(
+          timestamps[queryBase + 2]!,
+          timestamps[queryBase + 3]!,
+        );
+        const wholeFrame = decodeGpuTimestampMeasurement(
+          timestamps[queryBase]!,
+          timestamps[queryBase + 3]!,
+        );
+        gpuFrameMilliseconds.push(wholeFrame.gpuMilliseconds!);
+        gpuSimulationStepMilliseconds.push(simulation.gpuMilliseconds!);
+        gpuRenderMilliseconds.push(render.gpuMilliseconds!);
+      }
+      if (
+        !this.destroyed &&
+        batchGeneration === this.measurementGeneration
+      ) {
+        this.completedBatches.push({
+          feature: GPU_TIMESTAMP_FEATURE,
+          frameCount: this.batchFrameCount,
+          gpuFrameMilliseconds,
+          gpuSimulationStepMilliseconds,
+          gpuRenderMilliseconds,
+          timestampMapCount: 1,
+        });
+      }
+    } catch (reason) {
+      if (!this.destroyed) {
+        this.disable(
+          reason instanceof Error
+            ? `Live GPU timestamp profiling failed: ${reason.message}`
+            : `Live GPU timestamp profiling failed: ${String(reason)}`,
+        );
+      }
+    } finally {
+      if (mapped) {
+        slot.readback.unmap();
+      }
+      if (!this.destroyed) {
+        slot.state = "idle";
+        slot.frameCount = 0;
+      }
+    }
+  }
+
+  private assertUsable(): void {
+    if (this.destroyed) {
+      throw new Error("GpuTimestampLiveProfiler has been destroyed.");
+    }
+  }
+}

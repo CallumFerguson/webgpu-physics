@@ -63,6 +63,14 @@ and p99 4.600 ms. Both replays ended at frame 720 with finite state, no
 browser errors, no diagnostic readback during measurement, and exactly one
 timestamp-buffer map after the GPU interval.
 
+The 2026-07-17 live-HUD compatibility gate reran this exact 120-warm-up/600-
+measured-frame workload after timestamp writes were moved onto the real predict
+and finalize passes. It recorded 269.8 serialized average FPS, 198.0 FPS 1%
+low, 3.706 ms wall mean, 4.500 ms wall p95, 0.132 ms CPU submission per frame,
+1.434 ms GPU frame span, 1.414 ms GPU simulation step, and 0.006 ms GPU render.
+The one-map, byte-equivalent replay and both 8.333 ms necessary compute checks
+passed as part of the retry-free 18/18 hardware E2E run.
+
 ## Interpretation
 
 This remains a small Phase 0 instrumentation baseline rather than the final

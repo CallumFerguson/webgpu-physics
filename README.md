@@ -23,6 +23,14 @@ npm run dev
 Then open the local URL printed by Vite. The default scene starts on its own;
 no interaction is required.
 
+Normal scene URLs show a live performance HUD over the canvas. It reports a
+rolling produced-frame FPS average, 1% low after 100 frame-interval samples,
+frame interval, simulation time rate, CPU command-encoding/submission time, and GPU
+frame/step/render time when `timestamp-query` is available. GPU samples arrive
+in 60-frame batches so the live view needs only one asynchronous map per batch;
+unsupported devices display `N/A` without disabling the CPU and cadence
+metrics. Deterministic `?test=1` pages intentionally pause this live collector.
+
 ```sh
 npm run build             # strict TypeScript + production bundle
 npm run test:unit         # FEM, basis, Cubature, and renderer tests
@@ -152,10 +160,11 @@ fixed-step test harness that:
    fixed vertices, positive tetrahedron determinants, bounds, landmarks,
    momentum, and visible pixel change.
 
-The 17-test Playwright gate covers all four public scenes, long-running
+The 18-test Playwright gate covers all four public scenes, long-running
 drop/stress behavior, and the visible WebGPU-unavailable path. It also exercises
 the canonical GPU oracles, the base and 32-case force-free conservation corpus,
-submission/readback invariants, and the timestamped performance baseline.
+submission/readback invariants, the timestamped performance baseline, and the
+production live-performance HUD.
 Start/end PNGs and generated JSON reports are retained under `test-results` for
 inspection.
 

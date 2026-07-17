@@ -16,3 +16,10 @@ export {
   type DurationSummary,
   type FrameTimeSummary,
 } from "./metrics";
+export {
+  DEFAULT_LIVE_ONE_PERCENT_LOW_SAMPLE_COUNT,
+  DEFAULT_LIVE_PERFORMANCE_WINDOW_SIZE,
+  LivePerformanceCollector,
+  type LiveGpuTimingBatch,
+  type LivePerformanceSnapshot,
+} from "./live-metrics";

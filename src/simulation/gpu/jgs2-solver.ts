@@ -353,11 +353,15 @@ function encodeDispatch(
   bindGroup: GPUBindGroup,
   itemCount: number,
   label: string,
+  timestampWrites?: GPUComputePassTimestampWrites,
 ): void {
   if (itemCount === 0) {
     return;
   }
-  const pass = encoder.beginComputePass({ label });
+  const pass = encoder.beginComputePass({
+    label,
+    ...(timestampWrites ? { timestampWrites } : {}),
+  });
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(Math.ceil(itemCount / JGS2_WORKGROUP_SIZE));
@@ -858,25 +862,7 @@ export class JGS2GpuSolver {
     const encoder = this.device.createCommandEncoder({
       label: "jgs2-profiled-step-command-encoder",
     });
-    encoder
-      .beginComputePass({
-        label: "jgs2-profiled-step-start",
-        timestampWrites: {
-          querySet: writes.querySet,
-          endOfPassWriteIndex: writes.startWriteIndex,
-        },
-      })
-      .end();
-    this.encodeFrame(encoder, settings, iterations);
-    encoder
-      .beginComputePass({
-        label: "jgs2-profiled-step-end",
-        timestampWrites: {
-          querySet: writes.querySet,
-          beginningOfPassWriteIndex: writes.endWriteIndex,
-        },
-      })
-      .end();
+    this.encodeFrame(encoder, settings, iterations, writes);
     this.device.queue.submit([encoder.finish()]);
   }
 
@@ -941,6 +927,7 @@ export class JGS2GpuSolver {
     encoder: GPUCommandEncoder,
     settings: JGS2StepSettings,
     iterations: number,
+    timestampWrites?: GpuTimestampIntervalWrites,
   ): void {
     encodeDispatch(
       encoder,
@@ -948,6 +935,12 @@ export class JGS2GpuSolver {
       this.uniforms.baseBindGroup,
       this.vertexCount,
       "jgs2-predict-pass",
+      timestampWrites
+        ? {
+            querySet: timestampWrites.querySet,
+            beginningOfPassWriteIndex: timestampWrites.startWriteIndex,
+          }
+        : undefined,
     );
 
     for (let iteration = 0; iteration < iterations; iteration += 1) {
@@ -1011,6 +1004,12 @@ export class JGS2GpuSolver {
       this.uniforms.baseBindGroup,
       this.vertexCount,
       "jgs2-finalize-pass",
+      timestampWrites
+        ? {
+            querySet: timestampWrites.querySet,
+            endOfPassWriteIndex: timestampWrites.endWriteIndex,
+          }
+        : undefined,
     );
   }
 

@@ -3,11 +3,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { requestWebGPUDevice } from "./renderer";
 import { SceneRenderer, type SceneCamera } from "./rendering/scene-renderer";
 import {
+  LivePerformanceCollector,
   validateJGS2PerformanceProfileOptions,
   type JGS2CpuFrameProfile,
   type JGS2GpuFrameProfile,
   type JGS2PerformanceProfileOptions,
   type JGS2PerformanceState,
+  type LivePerformanceSnapshot,
 } from "./performance";
 import {
   DEFAULT_SCENE_ID,
@@ -28,7 +30,9 @@ import {
 import {
   JGS2_MAX_BATCH_FRAMES,
   GpuTimestampFrameProfiler,
+  GpuTimestampLiveProfiler,
   JGS2GpuSolver,
+  type GpuTimestampLiveFramePlan,
   type GpuTimestampMeasurement,
 } from "./simulation/gpu";
 import {
@@ -107,6 +111,75 @@ interface RuntimeStats {
   readonly adapter: string;
   readonly iterations: number;
   readonly cubatureSamples: number;
+}
+
+type LivePerformanceStatus =
+  | "collecting"
+  | "ready"
+  | "test-controlled"
+  | "unavailable";
+type LiveGpuTimingStatus =
+  | "collecting"
+  | "available"
+  | "unavailable"
+  | "failed"
+  | "paused";
+
+interface LivePerformanceView {
+  readonly status: LivePerformanceStatus;
+  readonly snapshot: LivePerformanceSnapshot | null;
+  readonly gpuTimingStatus: LiveGpuTimingStatus;
+  readonly gpuTimingReason: string | null;
+  readonly gpuSkippedFrameCount: number;
+  readonly updateSequence: number;
+}
+
+const LIVE_METRICS_PUBLISH_INTERVAL_MILLISECONDS = 250;
+
+function initialLivePerformanceView(testMode: boolean): LivePerformanceView {
+  return {
+    status: testMode ? "test-controlled" : "collecting",
+    snapshot: null,
+    gpuTimingStatus: testMode ? "paused" : "collecting",
+    gpuTimingReason: testMode
+      ? "Live cadence is paused while deterministic test control is active."
+      : null,
+    gpuSkippedFrameCount: 0,
+    updateSequence: 0,
+  };
+}
+
+function unavailableLivePerformanceView(reason: string): LivePerformanceView {
+  return {
+    status: "unavailable",
+    snapshot: null,
+    gpuTimingStatus: "unavailable",
+    gpuTimingReason: reason,
+    gpuSkippedFrameCount: 0,
+    updateSequence: 0,
+  };
+}
+
+function formatLiveNumber(
+  value: number | null | undefined,
+  fractionDigits: number,
+): string {
+  return value === null || value === undefined || !Number.isFinite(value)
+    ? "\u2014"
+    : value.toFixed(fractionDigits);
+}
+
+function livePerformanceStatusLabel(view: LivePerformanceView): string {
+  switch (view.status) {
+    case "test-controlled":
+      return "Paused for deterministic test control";
+    case "unavailable":
+      return "Unavailable";
+    case "ready":
+      return `Rolling ${view.snapshot?.frameIntervalSampleCount ?? 0} produced frames`;
+    case "collecting":
+      return `Collecting ${view.snapshot?.frameIntervalSampleCount ?? 0}/100 frames`;
+  }
 }
 
 const sceneLabels: Record<SceneId, string> = {
@@ -196,6 +269,9 @@ export function App() {
   const [error, setError] = useState("");
   const [frame, setFrame] = useState(0);
   const [stats, setStats] = useState<RuntimeStats | null>(null);
+  const [livePerformance, setLivePerformance] = useState<LivePerformanceView>(
+    () => initialLivePerformanceView(testMode),
+  );
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -209,6 +285,7 @@ export function App() {
     let inFlightBatches = 0;
     let currentOutstandingSubmissions = 0;
     let maximumOutstandingSubmissions = 0;
+    let runtimeFailureMessage: string | null = null;
     let solverSubmissions = 0;
     let renderSubmissions = 0;
     let readbackSubmissions = 0;
@@ -216,6 +293,11 @@ export function App() {
     let solver: JGS2GpuSolver | undefined;
     let renderer: SceneRenderer | undefined;
     let frameProfiler: GpuTimestampFrameProfiler | undefined;
+    let liveFrameProfiler: GpuTimestampLiveProfiler | undefined;
+    let liveVisibilityHandler: (() => void) | undefined;
+    let uncapturedErrorHandler:
+      | ((event: GPUUncapturedErrorEvent) => void)
+      | undefined;
     let installedHarness: JGS2TestHarness | undefined;
 
     const recordSubmission = (
@@ -281,13 +363,44 @@ export function App() {
         maxStep: 0.075,
       } as const;
       solver = await JGS2GpuSolver.create(device, gpuInput, solverSettings);
-      frameProfiler = new GpuTimestampFrameProfiler(device, "jgs2-e2e-frame");
+      frameProfiler = testMode
+        ? new GpuTimestampFrameProfiler(device, "jgs2-e2e-frame")
+        : undefined;
+      liveFrameProfiler = testMode
+        ? undefined
+        : new GpuTimestampLiveProfiler(device, "jgs2-live-frame");
       if (!active) {
-        frameProfiler.destroy();
+        frameProfiler?.destroy();
+        liveFrameProfiler?.destroy();
         solver.destroy();
         device.destroy();
         return;
       }
+      if (liveFrameProfiler) {
+        setLivePerformance({
+          status: "collecting",
+          snapshot: null,
+          gpuTimingStatus: liveFrameProfiler.featureSupported
+            ? "collecting"
+            : "unavailable",
+          gpuTimingReason: liveFrameProfiler.reason,
+          gpuSkippedFrameCount: 0,
+          updateSequence: 0,
+        });
+      }
+      uncapturedErrorHandler = (event) => {
+        const message = `Uncaptured WebGPU error: ${event.error.message}`;
+        runtimeFailureMessage = message;
+        liveFrameProfiler?.disable(message);
+        if (active && submissionsEnabled) {
+          submissionsEnabled = false;
+          cancelAnimationFrame(animationFrame);
+          setError(message);
+          setLivePerformance(unavailableLivePerformanceView(message));
+          setPhase("error");
+        }
+      };
+      device.addEventListener("uncapturederror", uncapturedErrorHandler);
 
       const inferredExtent = Math.max(
         scene.camera.eye[0] - scene.camera.target[0],
@@ -322,9 +435,16 @@ export function App() {
       recordSubmission("render");
       await renderer.renderAndWait(0);
       recordQueueDrained();
+      if (runtimeFailureMessage) {
+        throw new Error(runtimeFailureMessage);
+      }
       if (!active) {
+        if (uncapturedErrorHandler) {
+          device.removeEventListener("uncapturederror", uncapturedErrorHandler);
+        }
         renderer.destroy();
-        frameProfiler.destroy();
+        frameProfiler?.destroy();
+        liveFrameProfiler?.destroy();
         solver.destroy();
         device.destroy();
         return;
@@ -856,45 +976,153 @@ export function App() {
         };
         window.__jgs2Test = installedHarness;
       } else {
+        const liveCollector = new LivePerformanceCollector(
+          scene.settings.timestep,
+        );
         let previousTime = performance.now();
         let accumulator = 0;
+        let lastMetricsPublishMilliseconds = 0;
+        let metricsUpdateSequence = 0;
         const frameDuration = scene.settings.timestep * 1000;
+        const publishLiveMetrics = (now: number): void => {
+          for (const batch of liveFrameProfiler!.consumeCompletedBatches()) {
+            liveCollector.recordGpuTimingBatch({
+              frameMilliseconds: batch.gpuFrameMilliseconds,
+              simulationStepMilliseconds:
+                batch.gpuSimulationStepMilliseconds,
+              renderMilliseconds: batch.gpuRenderMilliseconds,
+            });
+          }
+          if (
+            now - lastMetricsPublishMilliseconds <
+            LIVE_METRICS_PUBLISH_INTERVAL_MILLISECONDS
+          ) {
+            return;
+          }
+          lastMetricsPublishMilliseconds = now;
+          metricsUpdateSequence += 1;
+          const snapshot = liveCollector.snapshot();
+          const gpuTimingStatus: LiveGpuTimingStatus =
+            !liveFrameProfiler!.featureSupported
+              ? "unavailable"
+              : liveFrameProfiler!.reason
+                ? "failed"
+                : snapshot.gpuSampleCount > 0
+                  ? "available"
+                  : "collecting";
+          if (active) {
+            setLivePerformance({
+              status:
+                snapshot.onePercentLowFramesPerSecond === null
+                  ? "collecting"
+                  : "ready",
+              snapshot,
+              gpuTimingStatus,
+              gpuTimingReason: liveFrameProfiler!.reason,
+              gpuSkippedFrameCount: liveFrameProfiler!.skippedFrameCount,
+              updateSequence: metricsUpdateSequence,
+            });
+          }
+        };
+        liveVisibilityHandler = () => {
+          if (
+            !active ||
+            !submissionsEnabled ||
+            document.visibilityState !== "visible"
+          ) {
+            return;
+          }
+          liveFrameProfiler!.resetMeasurementWindow();
+          liveCollector.reset();
+          accumulator = 0;
+          previousTime = performance.now();
+          lastMetricsPublishMilliseconds = 0;
+          publishLiveMetrics(previousTime);
+        };
+        document.addEventListener("visibilitychange", liveVisibilityHandler);
+        const stopAnimationWithError = (reason: unknown): void => {
+          if (!active || !submissionsEnabled) {
+            return;
+          }
+          submissionsEnabled = false;
+          cancelAnimationFrame(animationFrame);
+          const message = reason instanceof Error ? reason.message : String(reason);
+          setError(message);
+          setLivePerformance(unavailableLivePerformanceView(message));
+          setPhase("error");
+        };
         const animate = (now: number) => {
           if (!active || !submissionsEnabled) {
             return;
           }
-          accumulator = Math.min(
-            accumulator + Math.min(now - previousTime, 100),
-            frameDuration * 3,
-          );
-          previousTime = now;
-          if (accumulator >= frameDuration && inFlightBatches === 0) {
-            solver!.step();
-            recordSubmission("solver");
-            simulationFrame += 1;
-            accumulator -= frameDuration;
-            renderer!.render(simulationFrame);
-            recordSubmission("render");
-            inFlightBatches = 1;
-            void solver!.awaitIdle().then(
-              () => {
-                inFlightBatches = 0;
-                recordQueueDrained();
-              },
-              (reason: unknown) => {
-                inFlightBatches = 0;
-                recordQueueDrained();
-                if (active && submissionsEnabled) {
-                  submissionsEnabled = false;
-                  cancelAnimationFrame(animationFrame);
-                  setError(reason instanceof Error ? reason.message : String(reason));
-                  setPhase("error");
-                }
-              },
+          let timestampPlan: GpuTimestampLiveFramePlan | null = null;
+          let timestampPlanFinished = false;
+          try {
+            accumulator = Math.min(
+              accumulator + Math.min(now - previousTime, 100),
+              frameDuration * 3,
             );
-            if (simulationFrame % 12 === 0) {
-              setFrame(simulationFrame);
+            previousTime = now;
+            if (accumulator >= frameDuration && inFlightBatches === 0) {
+              timestampPlan = liveFrameProfiler!.beginFrame();
+              const simulationStart = performance.now();
+              if (timestampPlan) {
+                solver!.stepWithGpuTimestampWrites(
+                  timestampPlan.writes.simulation,
+                );
+              } else {
+                solver!.step();
+              }
+              const cpuSimulationSubmissionMilliseconds =
+                performance.now() - simulationStart;
+              recordSubmission("solver");
+              simulationFrame += 1;
+              accumulator -= frameDuration;
+              const renderStart = performance.now();
+              renderer!.render(
+                simulationFrame,
+                timestampPlan?.writes.render,
+                timestampPlan?.resolveAfterRender ?? undefined,
+              );
+              const cpuRenderSubmissionMilliseconds =
+                performance.now() - renderStart;
+              if (timestampPlan) {
+                liveFrameProfiler!.finishFrame(timestampPlan);
+                timestampPlanFinished = true;
+              }
+              recordSubmission("render");
+              liveCollector.recordProducedFrame(
+                now,
+                cpuSimulationSubmissionMilliseconds,
+                cpuRenderSubmissionMilliseconds,
+              );
+              inFlightBatches = 1;
+              void solver!.awaitIdle().then(
+                () => {
+                  inFlightBatches = 0;
+                  recordQueueDrained();
+                },
+                (reason: unknown) => {
+                  inFlightBatches = 0;
+                  recordQueueDrained();
+                  stopAnimationWithError(reason);
+                },
+              );
+              if (simulationFrame % 12 === 0) {
+                setFrame(simulationFrame);
+              }
             }
+            publishLiveMetrics(now);
+          } catch (reason) {
+            if (timestampPlan && !timestampPlanFinished) {
+              try {
+                liveFrameProfiler!.abortFrame(timestampPlan, reason);
+              } catch (abortReason) {
+                liveFrameProfiler!.disable(abortReason);
+              }
+            }
+            stopAnimationWithError(reason);
+            return;
           }
           animationFrame = requestAnimationFrame(animate);
         };
@@ -905,10 +1133,15 @@ export function App() {
         if (active) {
           submissionsEnabled = false;
           cancelAnimationFrame(animationFrame);
-          setError(`The WebGPU device was lost: ${info.message || info.reason}`);
+          const message = `The WebGPU device was lost: ${info.message || info.reason}`;
+          setError(message);
+          setLivePerformance(unavailableLivePerformanceView(message));
           setPhase("error");
         }
       }).catch(() => undefined);
+      if (runtimeFailureMessage) {
+        throw new Error(runtimeFailureMessage);
+      }
       setStats({
         vertices: gpuInput.vertexCount,
         tetrahedra: gpuInput.tetCount,
@@ -923,15 +1156,27 @@ export function App() {
     void initialize().catch((reason: unknown) => {
       if (active) {
         submissionsEnabled = false;
+        if (liveVisibilityHandler) {
+          document.removeEventListener("visibilitychange", liveVisibilityHandler);
+          liveVisibilityHandler = undefined;
+        }
+        if (gpuDevice && uncapturedErrorHandler) {
+          gpuDevice.removeEventListener("uncapturederror", uncapturedErrorHandler);
+          uncapturedErrorHandler = undefined;
+        }
         renderer?.destroy();
         renderer = undefined;
         frameProfiler?.destroy();
         frameProfiler = undefined;
+        liveFrameProfiler?.destroy();
+        liveFrameProfiler = undefined;
         solver?.destroy();
         solver = undefined;
         gpuDevice?.destroy();
         gpuDevice = undefined;
-        setError(reason instanceof Error ? reason.message : String(reason));
+        const message = reason instanceof Error ? reason.message : String(reason);
+        setError(message);
+        setLivePerformance(unavailableLivePerformanceView(message));
         setPhase("error");
       }
     });
@@ -940,15 +1185,36 @@ export function App() {
       active = false;
       submissionsEnabled = false;
       cancelAnimationFrame(animationFrame);
+      if (liveVisibilityHandler) {
+        document.removeEventListener("visibilitychange", liveVisibilityHandler);
+      }
+      if (gpuDevice && uncapturedErrorHandler) {
+        gpuDevice.removeEventListener("uncapturederror", uncapturedErrorHandler);
+      }
       if (installedHarness && window.__jgs2Test === installedHarness) {
         delete window.__jgs2Test;
       }
       renderer?.destroy();
       frameProfiler?.destroy();
+      liveFrameProfiler?.destroy();
       solver?.destroy();
       gpuDevice?.destroy();
     };
   }, [conservationFixture, parityMode, sceneId, testMode]);
+
+  const liveSnapshot = livePerformance.snapshot;
+  const formatGpuMetric = (
+    value: number | null | undefined,
+    fractionDigits: number,
+  ): string => {
+    if (livePerformance.gpuTimingStatus === "unavailable") {
+      return "N/A";
+    }
+    if (livePerformance.gpuTimingStatus === "failed") {
+      return "ERR";
+    }
+    return formatLiveNumber(value, fractionDigits);
+  };
 
   return (
     <main className="app-shell">
@@ -1017,6 +1283,177 @@ export function App() {
               height={540}
               aria-label={`Real-time WebGPU simulation: ${sceneDefinition.title}`}
             />
+            <section
+              className="performance-hud"
+              hidden={testMode}
+              aria-label="Live performance"
+              aria-live="off"
+              data-testid="live-performance"
+              data-status={livePerformance.status}
+              data-sample-count={
+                liveSnapshot?.frameIntervalSampleCount ?? 0
+              }
+              data-update-sequence={livePerformance.updateSequence}
+              data-gpu-timing={livePerformance.gpuTimingStatus}
+              data-gpu-sample-count={liveSnapshot?.gpuSampleCount ?? 0}
+              data-gpu-skipped-frame-count={
+                livePerformance.gpuSkippedFrameCount
+              }
+            >
+              <div className="performance-hud__header">
+                <span>
+                  <i aria-hidden="true" />
+                  Live performance
+                </span>
+                <small data-testid="live-performance-status">
+                  {livePerformanceStatusLabel(livePerformance)}
+                </small>
+              </div>
+              <div className="performance-hud__grid">
+                <div>
+                  <span>Produced FPS</span>
+                  <strong>
+                    <b data-testid="live-fps">
+                      {formatLiveNumber(
+                        liveSnapshot?.frameInterval?.averageFramesPerSecond,
+                        1,
+                      )}
+                    </b>
+                    <small> fps</small>
+                  </strong>
+                </div>
+                <div>
+                  <span>1% low</span>
+                  <strong>
+                    <b data-testid="live-one-percent-low">
+                      {formatLiveNumber(
+                        liveSnapshot?.onePercentLowFramesPerSecond,
+                        1,
+                      )}
+                    </b>
+                    <small> fps</small>
+                  </strong>
+                </div>
+                <div>
+                  <span>Frame interval</span>
+                  <strong>
+                    <b data-testid="live-frame-ms">
+                      {formatLiveNumber(
+                        liveSnapshot?.frameInterval?.meanMilliseconds,
+                        2,
+                      )}
+                    </b>
+                    <small> ms</small>
+                  </strong>
+                  <small data-testid="live-frame-p95-ms">
+                    p95 {formatLiveNumber(
+                      liveSnapshot?.frameInterval?.p95Milliseconds,
+                      2,
+                    )} ms
+                  </small>
+                </div>
+                <div>
+                  <span>Simulation rate</span>
+                  <strong>
+                    <b data-testid="live-simulation-rate">
+                      {formatLiveNumber(liveSnapshot?.simulationTimeRate, 2)}
+                    </b>
+                    <small>{"\u00d7 real time"}</small>
+                  </strong>
+                  <small>
+                    {formatLiveNumber(
+                      liveSnapshot?.deliveredSimulationStepsPerSecond,
+                      1,
+                    )} steps/s
+                  </small>
+                </div>
+                <div>
+                  <span>CPU submit / frame</span>
+                  <strong>
+                    <b data-testid="live-cpu-frame-ms">
+                      {formatLiveNumber(
+                        liveSnapshot?.cpuFrameSubmission?.meanMilliseconds,
+                        3,
+                      )}
+                    </b>
+                    <small> ms</small>
+                  </strong>
+                  <small className="performance-hud__split">
+                    step <b data-testid="live-cpu-step-ms">
+                      {formatLiveNumber(
+                        liveSnapshot?.cpuSimulationSubmission?.meanMilliseconds,
+                        3,
+                      )}
+                    </b> · render <b data-testid="live-cpu-render-ms">
+                      {formatLiveNumber(
+                        liveSnapshot?.cpuRenderSubmission?.meanMilliseconds,
+                        3,
+                      )}
+                    </b>
+                  </small>
+                </div>
+                <div>
+                  <span>GPU frame span</span>
+                  <strong>
+                    <b data-testid="live-gpu-frame-ms">
+                      {formatGpuMetric(
+                        liveSnapshot?.gpuFrame?.meanMilliseconds,
+                        3,
+                      )}
+                    </b>
+                    <small> ms</small>
+                  </strong>
+                  <small data-testid="live-gpu-frame-p95-ms">
+                    p95 {formatGpuMetric(
+                      liveSnapshot?.gpuFrame?.p95Milliseconds,
+                      3,
+                    )} ms
+                  </small>
+                </div>
+                <div>
+                  <span>GPU / step</span>
+                  <strong>
+                    <b data-testid="live-gpu-step-ms">
+                      {formatGpuMetric(
+                        liveSnapshot?.gpuSimulationStep?.meanMilliseconds,
+                        3,
+                      )}
+                    </b>
+                    <small> ms</small>
+                  </strong>
+                  <small>timestamp-query</small>
+                </div>
+                <div>
+                  <span>GPU / render</span>
+                  <strong>
+                    <b data-testid="live-gpu-render-ms">
+                      {formatGpuMetric(
+                        liveSnapshot?.gpuRender?.meanMilliseconds,
+                        3,
+                      )}
+                    </b>
+                    <small> ms</small>
+                  </strong>
+                  <small
+                    title={livePerformance.gpuTimingReason ?? undefined}
+                  >
+                    {livePerformance.gpuTimingStatus === "available"
+                      ? `${liveSnapshot?.gpuSampleCount ?? 0}-sample window${
+                          livePerformance.gpuSkippedFrameCount > 0
+                            ? ` \u00b7 ${livePerformance.gpuSkippedFrameCount} total untimed`
+                            : ""
+                        }`
+                      : livePerformance.gpuTimingStatus === "unavailable"
+                        ? "timestamp-query unavailable"
+                        : livePerformance.gpuTimingStatus === "failed"
+                          ? "timestamp profiling failed"
+                        : livePerformance.gpuTimingStatus === "paused"
+                          ? "paused"
+                          : "collecting"}
+                  </small>
+                </div>
+              </div>
+            </section>
             <div className="canvas-badge canvas-badge--top">
               <span>Implicit Euler</span>
               <span>JGS2 Jacobi</span>

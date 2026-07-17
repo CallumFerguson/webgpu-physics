@@ -117,6 +117,24 @@ submits at most one simulation step per animation callback, so a `1/120`-second
 scene on a 60 Hz display needs a future catch-up/time-rate gate before it can be
 called real-time in the application.
 
+Normal non-test scene URLs separately expose the production scheduler through
+the live canvas HUD. Its 300-sample rolling window includes only animation
+callbacks that actually submit a simulation step and render. It reports cadence
+FPS and frame intervals, simulation steps per second and simulated-time/wall-
+time rate, and explicit CPU command-encoding/submission durations. The 1% low
+appears after 100 frame-interval samples. When `timestamp-query` is enabled,
+simulation and render passes write four timestamps per produced frame into one
+of three rotating query slots. A 60-frame batch is resolved by the final render
+command buffer and mapped asynchronously once; rendering continues without a
+per-frame timestamp map or any profiler-added queue drain, and skips
+instrumentation if every readback slot is busy. The current production
+scheduler independently retains its existing one-frame queue drain, so the HUD
+reports that serialized production cadence rather than a multi-frame-in-flight
+pipeline. This live view is an observational aid rather than a performance gate.
+Deterministic `?test=1` pages pause it so exact-frame tests remain controlled.
+Returning to a visible tab starts a fresh CPU, cadence, and GPU timing epoch;
+completed or in-flight timestamp batches from the prior epoch are discarded.
+
 The reported baseline selectors must all be present. Any skipped baseline test
 must have its stable ID in `allowedSkips`, and the skip condition must match.
 Because the v1 manifest contains no allowed skips, any baseline skip is an
@@ -180,6 +198,21 @@ final isolated stress baseline recorded 270.3 serialized average FPS, 205.5
 FPS 1% low, 3.700 ms wall mean, 4.500 ms diagnostic wall p95, 0.146 ms CPU
 submission per frame, and 1.462 ms GPU mean per frame; its sustained-wall and
 GPU-p95 compute assessment passed.
+
+The production live-performance-HUD gate then passed all 159 unit tests, the
+production build, frozen selector verification at 26/159 unit and 7/18 E2E,
+and all 18 hardware E2E tests in one retry-free invocation with zero skips or
+errors. The finalized JSON run duration was 252,466.729 ms. The new production
+test requires internally consistent produced FPS, frame interval, simulation
+time rate, and CPU-submit values; requires real GPU samples on a
+`timestamp-query` adapter; verifies a fresh timing epoch after tab visibility
+resumes; and saves inspected desktop and 390-pixel mobile HUD screenshots.
+Deterministic pages prove the HUD stays hidden, paused, and sample-free. The
+final isolated stress report recorded 269.8 serialized average FPS, 198.0 FPS
+1% low, 3.706/4.500 ms wall mean/p95, 0.132 ms CPU submission, and 1.434 ms GPU
+frame span; both necessary compute assessments passed. The E2E-only Vite server
+disables unused HMR connections so repeated deterministic reloads do not add
+WebSocket resource pressure; `npm run dev` retains normal HMR.
 
 ## Precomputation artifacts
 

@@ -204,7 +204,7 @@ test("renders a useful DOM error when WebGPU is unavailable", async ({ page }) =
     });
   });
 
-  await page.goto("/?scene=minimal&test=1", { waitUntil: "domcontentloaded" });
+  await page.goto("/?scene=minimal", { waitUntil: "domcontentloaded" });
 
   expect(await page.evaluate(() => navigator.gpu === undefined)).toBe(true);
   const root = page.locator("#root");
@@ -213,6 +213,158 @@ test("renders a useful DOM error when WebGPU is unavailable", async ({ page }) =
   await expect(root).toContainText(
     /unavailable|not supported|requires|required|error|failed/i,
   );
+  const performanceHud = page.getByTestId("live-performance");
+  await expect(performanceHud).toBeVisible();
+  await expect(performanceHud).toHaveAttribute("data-status", "unavailable");
+  await expect(performanceHud).toHaveAttribute("data-sample-count", "0");
+  await expect(performanceHud).toHaveAttribute(
+    "data-gpu-timing",
+    "unavailable",
+  );
+  await expect(page.getByTestId("live-fps")).toHaveText("\u2014");
+  await expect(page.getByTestId("live-cpu-step-ms")).toHaveText("\u2014");
+  await expect(page.getByTestId("live-gpu-step-ms")).toHaveText("N/A");
+});
+
+test("shows live FPS and CPU/GPU timings in a production scene", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(90_000);
+  await page.goto("/?scene=minimal", { waitUntil: "domcontentloaded" });
+  const adapterFeatures = await requireHardwareWebGPU(page, testInfo);
+
+  const performanceHud = page.getByTestId("live-performance");
+  await expect(performanceHud).toBeVisible();
+  await expect
+    .poll(
+      async () =>
+        Number((await performanceHud.getAttribute("data-sample-count")) ?? 0),
+      { timeout: 30_000 },
+    )
+    .toBeGreaterThanOrEqual(100);
+  await expect(performanceHud).toHaveAttribute("data-status", "ready");
+
+  const readMetric = async (testId: string): Promise<number> => {
+    const text = await page.getByTestId(testId).textContent();
+    const value = Number(text);
+    expect(Number.isFinite(value), `${testId} must be finite`).toBe(true);
+    return value;
+  };
+  const averageFps = await readMetric("live-fps");
+  const onePercentLowFps = await readMetric("live-one-percent-low");
+  const frameMilliseconds = await readMetric("live-frame-ms");
+  const simulationRate = await readMetric("live-simulation-rate");
+  const cpuFrameMilliseconds = await readMetric("live-cpu-frame-ms");
+  const cpuStepMilliseconds = await readMetric("live-cpu-step-ms");
+  const cpuRenderMilliseconds = await readMetric("live-cpu-render-ms");
+  expect(averageFps).toBeGreaterThan(0);
+  expect(onePercentLowFps).toBeGreaterThan(0);
+  expect(onePercentLowFps).toBeLessThanOrEqual(averageFps);
+  expect(frameMilliseconds).toBeGreaterThan(0);
+  expect(simulationRate).toBeGreaterThan(0);
+  expect(cpuFrameMilliseconds).toBeGreaterThanOrEqual(0);
+  expect(cpuStepMilliseconds).toBeGreaterThanOrEqual(0);
+  expect(cpuRenderMilliseconds).toBeGreaterThanOrEqual(0);
+  expect(Math.abs(averageFps - 1000 / frameMilliseconds)).toBeLessThan(0.2);
+  expect(Math.abs(simulationRate - averageFps / 30)).toBeLessThan(0.02);
+  expect(
+    Math.abs(
+      cpuFrameMilliseconds -
+        (cpuStepMilliseconds + cpuRenderMilliseconds),
+    ),
+  ).toBeLessThan(0.004);
+
+  if (adapterFeatures.includes("timestamp-query")) {
+    await expect
+      .poll(async () => performanceHud.getAttribute("data-gpu-timing"), {
+        timeout: 15_000,
+      })
+      .toBe("available");
+    expect(
+      Number(
+        (await performanceHud.getAttribute("data-gpu-sample-count")) ?? 0,
+      ),
+    ).toBeGreaterThanOrEqual(60);
+    expect(await readMetric("live-gpu-frame-ms")).toBeGreaterThanOrEqual(0);
+    expect(await readMetric("live-gpu-step-ms")).toBeGreaterThanOrEqual(0);
+    expect(await readMetric("live-gpu-render-ms")).toBeGreaterThanOrEqual(0);
+  } else {
+    await expect(performanceHud).toHaveAttribute(
+      "data-gpu-timing",
+      "unavailable",
+    );
+    await expect(page.getByTestId("live-gpu-frame-ms")).toHaveText("N/A");
+    await expect(page.getByTestId("live-gpu-step-ms")).toHaveText("N/A");
+    await expect(page.getByTestId("live-gpu-render-ms")).toHaveText("N/A");
+  }
+
+  const firstUpdate = Number(
+    (await performanceHud.getAttribute("data-update-sequence")) ?? 0,
+  );
+  await expect
+    .poll(
+      async () =>
+        Number(
+          (await performanceHud.getAttribute("data-update-sequence")) ?? 0,
+        ),
+    )
+    .toBeGreaterThan(firstUpdate);
+
+  const screenshotPath = testInfo.outputPath("live-performance-hud.png");
+  const screenshot = await page.locator(".canvas-shell").screenshot({
+    path: screenshotPath,
+    animations: "disabled",
+    caret: "hide",
+    scale: "css",
+  });
+  expect(screenshot.byteLength).toBeGreaterThan(256);
+  const decoded = decodePng(screenshot);
+  expect(decoded.width).toBeGreaterThanOrEqual(128);
+  expect(decoded.height).toBeGreaterThanOrEqual(128);
+  await testInfo.attach("live-performance-hud.png", {
+    body: screenshot,
+    contentType: "image/png",
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const canvasBounds = await page.getByTestId("gpu-canvas").boundingBox();
+  const hudBounds = await performanceHud.boundingBox();
+  expect(canvasBounds).not.toBeNull();
+  expect(hudBounds).not.toBeNull();
+  expect(hudBounds!.y).toBeGreaterThanOrEqual(
+    canvasBounds!.y + canvasBounds!.height - 1,
+  );
+  const mobileScreenshot = await page.locator(".canvas-shell").screenshot({
+    path: testInfo.outputPath("live-performance-hud-mobile.png"),
+    animations: "disabled",
+    caret: "hide",
+    scale: "css",
+  });
+  expect(mobileScreenshot.byteLength).toBeGreaterThan(256);
+  await testInfo.attach("live-performance-hud-mobile.png", {
+    body: mobileScreenshot,
+    contentType: "image/png",
+  });
+
+  const updateBeforeVisibilityReset = Number(
+    (await performanceHud.getAttribute("data-update-sequence")) ?? 0,
+  );
+  await page.evaluate(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect
+    .poll(
+      async () =>
+        Number(
+          (await performanceHud.getAttribute("data-update-sequence")) ?? 0,
+        ),
+    )
+    .toBeGreaterThan(updateBeforeVisibilityReset);
+  expect(
+    Number((await performanceHud.getAttribute("data-sample-count")) ?? 0),
+  ).toBeLessThan(20);
+  await expect(performanceHud).toHaveAttribute("data-status", "collecting");
+  await expect(performanceHud).toHaveAttribute("data-gpu-sample-count", "0");
 });
 
 test("parity mode disables project stabilizers and accepts an even exact iteration count", async ({
@@ -223,6 +375,16 @@ test("parity mode disables project stabilizers and accepts an even exact iterati
   });
   await requireHardwareWebGPU(page, testInfo);
   await waitForTestHarness(page);
+
+  const deterministicHud = page.getByTestId("live-performance");
+  await expect(deterministicHud).toBeHidden();
+  await expect(deterministicHud).toHaveAttribute(
+    "data-status",
+    "test-controlled",
+  );
+  await expect(deterministicHud).toHaveAttribute("data-gpu-timing", "paused");
+  await expect(deterministicHud).toHaveAttribute("data-sample-count", "0");
+  await expect(deterministicHud).toHaveAttribute("data-update-sequence", "0");
 
   const initial = await readDiagnostics(page);
   assertDiagnostics(initial, 0, "minimal-parity");
@@ -253,6 +415,8 @@ test("parity mode disables project stabilizers and accepts an even exact iterati
   expect(after.lastStepIterations).toBe(2);
   expect(after.runtime.parityMode).toBe(true);
   expect(after.finite).toBe(true);
+  await expect(deterministicHud).toHaveAttribute("data-sample-count", "0");
+  await expect(deterministicHud).toHaveAttribute("data-update-sequence", "0");
 });
 
 test("P0-EC-10/11: a force-free body conserves momentum for 10 seconds", async ({
@@ -684,7 +848,7 @@ test.describe("long-run settled body stability", () => {
 async function requireHardwareWebGPU(
   page: Page,
   testInfo: TestInfo,
-): Promise<void> {
+): Promise<readonly string[]> {
   const support = await page.evaluate(async () => {
     const gpu = navigator.gpu;
 
@@ -718,6 +882,7 @@ async function requireHardwareWebGPU(
         device: adapter.info.device,
         description: adapter.info.description,
         isFallbackAdapter: adapter.info.isFallbackAdapter,
+        features: [...adapter.features].sort(),
       },
     };
   });
@@ -762,6 +927,7 @@ async function requireHardwareWebGPU(
   console.log(
     `Hardware WebGPU adapter: ${adapterDescription || "details unavailable"}`,
   );
+  return support.adapter.features;
 }
 
 async function waitForTestHarness(page: Page): Promise<void> {

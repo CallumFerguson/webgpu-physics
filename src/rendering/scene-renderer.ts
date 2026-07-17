@@ -1,4 +1,5 @@
 import { sceneShader } from "./scene-shader";
+import type { GpuTimestampQueryResolve } from "../simulation/gpu";
 
 export interface SceneRenderInput {
   readonly restPositions: Float32Array;
@@ -21,6 +22,36 @@ export interface SceneRenderTimestampWrites {
   readonly querySet: GPUQuerySet;
   readonly startWriteIndex: number;
   readonly endWriteIndex: number;
+}
+
+export function encodeSceneTimestampResolve(
+  encoder: GPUCommandEncoder,
+  resolve: GpuTimestampQueryResolve,
+): void {
+  if (
+    !Number.isSafeInteger(resolve.queryCount) ||
+    resolve.queryCount < 1 ||
+    resolve.byteLength !==
+      resolve.queryCount * BigUint64Array.BYTES_PER_ELEMENT
+  ) {
+    throw new RangeError(
+      "Scene timestamp resolves require a positive query count and exact byte length.",
+    );
+  }
+  encoder.resolveQuerySet(
+    resolve.querySet,
+    0,
+    resolve.queryCount,
+    resolve.resolveBuffer,
+    0,
+  );
+  encoder.copyBufferToBuffer(
+    resolve.resolveBuffer,
+    0,
+    resolve.readbackBuffer,
+    0,
+    resolve.byteLength,
+  );
 }
 
 function normalize(vector: readonly number[]): [number, number, number] {
@@ -328,6 +359,7 @@ export class SceneRenderer {
   render(
     frame = this.frame,
     timestampWrites?: SceneRenderTimestampWrites,
+    timestampResolve?: GpuTimestampQueryResolve,
   ): void {
     this.frame = frame;
     this.writeUniforms(this.positionOffsetVertices);
@@ -370,6 +402,14 @@ export class SceneRenderer {
     pass.setPipeline(this.restEdgePipeline);
     pass.drawIndexed(this.input.surfaceEdges.length);
     pass.end();
+    if (timestampResolve) {
+      if (!timestampWrites || timestampResolve.querySet !== timestampWrites.querySet) {
+        throw new Error(
+          "A render timestamp resolve must use the same query set as the render pass.",
+        );
+      }
+      encodeSceneTimestampResolve(encoder, timestampResolve);
+    }
     this.device.queue.submit([encoder.finish()]);
   }
 

@@ -8,6 +8,9 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       host: "127.0.0.1",
       port,
       strictPort: true,
+      // Deterministic E2E pages reload frequently but never hot-reload source.
+      // Avoid retaining an unnecessary WebSocket for every browser lifecycle.
+      hmr: false,
     },
   });
   await server.listen();
