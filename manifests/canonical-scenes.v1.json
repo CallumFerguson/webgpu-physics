@@ -259,7 +259,7 @@
         "parityMode": false
       },
       "solver": {
-        "iterations": 7,
+        "iterations": 5,
         "schedule": "jacobi",
         "cubature": { "mode": "selected", "samplesPerSubproblem": 4 }
       },

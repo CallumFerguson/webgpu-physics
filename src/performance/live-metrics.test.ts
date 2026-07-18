@@ -46,6 +46,7 @@ describe("live production performance metrics", () => {
       frameMilliseconds: [2, 3, 4],
       simulationStepMilliseconds: [1, 2, 3],
       renderMilliseconds: [0.25, 0.5, 0.75],
+      simulationStepCounts: [1, 1, 1],
     });
 
     const snapshot = collector.snapshot();
@@ -56,6 +57,36 @@ describe("live production performance metrics", () => {
     expect(snapshot.gpuFrame).not.toHaveProperty("averageFramesPerSecond");
   });
 
+  it("reports simulation throughput independently of rendered frame rate", () => {
+    const collector = new LivePerformanceCollector(1 / 120, 120, 2);
+    for (let frame = 0; frame <= 4; frame += 1) {
+      collector.recordProducedFrame(frame * 16, 0.4, 0.1, 2);
+    }
+
+    const snapshot = collector.snapshot();
+    expect(snapshot.frameInterval?.averageFramesPerSecond).toBe(62.5);
+    expect(snapshot.deliveredSimulationStepsPerSecond).toBe(125);
+    expect(snapshot.simulationTimeRate).toBeCloseTo(125 / 120, 12);
+  });
+
+  it("weights batched CPU and GPU timings by simulated step count", () => {
+    const collector = new LivePerformanceCollector(1 / 120, 10, 2);
+    collector.recordProducedFrame(0, 3, 1, 3);
+    collector.recordGpuTimingBatch({
+      frameMilliseconds: [4, 9],
+      simulationStepMilliseconds: [3, 8],
+      renderMilliseconds: [1, 1],
+      simulationStepCounts: [1, 4],
+    });
+
+    const snapshot = collector.snapshot();
+    expect(snapshot.cpuFrameSubmission?.meanMilliseconds).toBe(4);
+    expect(snapshot.cpuSimulationSubmission?.meanMilliseconds).toBe(1);
+    expect(snapshot.gpuFrame?.meanMilliseconds).toBe(6.5);
+    expect(snapshot.gpuSimulationStep?.meanMilliseconds).toBeCloseTo(11 / 5, 12);
+    expect(snapshot.gpuRender?.meanMilliseconds).toBe(1);
+  });
+
   it("resets cleanly and rejects malformed or non-monotonic samples", () => {
     const collector = new LivePerformanceCollector(1 / 60, 10, 2);
     collector.recordProducedFrame(10, 1, 1);
@@ -63,13 +94,25 @@ describe("live production performance metrics", () => {
     expect(() => collector.recordProducedFrame(11, -1, 1)).toThrow(
       /nonnegative/,
     );
+    expect(() => collector.recordProducedFrame(11, 1, 1, 0)).toThrow(
+      /positive safe integer/,
+    );
     expect(() =>
       collector.recordGpuTimingBatch({
         frameMilliseconds: [1],
         simulationStepMilliseconds: [],
         renderMilliseconds: [1],
+        simulationStepCounts: [1],
       }),
     ).toThrow(/matching nonempty/);
+    expect(() =>
+      collector.recordGpuTimingBatch({
+        frameMilliseconds: [1],
+        simulationStepMilliseconds: [1],
+        renderMilliseconds: [1],
+        simulationStepCounts: [0],
+      }),
+    ).toThrow(/positive safe integers/);
 
     collector.reset();
     expect(collector.snapshot()).toMatchObject({

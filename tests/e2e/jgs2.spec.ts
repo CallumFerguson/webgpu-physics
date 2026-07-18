@@ -139,7 +139,7 @@ interface JGS2TestHarness {
     readonly readbackSubmissions: number;
     readonly testBatchFrameLimit: number;
     readonly solverBatchFrameLimit: number;
-    readonly productionStepsPerSubmission: 1;
+    readonly productionMaximumStepsPerSubmission: 2;
   };
   focusOnPrimaryBody(): Promise<Vec3>;
   runForceFreeCorpus(options?: Phase0ForceFreeCorpusOptions): Promise<
@@ -582,7 +582,7 @@ test(FORCE_FREE_TRAJECTORY_TEST_TITLE, async ({
   expect(submissionPolicy.solverBatchFrameLimit).toBeGreaterThanOrEqual(
     submissionPolicy.testBatchFrameLimit,
   );
-  expect(submissionPolicy.productionStepsPerSubmission).toBe(1);
+  expect(submissionPolicy.productionMaximumStepsPerSubmission).toBe(2);
   await recordScenePerformance(page, testInfo, sceneId);
 });
 

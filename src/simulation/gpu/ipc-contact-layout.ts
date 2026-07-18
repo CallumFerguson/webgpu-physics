@@ -4,7 +4,7 @@ export const IPC_CONTACT_WORD_BYTES = 4;
 export const IPC_CONTACT_VEC4_WORDS = 4;
 /** Counts/control followed by runtime contact parameters. */
 export const IPC_CONTACT_GLOBAL_VEC4S = 2;
-export const IPC_CONTACT_CANDIDATE_VEC4S = 5;
+export const IPC_CONTACT_CANDIDATE_VEC4S = 9;
 export const IPC_CONTACT_GLOBAL_WORDS =
   IPC_CONTACT_GLOBAL_VEC4S * IPC_CONTACT_VEC4_WORDS;
 export const IPC_CONTACT_CANDIDATE_WORDS =
@@ -32,6 +32,10 @@ export const IPC_CONTACT_CANDIDATE_VEC4_OFFSETS = {
   laggedNormal: 2,
   laggedWeights: 3,
   scratch: 4,
+  sourceContact: 5,
+  sourceWeights: 6,
+  targetContact: 7,
+  targetWeights: 8,
 } as const;
 
 /** u32 fields in the candidate meta vec4. */
@@ -62,6 +66,15 @@ export const IPC_CONTACT_TYPE_VERTEX_TRIANGLE = 0;
 export const IPC_CONTACT_TYPE_EDGE_EDGE = 1;
 export const IPC_CONTACT_CANDIDATE_ENABLED = 1;
 
+export const IPC_CONTACT_INCIDENCE_MAGIC = 0x4950_4331;
+export const IPC_CONTACT_INCIDENCE_HEADER_WORDS = 4;
+export const IPC_CONTACT_INCIDENCE_HEADER_OFFSETS = {
+  magic: 0,
+  vertexCount: 1,
+  candidateCount: 2,
+  incidenceCount: 3,
+} as const;
+
 export interface PackedIpcContactBuffer {
   readonly buffer: ArrayBuffer;
   /** u32 interpretation for indices, counts, and candidate metadata. */
@@ -72,6 +85,14 @@ export interface PackedIpcContactBuffer {
   readonly candidateCount: number;
   readonly vertexTriangleCount: number;
   readonly edgeEdgeCount: number;
+}
+
+export interface PackedIpcIncidentCandidateAdjacency {
+  /** Versioned CSR suffix appended to the tetrahedron adjacency buffer. */
+  readonly words: Uint32Array;
+  readonly vertexCount: number;
+  readonly candidateCount: number;
+  readonly incidenceCount: number;
 }
 
 const MAX_U32 = 0xffff_ffff;
@@ -156,13 +177,92 @@ export function validateIpcContactCandidatesForGpu(
 }
 
 /**
+ * Packs a deterministic vertex-to-contact-candidate CSR suffix.
+ *
+ * The existing tetrahedron adjacency remains an unchanged prefix. This
+ * versioned suffix lets vertex-local GPU work visit only incident candidates
+ * while candidate-parallel IPC passes continue to consume the original list.
+ */
+export function packIpcIncidentCandidateAdjacency(
+  vertexCount: number,
+  candidates: StaticIpcContactCandidates,
+): PackedIpcIncidentCandidateAdjacency {
+  requireU32(vertexCount, "IPC vertex count");
+  validateIpcContactCandidatesForGpu(candidates);
+
+  const candidateCount =
+    candidates.vertexTriangleCount + candidates.edgeEdgeCount;
+  const incidenceCount = candidateCount * IPC_CONTACT_VEC4_WORDS;
+  requireU32(incidenceCount, "IPC vertex-candidate incidence count");
+
+  if (candidateCount === 0) {
+    return {
+      words: new Uint32Array(0),
+      vertexCount,
+      candidateCount,
+      incidenceCount,
+    };
+  }
+
+  const rowOffsetWords = vertexCount + 1;
+  requireU32(rowOffsetWords, "IPC vertex-candidate row-offset count");
+  // The mutable tail mirrors the static row capacities: one active count per
+  // vertex followed by up to one active id for every static incidence.
+  const activeScratchWords = vertexCount + incidenceCount;
+  requireU32(activeScratchWords, "IPC active-incidence scratch word count");
+  const packedWordCount =
+    IPC_CONTACT_INCIDENCE_HEADER_WORDS +
+    rowOffsetWords +
+    incidenceCount +
+    activeScratchWords;
+  requireU32(packedWordCount, "Packed IPC incidence word count");
+
+  const words = new Uint32Array(packedWordCount);
+  words[IPC_CONTACT_INCIDENCE_HEADER_OFFSETS.magic] =
+    IPC_CONTACT_INCIDENCE_MAGIC;
+  words[IPC_CONTACT_INCIDENCE_HEADER_OFFSETS.vertexCount] = vertexCount;
+  words[IPC_CONTACT_INCIDENCE_HEADER_OFFSETS.candidateCount] = candidateCount;
+  words[IPC_CONTACT_INCIDENCE_HEADER_OFFSETS.incidenceCount] = incidenceCount;
+
+  const rowOffsetsBase = IPC_CONTACT_INCIDENCE_HEADER_WORDS;
+  const candidateIdsBase = rowOffsetsBase + rowOffsetWords;
+  for (const vertex of candidates.packedIndices) {
+    if (vertex >= vertexCount) {
+      throw new RangeError(
+        `IPC candidate references vertex ${vertex}, but vertexCount is ${vertexCount}.`,
+      );
+    }
+    words[rowOffsetsBase + vertex + 1] += 1;
+  }
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    words[rowOffsetsBase + vertex + 1] += words[rowOffsetsBase + vertex]!;
+  }
+
+  const cursors = words.slice(
+    rowOffsetsBase,
+    rowOffsetsBase + vertexCount,
+  );
+  for (let candidate = 0; candidate < candidateCount; candidate += 1) {
+    const packedBase = candidate * IPC_CONTACT_VEC4_WORDS;
+    for (let lane = 0; lane < IPC_CONTACT_VEC4_WORDS; lane += 1) {
+      const vertex = candidates.packedIndices[packedBase + lane]!;
+      words[candidateIdsBase + cursors[vertex]!] = candidate;
+      cursors[vertex] += 1;
+    }
+  }
+
+  return { words, vertexCount, candidateCount, incidenceCount };
+}
+
+/**
  * Packs static IPC candidates into a storage-buffer-ready mixed u32/f32 ABI.
  *
  * Word layout:
  * - global u32 vec4: total count, VT count, EE count, safe-step alpha;
  * - global f32 vec4: minimum distance, friction, smoothing, step safety;
- * - five vec4s per candidate: indices, metadata, lagged normal/force,
- *   lagged weights, and per-iteration scratch.
+ * - nine vec4s per candidate: indices, metadata, lagged normal/force,
+ *   lagged weights, per-iteration scratch, and compact source/target contact
+ *   caches (normal/distance plus closest-feature weights).
  *
  * Lagged records start at zero. Scratch safe-alpha starts at the neutral value
  * one while its valid flag remains zero; GPU contact passes replace the scratch
@@ -216,6 +316,18 @@ export function packIpcContactBuffer(
       recordBase +
       IPC_CONTACT_CANDIDATE_VEC4_OFFSETS.scratch * IPC_CONTACT_VEC4_WORDS;
     floats[scratchBase + IPC_CONTACT_SCRATCH_WORD_OFFSETS.safeAlpha] = 1;
+    floats[
+      recordBase +
+        IPC_CONTACT_CANDIDATE_VEC4_OFFSETS.sourceContact *
+          IPC_CONTACT_VEC4_WORDS +
+        3
+    ] = -1;
+    floats[
+      recordBase +
+        IPC_CONTACT_CANDIDATE_VEC4_OFFSETS.targetContact *
+          IPC_CONTACT_VEC4_WORDS +
+        3
+    ] = -1;
   }
 
   return {

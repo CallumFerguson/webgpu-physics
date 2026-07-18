@@ -508,6 +508,7 @@ export interface GpuTimestampLiveBatch {
   readonly gpuFrameMilliseconds: readonly number[];
   readonly gpuSimulationStepMilliseconds: readonly number[];
   readonly gpuRenderMilliseconds: readonly number[];
+  readonly simulationStepCounts: readonly number[];
   readonly timestampMapCount: 1;
 }
 
@@ -519,6 +520,7 @@ interface GpuTimestampLiveSlot {
   readonly readback: GPUBuffer;
   state: GpuTimestampLiveSlotState;
   frameCount: number;
+  readonly simulationStepCounts: number[];
   generation: number;
 }
 
@@ -532,8 +534,11 @@ export class GpuTimestampLiveProfiler {
   private readonly slots: GpuTimestampLiveSlot[];
   private readonly completedBatches: GpuTimestampLiveBatch[] = [];
   private recordingSlotIndex: number | null = null;
-  private pendingPlan: { readonly token: number; readonly slotIndex: number } | null =
-    null;
+  private pendingPlan: {
+    readonly token: number;
+    readonly slotIndex: number;
+    readonly simulationStepCount: number;
+  } | null = null;
   private nextToken = 1;
   private mapCount = 0;
   private skippedFrames = 0;
@@ -585,8 +590,11 @@ export class GpuTimestampLiveProfiler {
     return this.skippedFrames;
   }
 
-  beginFrame(): GpuTimestampLiveFramePlan | null {
+  beginFrame(simulationStepCount: number): GpuTimestampLiveFramePlan | null {
     this.assertUsable();
+    if (!Number.isSafeInteger(simulationStepCount) || simulationStepCount < 1) {
+      throw new RangeError("simulationStepCount must be a positive safe integer.");
+    }
     if (!this.available) {
       return null;
     }
@@ -604,6 +612,7 @@ export class GpuTimestampLiveProfiler {
       const slot = this.slots[availableSlotIndex]!;
       slot.state = "recording";
       slot.frameCount = 0;
+      slot.simulationStepCounts.length = 0;
       slot.generation = this.measurementGeneration;
       this.recordingSlotIndex = availableSlotIndex;
     }
@@ -640,7 +649,7 @@ export class GpuTimestampLiveProfiler {
           }
         : null,
     };
-    this.pendingPlan = { token, slotIndex };
+    this.pendingPlan = { token, slotIndex, simulationStepCount };
     return plan;
   }
 
@@ -653,9 +662,10 @@ export class GpuTimestampLiveProfiler {
     ) {
       throw new Error("The live GPU timestamp frame plan is stale or unknown.");
     }
-    const slotIndex = this.pendingPlan.slotIndex;
+    const { slotIndex, simulationStepCount } = this.pendingPlan;
     const slot = this.slots[slotIndex]!;
     this.pendingPlan = null;
+    slot.simulationStepCounts.push(simulationStepCount);
     slot.frameCount += 1;
     if (slot.frameCount < this.batchFrameCount) {
       if (plan.resolveAfterRender !== null) {
@@ -690,6 +700,7 @@ export class GpuTimestampLiveProfiler {
       const slot = this.slots[this.recordingSlotIndex]!;
       slot.state = "idle";
       slot.frameCount = 0;
+      slot.simulationStepCounts.length = 0;
       slot.generation = this.measurementGeneration;
       this.recordingSlotIndex = null;
     }
@@ -710,6 +721,7 @@ export class GpuTimestampLiveProfiler {
     this.recordingSlotIndex = null;
     slot.state = "idle";
     slot.frameCount = 0;
+    slot.simulationStepCounts.length = 0;
     this.disable(
       reason instanceof Error
         ? `Live GPU timestamp frame aborted: ${reason.message}`
@@ -772,6 +784,7 @@ export class GpuTimestampLiveProfiler {
       }),
       state: "idle",
       frameCount: 0,
+      simulationStepCounts: [],
       generation: this.measurementGeneration,
     };
   }
@@ -810,12 +823,19 @@ export class GpuTimestampLiveProfiler {
         !this.destroyed &&
         batchGeneration === this.measurementGeneration
       ) {
+        const simulationStepCounts = slot.simulationStepCounts.slice();
+        if (simulationStepCounts.length !== this.batchFrameCount) {
+          throw new Error(
+            "Live GPU timestamp step-count metadata does not match its frame batch.",
+          );
+        }
         this.completedBatches.push({
           feature: GPU_TIMESTAMP_FEATURE,
           frameCount: this.batchFrameCount,
           gpuFrameMilliseconds,
           gpuSimulationStepMilliseconds,
           gpuRenderMilliseconds,
+          simulationStepCounts,
           timestampMapCount: 1,
         });
       }
@@ -834,6 +854,7 @@ export class GpuTimestampLiveProfiler {
       if (!this.destroyed) {
         slot.state = "idle";
         slot.frameCount = 0;
+        slot.simulationStepCounts.length = 0;
       }
     }
   }

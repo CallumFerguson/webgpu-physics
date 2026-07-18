@@ -12,6 +12,10 @@ import {
   type LivePerformanceSnapshot,
 } from "./performance";
 import {
+  PeriodicDiagnosticTracker,
+  QueueSubmissionTracker,
+} from "./performance/production-loop-state";
+import {
   DEFAULT_SCENE_ID,
   FORCE_FREE_CONSERVATION_FIXTURE_ID,
   PHASE0_FORCE_FREE_CORPUS_CASE_COUNT,
@@ -102,6 +106,7 @@ interface JGS2TestConfiguration {
   readonly ipcFrictionCoefficient: number;
   readonly ipcFrictionVelocityEpsilon: number;
   readonly ipcStepSafety: number;
+  readonly maxStep: number;
   readonly contactCandidateCount: number;
   readonly schedule: JGS2Schedule;
   readonly scheduleColorCount: number;
@@ -115,7 +120,7 @@ interface JGS2SubmissionPolicy {
   readonly readbackSubmissions: number;
   readonly testBatchFrameLimit: number;
   readonly solverBatchFrameLimit: number;
-  readonly productionStepsPerSubmission: 1;
+  readonly productionMaximumStepsPerSubmission: 2;
 }
 
 interface Phase0ForceFreeCorpusResult {
@@ -135,6 +140,11 @@ interface Phase0ForceFreeCorpusOptions {
 }
 
 const TEST_BATCH_FRAME_LIMIT = 120;
+const PRODUCTION_MAX_STEPS_PER_SUBMISSION = 2;
+const PRODUCTION_MAX_ACCUMULATED_STEPS = 3;
+const PRODUCTION_MAX_IN_FLIGHT_BATCHES = 2;
+const PRODUCTION_DIAGNOSTIC_INTERVAL_STEPS = 600;
+const PRODUCTION_FRAME_COUNTER_INTERVAL_STEPS = 12;
 
 declare global {
   interface Window {
@@ -402,8 +412,7 @@ export function App() {
     let animationFrame = 0;
     let submissionsEnabled = true;
     let inFlightBatches = 0;
-    let currentOutstandingSubmissions = 0;
-    let maximumOutstandingSubmissions = 0;
+    const submissionTracker = new QueueSubmissionTracker();
     let runtimeFailureMessage: string | null = null;
     let solverSubmissions = 0;
     let renderSubmissions = 0;
@@ -422,11 +431,7 @@ export function App() {
     const recordSubmission = (
       kind: "solver" | "render" | "readback",
     ): void => {
-      currentOutstandingSubmissions += 1;
-      maximumOutstandingSubmissions = Math.max(
-        maximumOutstandingSubmissions,
-        currentOutstandingSubmissions,
-      );
+      submissionTracker.recordSubmission();
       if (kind === "solver") {
         solverSubmissions += 1;
       } else if (kind === "render") {
@@ -434,15 +439,21 @@ export function App() {
       } else {
         readbackSubmissions += 1;
       }
-      if (currentOutstandingSubmissions > 2) {
+      const maximumAllowedSubmissions = testMode
+        ? 2
+        : PRODUCTION_MAX_IN_FLIGHT_BATCHES * 2;
+      if (submissionTracker.currentOutstanding > maximumAllowedSubmissions) {
         throw new Error(
-          "The App queued more than two GPU submissions without a drain.",
+          `The App queued more than ${maximumAllowedSubmissions} GPU ` +
+            "submissions without a drain.",
         );
       }
     };
 
-    const recordQueueDrained = (): void => {
-      currentOutstandingSubmissions = 0;
+    const recordQueueDrained = (
+      watermark = submissionTracker.submittedWatermark,
+    ): void => {
+      submissionTracker.recordDrainedThrough(watermark);
     };
 
     const initialize = async (): Promise<void> => {
@@ -467,15 +478,39 @@ export function App() {
       }
       const format = gpu.getPreferredCanvasFormat();
       const ipcContactScene = scene.id === "contact" || scene.id === "cloth";
+      const searchParams = new URLSearchParams(window.location.search);
       const ipcFrictionEnabled =
-        new URLSearchParams(window.location.search).get("friction") !== "0";
+        searchParams.get("friction") !== "0";
+      const ipcBarrierEnabled = searchParams.get("barrier") !== "0";
+      const requestedActivationDistance = Number(
+        searchParams.get("activation"),
+      );
+      const ipcActivationDistance =
+        Number.isFinite(requestedActivationDistance) &&
+        requestedActivationDistance > 0
+          ? requestedActivationDistance
+          : scene.id === "cloth"
+            ? 0.01
+            : 0.08;
+      const requestedMaxStep = Number(searchParams.get("maxstep"));
+      const maxStep =
+        Number.isFinite(requestedMaxStep) && requestedMaxStep > 0
+          ? requestedMaxStep
+          : scene.id === "cloth"
+            ? 0.01
+            : 0.075;
+      const requestedIterations = Number(searchParams.get("iterations"));
+      const solverIterations =
+        Number.isSafeInteger(requestedIterations) && requestedIterations > 0
+          ? normalizeOddIterationCount(requestedIterations)
+          : scene.settings.solverIterations;
       const ipcFrictionCoefficient =
         scene.id === "contact" ? 0.45 : scene.id === "cloth" ? 0.3 : 0;
       const solverSettings = {
         schedule,
         timestep: scene.settings.timestep,
         gravity: scene.settings.gravity,
-        iterations: scene.settings.solverIterations,
+        iterations: solverIterations,
         floorHeight: scene.settings.floorY,
         floorStiffness:
           conservationFixture || ipcContactScene ? 0 : 250_000,
@@ -483,9 +518,10 @@ export function App() {
         contactTangentialDamping: ipcContactScene ? 0 : 12,
         contactMargin: 0.01,
         horizontalBodyCorrection: !ipcContactScene,
-        ipcActivationDistance: 0.08,
+        ipcActivationDistance,
         ipcMinimumDistance: 0.003,
-        ipcBarrierStiffness: ipcContactScene ? 100_000 : 0,
+        ipcBarrierStiffness:
+          ipcContactScene && ipcBarrierEnabled ? 100_000 : 0,
         ipcFrictionCoefficient:
           ipcContactScene && ipcFrictionEnabled ? ipcFrictionCoefficient : 0,
         ipcFrictionVelocityEpsilon: 0.05,
@@ -493,7 +529,7 @@ export function App() {
         parityMode,
         regularization: 1e-6,
         rotationEpsilon: 1e-7,
-        maxStep: 0.075,
+        maxStep,
       } as const;
       solver = await JGS2GpuSolver.create(device, gpuInput, solverSettings);
       frameProfiler = testMode
@@ -679,8 +715,9 @@ export function App() {
           return null;
         }
         recordSubmission("readback");
+        const drainWatermark = submissionTracker.submittedWatermark;
         const diagnostics = await solver!.readGlobalizationDiagnostics();
-        recordQueueDrained();
+        recordQueueDrained(drainWatermark);
         const record = diagnostics.history[diagnostics.historyCount - 1] ?? null;
         if (record) {
           publishGlobalizationHistory(record, diagnostics.historyCount);
@@ -1387,20 +1424,22 @@ export function App() {
               ipcFrictionVelocityEpsilon:
                 submittedSettings.ipcFrictionVelocityEpsilon,
               ipcStepSafety: submittedSettings.ipcStepSafety,
+              maxStep: submittedSettings.maxStep,
               contactCandidateCount: solver!.contactCandidateCount,
               schedule,
               scheduleColorCount: solver!.scheduleColorCount,
             };
           },
           submissionPolicy: () => ({
-            maximumOutstanding: maximumOutstandingSubmissions,
-            currentOutstanding: currentOutstandingSubmissions,
+            maximumOutstanding: submissionTracker.maximumOutstanding,
+            currentOutstanding: submissionTracker.currentOutstanding,
             solverSubmissions,
             renderSubmissions,
             readbackSubmissions,
             testBatchFrameLimit: TEST_BATCH_FRAME_LIMIT,
             solverBatchFrameLimit: JGS2_MAX_BATCH_FRAMES,
-            productionStepsPerSubmission: 1,
+            productionMaximumStepsPerSubmission:
+              PRODUCTION_MAX_STEPS_PER_SUBMISSION,
           }),
           scriptedTarget: () =>
             scriptedTargetState
@@ -1450,6 +1489,9 @@ export function App() {
         );
         let previousTime = performance.now();
         let accumulator = 0;
+        const globalizationDiagnostics = new PeriodicDiagnosticTracker(
+          PRODUCTION_DIAGNOSTIC_INTERVAL_STEPS,
+        );
         let lastMetricsPublishMilliseconds = 0;
         let metricsUpdateSequence = 0;
         const frameDuration = scene.settings.timestep * 1000;
@@ -1460,6 +1502,7 @@ export function App() {
               simulationStepMilliseconds:
                 batch.gpuSimulationStepMilliseconds,
               renderMilliseconds: batch.gpuRenderMilliseconds,
+              simulationStepCounts: batch.simulationStepCounts,
             });
           }
           if (
@@ -1529,25 +1572,66 @@ export function App() {
           try {
             accumulator = Math.min(
               accumulator + Math.min(now - previousTime, 100),
-              frameDuration * 3,
+              frameDuration * PRODUCTION_MAX_ACCUMULATED_STEPS,
             );
             previousTime = now;
-            if (accumulator >= frameDuration && inFlightBatches === 0) {
-              timestampPlan = liveFrameProfiler!.beginFrame();
+            if (
+              accumulator >= frameDuration &&
+              inFlightBatches < PRODUCTION_MAX_IN_FLIGHT_BATCHES
+            ) {
+              if (simulationFrame === 0) {
+                // Initialization time is not simulated time. Starting with a
+                // catch-up batch can lock a high-refresh display into slower
+                // multi-step submissions even when one step fits per refresh.
+                accumulator = frameDuration;
+              }
+              const dueSimulationSteps = Math.max(
+                1,
+                Math.min(
+                  PRODUCTION_MAX_STEPS_PER_SUBMISSION,
+                  stableSolverBatchFrameLimit(
+                    solver!,
+                    solver!.lastSubmittedIterationCount,
+                  ),
+                  Math.floor(accumulator / frameDuration),
+                ),
+              );
+              const submittedSimulationSteps = scriptedTargetBatchLength(
+                dueSimulationSteps,
+              );
+              timestampPlan = liveFrameProfiler!.beginFrame(
+                submittedSimulationSteps,
+              );
               const simulationStart = performance.now();
               applyScriptedTargetForFrame(simulationFrame + 1);
               if (timestampPlan) {
-                solver!.stepWithGpuTimestampWrites(
-                  timestampPlan.writes.simulation,
-                );
-              } else {
+                if (submittedSimulationSteps === 1) {
+                  solver!.stepWithGpuTimestampWrites(
+                    timestampPlan.writes.simulation,
+                  );
+                } else {
+                  solver!.stepFramesWithGpuTimestampWrites(
+                    submittedSimulationSteps,
+                    timestampPlan.writes.simulation,
+                  );
+                }
+              } else if (submittedSimulationSteps === 1) {
                 solver!.step();
+              } else {
+                solver!.stepFrames(submittedSimulationSteps);
               }
               const cpuSimulationSubmissionMilliseconds =
                 performance.now() - simulationStart;
               recordSubmission("solver");
-              simulationFrame += 1;
-              accumulator -= frameDuration;
+              const previousSimulationFrame = simulationFrame;
+              simulationFrame += submittedSimulationSteps;
+              if (solver!.globalizationEnabled) {
+                globalizationDiagnostics.recordCompletedRange(
+                  previousSimulationFrame,
+                  simulationFrame,
+                );
+              }
+              accumulator -= frameDuration * submittedSimulationSteps;
               const renderStart = performance.now();
               renderer!.render(
                 simulationFrame,
@@ -1565,27 +1649,38 @@ export function App() {
                 now,
                 cpuSimulationSubmissionMilliseconds,
                 cpuRenderSubmissionMilliseconds,
+                submittedSimulationSteps,
               );
-              inFlightBatches = 1;
-              const completedFrame = simulationFrame;
+              inFlightBatches += 1;
+              const batchDrainWatermark =
+                submissionTracker.submittedWatermark;
               void (async () => {
                 try {
                   await solver!.awaitIdle();
-                  recordQueueDrained();
-                  if (
-                    completedFrame % 12 === 0 &&
-                    solver!.globalizationEnabled
-                  ) {
+                  recordQueueDrained(batchDrainWatermark);
+                  const pendingDiagnosticFrame =
+                    inFlightBatches === 1 && solver!.globalizationEnabled
+                      ? globalizationDiagnostics.takePendingBoundary()
+                      : null;
+                  if (pendingDiagnosticFrame !== null) {
                     await readGlobalizationHistory();
                   }
                 } catch (reason) {
-                  recordQueueDrained();
+                  recordQueueDrained(batchDrainWatermark);
                   stopAnimationWithError(reason);
                 } finally {
-                  inFlightBatches = 0;
+                  inFlightBatches -= 1;
                 }
               })();
-              if (simulationFrame % 12 === 0) {
+              if (
+                Math.floor(
+                  simulationFrame / PRODUCTION_FRAME_COUNTER_INTERVAL_STEPS,
+                ) >
+                Math.floor(
+                  previousSimulationFrame /
+                    PRODUCTION_FRAME_COUNTER_INTERVAL_STEPS,
+                )
+              ) {
                 setFrame(simulationFrame);
               }
             }

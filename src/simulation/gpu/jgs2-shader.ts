@@ -2,6 +2,9 @@ import { JGS2_CUBATURE_RECORD_WORDS } from "./layout";
 import {
   JGS2_CLOTH_GLOBAL_WORDS,
   JGS2_CLOTH_HINGE_WORDS,
+  JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS,
+  JGS2_CLOTH_INCIDENCE_HEADER_WORDS,
+  JGS2_CLOTH_INCIDENCE_MAGIC,
   JGS2_CLOTH_TRIANGLE_WORDS,
 } from "./cloth-layout";
 import {
@@ -9,8 +12,11 @@ import {
   JGS2_SCHEDULE_MAGIC,
 } from "./schedule-layout";
 import {
+  IPC_CONTACT_CANDIDATE_VEC4_OFFSETS,
   IPC_CONTACT_CANDIDATE_VEC4S,
   IPC_CONTACT_GLOBAL_VEC4S,
+  IPC_CONTACT_INCIDENCE_HEADER_WORDS,
+  IPC_CONTACT_INCIDENCE_MAGIC,
   IPC_CONTACT_TYPE_EDGE_EDGE,
   IPC_CONTACT_TYPE_VERTEX_TRIANGLE,
 } from "./ipc-contact-layout";
@@ -33,6 +39,23 @@ const CUBATURE_RECORD_WORDS: u32 = ${JGS2_CUBATURE_RECORD_WORDS}u;
 const CLOTH_GLOBAL_WORDS: u32 = ${JGS2_CLOTH_GLOBAL_WORDS}u;
 const CLOTH_TRIANGLE_WORDS: u32 = ${JGS2_CLOTH_TRIANGLE_WORDS}u;
 const CLOTH_HINGE_WORDS: u32 = ${JGS2_CLOTH_HINGE_WORDS}u;
+const CLOTH_INCIDENCE_MAGIC: u32 = ${JGS2_CLOTH_INCIDENCE_MAGIC}u;
+const CLOTH_INCIDENCE_HEADER_WORDS: u32 =
+  ${JGS2_CLOTH_INCIDENCE_HEADER_WORDS}u;
+const CLOTH_INCIDENCE_VERTEX_COUNT_OFFSET: u32 =
+  ${JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.vertexCount}u;
+const CLOTH_INCIDENCE_TRIANGLE_COUNT_OFFSET: u32 =
+  ${JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.triangleIncidenceCount}u;
+const CLOTH_INCIDENCE_HINGE_COUNT_OFFSET: u32 =
+  ${JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.hingeIncidenceCount}u;
+const CLOTH_INCIDENCE_TRIANGLE_ROWS_OFFSET: u32 =
+  ${JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.triangleRows}u;
+const CLOTH_INCIDENCE_TRIANGLE_ELEMENTS_OFFSET: u32 =
+  ${JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.triangleElements}u;
+const CLOTH_INCIDENCE_HINGE_ROWS_OFFSET: u32 =
+  ${JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.hingeRows}u;
+const CLOTH_INCIDENCE_WORD_COUNT_OFFSET: u32 =
+  ${JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.wordCount}u;
 const SCHEDULE_MAGIC: u32 = ${JGS2_SCHEDULE_MAGIC}u;
 const SCHEDULE_HEADER_WORDS: u32 = ${JGS2_SCHEDULE_HEADER_WORDS}u;
 const COLORED_SCHEDULE_FLAG: u32 = 0x80000000u;
@@ -48,6 +71,17 @@ const OBJECTIVE_FORCE_ENABLED_BIT: u32 = 1u;
 const OBJECTIVE_TARGET_ENABLED_BIT: u32 = 2u;
 const IPC_GLOBAL_VEC4S: u32 = ${IPC_CONTACT_GLOBAL_VEC4S}u;
 const IPC_CANDIDATE_VEC4S: u32 = ${IPC_CONTACT_CANDIDATE_VEC4S}u;
+const IPC_SOURCE_CONTACT_OFFSET: u32 =
+  ${IPC_CONTACT_CANDIDATE_VEC4_OFFSETS.sourceContact}u;
+const IPC_SOURCE_WEIGHTS_OFFSET: u32 =
+  ${IPC_CONTACT_CANDIDATE_VEC4_OFFSETS.sourceWeights}u;
+const IPC_TARGET_CONTACT_OFFSET: u32 =
+  ${IPC_CONTACT_CANDIDATE_VEC4_OFFSETS.targetContact}u;
+const IPC_TARGET_WEIGHTS_OFFSET: u32 =
+  ${IPC_CONTACT_CANDIDATE_VEC4_OFFSETS.targetWeights}u;
+const IPC_INCIDENCE_HEADER_WORDS: u32 =
+  ${IPC_CONTACT_INCIDENCE_HEADER_WORDS}u;
+const IPC_INCIDENCE_MAGIC: u32 = ${IPC_CONTACT_INCIDENCE_MAGIC}u;
 const IPC_TYPE_VERTEX_TRIANGLE: u32 = ${IPC_CONTACT_TYPE_VERTEX_TRIANGLE}u;
 const IPC_TYPE_EDGE_EDGE: u32 = ${IPC_CONTACT_TYPE_EDGE_EDGE}u;
 
@@ -163,7 +197,7 @@ var<storage, read> tetData: array<TetStatic>;
 var<storage, read> restStiffness: array<f32>;
 
 @group(0) @binding(4)
-var<storage, read> adjacency: array<u32>;
+var<storage, read_write> adjacency: array<u32>;
 
 @group(0) @binding(5)
 var<storage, read> cubatureWords: array<u32>;
@@ -217,6 +251,99 @@ fn ipcCandidateCount() -> u32 {
   return min(packedCount, capacity);
 }
 
+struct IpcVertexCandidateRange {
+  begin: u32,
+  end: u32,
+  indexed: u32,
+}
+
+struct IpcIncidenceLayout {
+  rows: u32,
+  candidateIds: u32,
+  activeCounts: u32,
+  activeCandidateIds: u32,
+  incidenceCount: u32,
+  valid: u32,
+}
+
+fn ipcIncidenceLayout() -> IpcIncidenceLayout {
+  let invalid = IpcIncidenceLayout(0u, 0u, 0u, 0u, 0u, 0u);
+  let candidateCount = ipcCandidateCount();
+  if (candidateCount == 0u) { return invalid; }
+  // Four distinct vertices per candidate are guaranteed by CPU validation.
+  if (candidateCount > 0x3fffffffu || params.counts.x == 0xffffffffu) {
+    return invalid;
+  }
+  let incidenceCount = candidateCount * 4u;
+  let rowWordCount = params.counts.x + 1u;
+  if (
+    rowWordCount > 0xffffffffu - IPC_INCIDENCE_HEADER_WORDS ||
+    incidenceCount >
+      0xffffffffu - IPC_INCIDENCE_HEADER_WORDS - rowWordCount
+  ) {
+    return invalid;
+  }
+  let staticWordCount =
+    IPC_INCIDENCE_HEADER_WORDS + rowWordCount + incidenceCount;
+  if (
+    params.counts.x > 0xffffffffu - staticWordCount ||
+    incidenceCount >
+      0xffffffffu - staticWordCount - params.counts.x
+  ) {
+    return invalid;
+  }
+  let suffixWordCount =
+    staticWordCount + params.counts.x + incidenceCount;
+  let adjacencyWordCount = arrayLength(&adjacency);
+  if (suffixWordCount > adjacencyWordCount) { return invalid; }
+
+  let header = adjacencyWordCount - suffixWordCount;
+  if (
+    adjacency[header] != IPC_INCIDENCE_MAGIC ||
+    adjacency[header + 1u] != params.counts.x ||
+    adjacency[header + 2u] != candidateCount ||
+    adjacency[header + 3u] != incidenceCount
+  ) {
+    return invalid;
+  }
+  let rows = header + IPC_INCIDENCE_HEADER_WORDS;
+  let candidateIds = rows + rowWordCount;
+  let activeCounts = candidateIds + incidenceCount;
+  let activeCandidateIds = activeCounts + params.counts.x;
+  return IpcIncidenceLayout(
+    rows,
+    candidateIds,
+    activeCounts,
+    activeCandidateIds,
+    incidenceCount,
+    1u,
+  );
+}
+
+fn ipcVertexCandidateRange(vertex: u32) -> IpcVertexCandidateRange {
+  let candidateCount = ipcCandidateCount();
+  let fallback = IpcVertexCandidateRange(0u, candidateCount, 0u);
+  let incidenceLayout = ipcIncidenceLayout();
+  if (vertex >= params.counts.x || incidenceLayout.valid == 0u) {
+    return fallback;
+  }
+  let first = adjacency[incidenceLayout.rows + vertex];
+  let last = adjacency[incidenceLayout.rows + vertex + 1u];
+  if (last < first || last > incidenceLayout.incidenceCount) { return fallback; }
+  let activeCount = adjacency[incidenceLayout.activeCounts + vertex];
+  if (activeCount > last - first) { return fallback; }
+  return IpcVertexCandidateRange(
+    incidenceLayout.activeCandidateIds + first,
+    incidenceLayout.activeCandidateIds + first + activeCount,
+    1u,
+  );
+}
+
+fn ipcRangeCandidate(range: IpcVertexCandidateRange, item: u32) -> u32 {
+  if (range.indexed != 0u) { return adjacency[item]; }
+  return item;
+}
+
 fn ipcCandidateBase(candidate: u32) -> u32 {
   return ipcContactBase() + IPC_GLOBAL_VEC4S +
     candidate * IPC_CANDIDATE_VEC4S;
@@ -256,6 +383,88 @@ fn ipcCandidateScratch(candidate: u32) -> vec4f {
   return dynamicData[ipcCandidateBase(candidate) + 4u];
 }
 
+fn ipcStoreCachedContact(
+  candidate: u32,
+  useTarget: bool,
+  contactData: jgs2_ipc_contact_data,
+) {
+  let valid = contactData.valid != 0u &&
+    jgs2_ipc_finite_scalar(contactData.distance) &&
+    contactData.distance >= 0.0 &&
+    jgs2_ipc_finite_vec3(contactData.normal) &&
+    jgs2_ipc_finite_vec4(contactData.weights);
+  let contactOffset = select(
+    IPC_SOURCE_CONTACT_OFFSET,
+    IPC_TARGET_CONTACT_OFFSET,
+    useTarget,
+  );
+  let weightsOffset = select(
+    IPC_SOURCE_WEIGHTS_OFFSET,
+    IPC_TARGET_WEIGHTS_OFFSET,
+    useTarget,
+  );
+  let base = ipcCandidateBase(candidate);
+  dynamicData[base + contactOffset] = select(
+    vec4f(0.0, 0.0, 0.0, -1.0),
+    vec4f(contactData.normal, contactData.distance),
+    valid,
+  );
+  dynamicData[base + weightsOffset] = select(
+    vec4f(0.0),
+    contactData.weights,
+    valid,
+  );
+}
+
+fn ipcCachedContact(candidate: u32, useTarget: bool) -> jgs2_ipc_contact_data {
+  let contactOffset = select(
+    IPC_SOURCE_CONTACT_OFFSET,
+    IPC_TARGET_CONTACT_OFFSET,
+    useTarget,
+  );
+  let weightsOffset = select(
+    IPC_SOURCE_WEIGHTS_OFFSET,
+    IPC_TARGET_WEIGHTS_OFFSET,
+    useTarget,
+  );
+  let base = ipcCandidateBase(candidate);
+  let normalDistance = dynamicData[base + contactOffset];
+  let weights = dynamicData[base + weightsOffset];
+  let valid = normalDistance.w >= 0.0 &&
+    jgs2_ipc_finite_vec4(normalDistance) &&
+    jgs2_ipc_finite_vec4(weights);
+  let distance = select(0.0, normalDistance.w, valid);
+  return jgs2_ipc_contact_data(
+    vec3f(0.0),
+    distance,
+    vec3f(0.0),
+    distance * distance,
+    select(vec3f(1.0, 0.0, 0.0), normalDistance.xyz, valid),
+    select(0u, 1u, valid),
+    select(vec4f(0.0), weights, valid),
+  );
+}
+
+fn ipcCachedContactAt(
+  candidate: u32,
+  positionOffset: u32,
+) -> jgs2_ipc_contact_data {
+  var useTarget = params.offsets2.x != params.offsets1.w &&
+    positionOffset == params.offsets2.x;
+  if (useTarget && dynamicData[ipcContactBase()].w == 0.0) {
+    useTarget = false;
+  }
+  return ipcCachedContact(candidate, useTarget);
+}
+
+fn ipcPromoteTargetContactToSource(candidate: u32) {
+  let base = ipcCandidateBase(candidate);
+  dynamicData[base + IPC_SOURCE_CONTACT_OFFSET] =
+    dynamicData[base + IPC_TARGET_CONTACT_OFFSET];
+  dynamicData[base + IPC_SOURCE_WEIGHTS_OFFSET] =
+    dynamicData[base + IPC_TARGET_WEIGHTS_OFFSET];
+}
+
 fn ipcEnabled() -> bool {
   if (params.offsets4.w == 0u || !(params.contact.w > 0.0)) {
     return false;
@@ -264,35 +473,153 @@ fn ipcEnabled() -> bool {
   return params.contact.z > ipcParameters().x;
 }
 
-fn ipcContactAt(candidate: u32, positionOffset: u32) -> jgs2_ipc_contact_data {
+fn ipcCandidateRecordValid(indices: vec4u, candidateMeta: vec4u) -> bool {
+  return candidateMeta.y != 0u &&
+    indices.x < params.counts.x && indices.y < params.counts.x &&
+    indices.z < params.counts.x && indices.w < params.counts.x &&
+    (candidateMeta.x == IPC_TYPE_VERTEX_TRIANGLE ||
+      candidateMeta.x == IPC_TYPE_EDGE_EDGE);
+}
+
+fn ipcCandidatePinnedMotionExceedsBound(
+  candidate: u32,
+  positionOffset: u32,
+  displacementBound: f32,
+) -> bool {
   let indices = ipcCandidateIndices(candidate);
   let candidateMeta = ipcCandidateMeta(candidate);
-  if (candidateMeta.y == 0u || indices.x >= params.counts.x ||
-      indices.y >= params.counts.x || indices.z >= params.counts.x ||
-      indices.w >= params.counts.x) {
-    return jgs2_ipc_invalid_contact();
+  if (!ipcCandidateRecordValid(indices, candidateMeta)) { return true; }
+  for (var lane = 0u; lane < 4u; lane += 1u) {
+    let vertex = indices[lane];
+    if (vertexData[vertex].info.z == 0u) { continue; }
+    let displacement = vertexData[vertex].restMass.xyz -
+      loadPosition(positionOffset, vertex);
+    let displacementLength = length(displacement);
+    if (
+      !jgs2_globalization_finite_vec3(displacement) ||
+      !jgs2_globalization_finite_scalar(displacementLength) ||
+      displacementLength > displacementBound
+    ) {
+      return true;
+    }
   }
-  let position0 = loadPosition(positionOffset, indices.x);
-  let position1 = loadPosition(positionOffset, indices.y);
-  let position2 = loadPosition(positionOffset, indices.z);
-  let position3 = loadPosition(positionOffset, indices.w);
-  if (candidateMeta.x == IPC_TYPE_VERTEX_TRIANGLE) {
+  return false;
+}
+
+fn ipcContactRoundingReach() -> f32 {
+  return max(max(params.convergence.z, params.contact.z), 1.0e-12) *
+    jgs2_globalization_f32_unit_roundoff *
+    jgs2_globalization_position_resolution_multiplier;
+}
+
+fn ipcBarrierBroadPhaseThreshold() -> f32 {
+  return params.contact.z + ipcContactRoundingReach();
+}
+
+fn ipcActiveContactReach() -> f32 {
+  let roundingReach = ipcContactRoundingReach();
+  return params.contact.z +
+    2.0 * (max(params.time.w, 0.0) + roundingReach);
+}
+
+fn ipcAabbDistanceLowerBound(
+  candidateType: u32,
+  position0: vec3f,
+  position1: vec3f,
+  position2: vec3f,
+  position3: vec3f,
+) -> f32 {
+  var gap = vec3f(0.0);
+  if (candidateType == IPC_TYPE_VERTEX_TRIANGLE) {
+    let minimum = min(position1, min(position2, position3));
+    let maximum = max(position1, max(position2, position3));
+    gap = max(max(minimum - position0, position0 - maximum), vec3f(0.0));
+  } else if (candidateType == IPC_TYPE_EDGE_EDGE) {
+    let minimum0 = min(position0, position1);
+    let maximum0 = max(position0, position1);
+    let minimum1 = min(position2, position3);
+    let maximum1 = max(position2, position3);
+    gap = max(
+      max(minimum1 - maximum0, minimum0 - maximum1),
+      vec3f(0.0),
+    );
+  } else {
+    return -1.0;
+  }
+  return length(gap);
+}
+
+fn ipcSeparatedContact(distance: f32) -> jgs2_ipc_contact_data {
+  return jgs2_ipc_contact_data(
+    vec3f(0.0),
+    distance,
+    vec3f(0.0),
+    distance * distance,
+    vec3f(1.0, 0.0, 0.0),
+    1u,
+    vec4f(0.0),
+  );
+}
+
+fn ipcContactFromPositions(
+  candidateType: u32,
+  position0: vec3f,
+  position1: vec3f,
+  position2: vec3f,
+  position3: vec3f,
+  broadPhaseThreshold: f32,
+) -> jgs2_ipc_contact_data {
+  let lowerBound = ipcAabbDistanceLowerBound(
+    candidateType, position0, position1, position2, position3,
+  );
+  if (
+    jgs2_ipc_finite_scalar(lowerBound) &&
+    lowerBound >= broadPhaseThreshold
+  ) {
+    return ipcSeparatedContact(lowerBound);
+  }
+  if (candidateType == IPC_TYPE_VERTEX_TRIANGLE) {
     return jgs2_ipc_point_triangle_contact(
-      position0,
-      position1,
-      position2,
-      position3,
+      position0, position1, position2, position3,
     );
   }
-  if (candidateMeta.x == IPC_TYPE_EDGE_EDGE) {
+  if (candidateType == IPC_TYPE_EDGE_EDGE) {
     return jgs2_ipc_edge_edge_contact(
-      position0,
-      position1,
-      position2,
-      position3,
+      position0, position1, position2, position3,
     );
   }
   return jgs2_ipc_invalid_contact();
+}
+
+fn ipcContactAtThreshold(
+  candidate: u32,
+  positionOffset: u32,
+  broadPhaseThreshold: f32,
+) -> jgs2_ipc_contact_data {
+  let indices = ipcCandidateIndices(candidate);
+  let candidateMeta = ipcCandidateMeta(candidate);
+  if (!ipcCandidateRecordValid(indices, candidateMeta)) {
+    return jgs2_ipc_invalid_contact();
+  }
+  return ipcContactFromPositions(
+    candidateMeta.x,
+    loadPosition(positionOffset, indices.x),
+    loadPosition(positionOffset, indices.y),
+    loadPosition(positionOffset, indices.z),
+    loadPosition(positionOffset, indices.w),
+    broadPhaseThreshold,
+  );
+}
+
+fn ipcContactAt(candidate: u32, positionOffset: u32) -> jgs2_ipc_contact_data {
+  return ipcContactAtThreshold(candidate, positionOffset, params.contact.z);
+}
+
+fn ipcExactContactAt(
+  candidate: u32,
+  positionOffset: u32,
+) -> jgs2_ipc_contact_data {
+  return ipcContactAtThreshold(candidate, positionOffset, jgs2_ipc_f32_max);
 }
 
 fn ipcPositionWithOverride(
@@ -316,34 +643,25 @@ fn ipcContactAtOverride(
 ) -> jgs2_ipc_contact_data {
   let indices = ipcCandidateIndices(candidate);
   let candidateMeta = ipcCandidateMeta(candidate);
-  if (candidateMeta.y == 0u || indices.x >= params.counts.x ||
-      indices.y >= params.counts.x || indices.z >= params.counts.x ||
-      indices.w >= params.counts.x) {
+  if (!ipcCandidateRecordValid(indices, candidateMeta)) {
     return jgs2_ipc_invalid_contact();
   }
-  let position0 = ipcPositionWithOverride(
-    positionOffset, indices.x, movedVertex, movedPosition,
+  return ipcContactFromPositions(
+    candidateMeta.x,
+    ipcPositionWithOverride(
+      positionOffset, indices.x, movedVertex, movedPosition,
+    ),
+    ipcPositionWithOverride(
+      positionOffset, indices.y, movedVertex, movedPosition,
+    ),
+    ipcPositionWithOverride(
+      positionOffset, indices.z, movedVertex, movedPosition,
+    ),
+    ipcPositionWithOverride(
+      positionOffset, indices.w, movedVertex, movedPosition,
+    ),
+    params.contact.z,
   );
-  let position1 = ipcPositionWithOverride(
-    positionOffset, indices.y, movedVertex, movedPosition,
-  );
-  let position2 = ipcPositionWithOverride(
-    positionOffset, indices.z, movedVertex, movedPosition,
-  );
-  let position3 = ipcPositionWithOverride(
-    positionOffset, indices.w, movedVertex, movedPosition,
-  );
-  if (candidateMeta.x == IPC_TYPE_VERTEX_TRIANGLE) {
-    return jgs2_ipc_point_triangle_contact(
-      position0, position1, position2, position3,
-    );
-  }
-  if (candidateMeta.x == IPC_TYPE_EDGE_EDGE) {
-    return jgs2_ipc_edge_edge_contact(
-      position0, position1, position2, position3,
-    );
-  }
-  return jgs2_ipc_invalid_contact();
 }
 
 fn ipcCandidateWeightForVertex(
@@ -424,16 +742,6 @@ fn ipcCandidateEnergyFromContact(
   return energy;
 }
 
-fn ipcCandidateEnergy(candidate: u32, positionOffset: u32) -> f32 {
-  return ipcCandidateEnergyFromContact(
-    candidate,
-    ipcContactAt(candidate, positionOffset),
-    positionOffset,
-    0xffffffffu,
-    vec3f(0.0),
-  );
-}
-
 fn ipcEnergyOwner(indices: vec4u) -> u32 {
   if (vertexData[indices.x].info.z == 0u) { return indices.x; }
   if (vertexData[indices.y].info.z == 0u) { return indices.y; }
@@ -445,10 +753,27 @@ fn ipcEnergyOwner(indices: vec4u) -> u32 {
 fn ipcOwnedEnergy(vertex: u32, positionOffset: u32) -> f32 {
   if (!ipcEnabled()) { return 0.0; }
   var result = 0.0;
-  for (var candidate = 0u; candidate < ipcCandidateCount(); candidate += 1u) {
+  let range = ipcVertexCandidateRange(vertex);
+  for (var item = range.begin; item < range.end; item += 1u) {
+    let candidate = ipcRangeCandidate(range, item);
+    if (candidate >= ipcCandidateCount()) { continue; }
+    let contactData = ipcCachedContactAt(candidate, positionOffset);
+    if (contactData.valid == 0u) { return jgs2_ipc_f32_max; }
+    let barrierActive = jgs2_ipc_barrier_active(
+      contactData.distance, params.contact.z,
+    );
+    let lagged = ipcLaggedNormalForce(candidate);
+    let frictionActive = ipcParameters().y > 0.0 && lagged.w > 0.0;
+    if (!barrierActive && !frictionActive) { continue; }
     let indices = ipcCandidateIndices(candidate);
     if (ipcEnergyOwner(indices) == vertex) {
-      let energy = ipcCandidateEnergy(candidate, positionOffset);
+      let energy = ipcCandidateEnergyFromContact(
+        candidate,
+        contactData,
+        positionOffset,
+        0xffffffffu,
+        vec3f(0.0),
+      );
       if (!jgs2_ipc_finite_scalar(energy)) { return jgs2_ipc_f32_max; }
       result += energy;
     }
@@ -461,19 +786,39 @@ struct IpcLocalContribution {
   hessian: mat3x3f,
 }
 
-fn ipcLocalContribution(vertex: u32, positionOffset: u32) -> IpcLocalContribution {
+fn ipcLocalContribution(
+  vertex: u32,
+  positionOffset: u32,
+) -> IpcLocalContribution {
   var result = IpcLocalContribution(vec3f(0.0), zeroMat3());
   if (!ipcEnabled()) { return result; }
-  for (var candidate = 0u; candidate < ipcCandidateCount(); candidate += 1u) {
-    let indices = ipcCandidateIndices(candidate);
-    let contactData = ipcContactAt(candidate, positionOffset);
+  let range = ipcVertexCandidateRange(vertex);
+  for (var item = range.begin; item < range.end; item += 1u) {
+    let candidate = ipcRangeCandidate(range, item);
+    if (candidate >= ipcCandidateCount()) { continue; }
+    var contactData = ipcCachedContact(candidate, false);
+    if (coloredScheduleEnabled()) {
+      // Later colors observe positions written in place by earlier colors;
+      // the pre-sweep cache is therefore stale for colored Gauss-Seidel.
+      contactData = ipcContactAt(candidate, positionOffset);
+    }
     if (contactData.valid == 0u) { continue; }
+    let barrierActive = jgs2_ipc_barrier_active(
+      contactData.distance, params.contact.z,
+    );
+    let lagged = ipcLaggedNormalForce(candidate);
+    let frictionActive = ipcParameters().y > 0.0 && lagged.w > 0.0;
+    if (!barrierActive && !frictionActive) { continue; }
+    let indices = ipcCandidateIndices(candidate);
+    if (
+      ipcCandidateWeightForVertex(indices, vec4f(1.0), vertex) == 0.0
+    ) {
+      continue;
+    }
     let weight = ipcCandidateWeightForVertex(
       indices, contactData.weights, vertex,
     );
-    if (weight != 0.0 && jgs2_ipc_barrier_active(
-      contactData.distance, params.contact.z,
-    )) {
+    if (weight != 0.0 && barrierActive) {
       let first = jgs2_ipc_barrier_first_derivative(
         contactData.distance, params.contact.z,
       );
@@ -491,7 +836,6 @@ fn ipcLocalContribution(vertex: u32, positionOffset: u32) -> IpcLocalContributio
       );
     }
 
-    let lagged = ipcLaggedNormalForce(candidate);
     let laggedWeights = ipcLaggedWeights(candidate);
     let laggedWeight = ipcCandidateWeightForVertex(
       indices, laggedWeights, vertex,
@@ -893,6 +1237,13 @@ struct ClothDihedralEvaluation {
   gradients: array<vec3f, 4>,
 }
 
+struct ClothElementRange {
+  begin: u32,
+  end: u32,
+  elementBase: u32,
+  indirect: u32,
+}
+
 fn clothArenaBase() -> u32 {
   return params.counts.x * params.counts.z * CUBATURE_RECORD_WORDS;
 }
@@ -993,10 +1344,122 @@ fn clothHingeRest(hinge: u32) -> vec2f {
   return vec2f(cubatureFloat(base), cubatureFloat(base + 1u));
 }
 
-fn scheduleArenaBase() -> u32 {
+fn clothLegacyArenaEnd() -> u32 {
   return clothArenaBase() + CLOTH_GLOBAL_WORDS +
     clothTriangleCount() * CLOTH_TRIANGLE_WORDS +
     clothHingeCount() * CLOTH_HINGE_WORDS;
+}
+
+fn clothIncidenceTailAvailable() -> bool {
+  let base = clothLegacyArenaEnd();
+  let wordCount = arrayLength(&cubatureWords);
+  if (
+    base > wordCount ||
+    wordCount - base < CLOTH_INCIDENCE_HEADER_WORDS ||
+    cubatureWords[base] != CLOTH_INCIDENCE_MAGIC
+  ) {
+    return false;
+  }
+
+  let vertexCount = params.counts.x;
+  let triangleIncidenceCount = clothTriangleCount() * 3u;
+  let hingeIncidenceCount = clothHingeCount() * 4u;
+  let triangleRows = CLOTH_INCIDENCE_HEADER_WORDS;
+  let triangleElements = triangleRows + vertexCount + 1u;
+  let hingeRows = triangleElements + triangleIncidenceCount;
+  let hingeElements = hingeRows + vertexCount + 1u;
+  let rawWordCount = hingeElements + hingeIncidenceCount;
+  let expectedWordCount = (rawWordCount + 3u) & ~3u;
+  let packedWordCount = cubatureWords[
+    base + CLOTH_INCIDENCE_WORD_COUNT_OFFSET
+  ];
+  if (
+    cubatureWords[base + CLOTH_INCIDENCE_VERTEX_COUNT_OFFSET] != vertexCount ||
+    cubatureWords[base + CLOTH_INCIDENCE_TRIANGLE_COUNT_OFFSET] !=
+      triangleIncidenceCount ||
+    cubatureWords[base + CLOTH_INCIDENCE_HINGE_COUNT_OFFSET] !=
+      hingeIncidenceCount ||
+    cubatureWords[base + CLOTH_INCIDENCE_TRIANGLE_ROWS_OFFSET] !=
+      triangleRows ||
+    cubatureWords[base + CLOTH_INCIDENCE_TRIANGLE_ELEMENTS_OFFSET] !=
+      triangleElements ||
+    cubatureWords[base + CLOTH_INCIDENCE_HINGE_ROWS_OFFSET] != hingeRows ||
+    packedWordCount != expectedWordCount ||
+    packedWordCount > wordCount - base
+  ) {
+    return false;
+  }
+  return cubatureWords[base + triangleRows] == 0u &&
+    cubatureWords[base + triangleRows + vertexCount] ==
+      triangleIncidenceCount &&
+    cubatureWords[base + hingeRows] == 0u &&
+    cubatureWords[base + hingeRows + vertexCount] == hingeIncidenceCount;
+}
+
+fn clothGlobalElementRange(elementCount: u32) -> ClothElementRange {
+  return ClothElementRange(0u, elementCount, 0u, 0u);
+}
+
+fn clothVertexTriangleRange(vertex: u32) -> ClothElementRange {
+  let triangleCount = clothTriangleCount();
+  let fallback = clothGlobalElementRange(triangleCount);
+  if (!clothIncidenceTailAvailable() || vertex >= params.counts.x) {
+    return fallback;
+  }
+  let base = clothLegacyArenaEnd();
+  let rows = base + cubatureWords[
+    base + CLOTH_INCIDENCE_TRIANGLE_ROWS_OFFSET
+  ];
+  let elements = base + cubatureWords[
+    base + CLOTH_INCIDENCE_TRIANGLE_ELEMENTS_OFFSET
+  ];
+  let begin = cubatureWords[rows + vertex];
+  let end = cubatureWords[rows + vertex + 1u];
+  let incidenceCount = cubatureWords[
+    base + CLOTH_INCIDENCE_TRIANGLE_COUNT_OFFSET
+  ];
+  if (begin > end || end > incidenceCount) { return fallback; }
+  for (var item = begin; item < end; item += 1u) {
+    if (cubatureWords[elements + item] >= triangleCount) { return fallback; }
+  }
+  return ClothElementRange(begin, end, elements, 1u);
+}
+
+fn clothVertexHingeRange(vertex: u32) -> ClothElementRange {
+  let hingeCount = clothHingeCount();
+  let fallback = clothGlobalElementRange(hingeCount);
+  if (!clothIncidenceTailAvailable() || vertex >= params.counts.x) {
+    return fallback;
+  }
+  let base = clothLegacyArenaEnd();
+  let hingeRows = cubatureWords[base + CLOTH_INCIDENCE_HINGE_ROWS_OFFSET];
+  let rows = base + hingeRows;
+  let elements = rows + params.counts.x + 1u;
+  let begin = cubatureWords[rows + vertex];
+  let end = cubatureWords[rows + vertex + 1u];
+  let incidenceCount = cubatureWords[
+    base + CLOTH_INCIDENCE_HINGE_COUNT_OFFSET
+  ];
+  if (begin > end || end > incidenceCount) { return fallback; }
+  for (var item = begin; item < end; item += 1u) {
+    if (cubatureWords[elements + item] >= hingeCount) { return fallback; }
+  }
+  return ClothElementRange(begin, end, elements, 1u);
+}
+
+fn clothRangeElement(range: ClothElementRange, item: u32) -> u32 {
+  if (range.indirect != 0u) {
+    return cubatureWords[range.elementBase + item];
+  }
+  return item;
+}
+
+fn scheduleArenaBase() -> u32 {
+  let legacyEnd = clothLegacyArenaEnd();
+  if (!clothIncidenceTailAvailable()) { return legacyEnd; }
+  return legacyEnd + cubatureWords[
+    legacyEnd + CLOTH_INCIDENCE_WORD_COUNT_OFFSET
+  ];
 }
 
 fn scheduleTailAvailable() -> bool {
@@ -1534,11 +1997,23 @@ fn restrictedMinimumDeformationDeterminant(
   if (ipcEnabled()) {
     let trialPosition = loadPosition(params.offsets1.w, sourceVertex) +
       displacement;
-    for (
-      var candidate = 0u;
-      candidate < ipcCandidateCount();
-      candidate += 1u
-    ) {
+    let displacementLength = length(displacement);
+    let range = ipcVertexCandidateRange(sourceVertex);
+    for (var item = range.begin; item < range.end; item += 1u) {
+      let candidate = ipcRangeCandidate(range, item);
+      if (candidate >= ipcCandidateCount()) { continue; }
+      var sourceContact = ipcCachedContact(candidate, false);
+      if (coloredScheduleEnabled()) {
+        sourceContact = ipcContactAt(candidate, params.offsets1.w);
+      }
+      if (sourceContact.valid == 0u) {
+        return RestrictedGeometryResult(0.0, 0u);
+      }
+      if (
+        sourceContact.distance - displacementLength > ipcParameters().x
+      ) {
+        continue;
+      }
       let indices = ipcCandidateIndices(candidate);
       let weight = ipcCandidateWeightForVertex(
         indices,
@@ -1592,11 +2067,14 @@ fn restrictedMinimumDeformationDeterminant(
   // Cloth has no signed 3D determinant. Use its signed relative area stretch:
   // magnitude detects collapse while the source/trial normal dot rejects a
   // local orientation flip before StVK or dihedral energy is evaluated.
+  let triangleRange = clothVertexTriangleRange(sourceVertex);
   for (
-    var triangle = 0u;
-    triangle < clothTriangleCount();
-    triangle += 1u
+    var triangleItem = triangleRange.begin;
+    triangleItem < triangleRange.end;
+    triangleItem += 1u
   ) {
+    let triangle = clothRangeElement(triangleRange, triangleItem);
+    if (triangle >= clothTriangleCount()) { continue; }
     let indices = clothTriangleIndices(triangle);
     if (!clothTriangleIndicesValid(indices)) {
       return RestrictedGeometryResult(0.0, 0u);
@@ -1661,11 +2139,23 @@ fn restrictedEnergyDelta(
   }
   if (ipcEnabled()) {
     let trialPosition = sourcePosition + displacement;
-    for (
-      var candidate = 0u;
-      candidate < ipcCandidateCount();
-      candidate += 1u
-    ) {
+    let displacementLength = length(displacement);
+    let range = ipcVertexCandidateRange(sourceVertex);
+    for (var item = range.begin; item < range.end; item += 1u) {
+      let candidate = ipcRangeCandidate(range, item);
+      if (candidate >= ipcCandidateCount()) { continue; }
+      var sourceContact = ipcCachedContact(candidate, false);
+      if (coloredScheduleEnabled()) {
+        sourceContact = ipcContactAt(candidate, params.offsets1.w);
+      }
+      if (sourceContact.valid == 0u) {
+        return jgs2_globalization_f32_max;
+      }
+      let lagged = ipcLaggedNormalForce(candidate);
+      let frictionActive = ipcParameters().y > 0.0 && lagged.w > 0.0;
+      let barrierMayChange =
+        sourceContact.distance - displacementLength < params.contact.z;
+      if (!barrierMayChange && !frictionActive) { continue; }
       let indices = ipcCandidateIndices(candidate);
       if (
         ipcCandidateWeightForVertex(
@@ -1676,13 +2166,15 @@ fn restrictedEnergyDelta(
       ) {
         continue;
       }
-      let sourceContact = ipcContactAt(candidate, params.offsets1.w);
-      let trialContact = ipcContactAtOverride(
-        candidate,
-        params.offsets1.w,
-        sourceVertex,
-        trialPosition,
-      );
+      var trialContact = ipcSeparatedContact(params.contact.z);
+      if (barrierMayChange) {
+        trialContact = ipcContactAtOverride(
+          candidate,
+          params.offsets1.w,
+          sourceVertex,
+          trialPosition,
+        );
+      }
       let sourceContactEnergy = ipcCandidateEnergyFromContact(
         candidate,
         sourceContact,
@@ -1713,11 +2205,14 @@ fn restrictedEnergyDelta(
   }
 
   let trialPosition = sourcePosition + displacement;
+  let triangleRange = clothVertexTriangleRange(sourceVertex);
   for (
-    var triangle = 0u;
-    triangle < clothTriangleCount();
-    triangle += 1u
+    var triangleItem = triangleRange.begin;
+    triangleItem < triangleRange.end;
+    triangleItem += 1u
   ) {
+    let triangle = clothRangeElement(triangleRange, triangleItem);
+    if (triangle >= clothTriangleCount()) { continue; }
     let indices = clothTriangleIndices(triangle);
     if (!clothTriangleIndicesValid(indices)) {
       return jgs2_globalization_f32_max;
@@ -1739,7 +2234,14 @@ fn restrictedEnergyDelta(
     );
     result += trialMembrane.energy - sourceMembrane.energy;
   }
-  for (var hinge = 0u; hinge < clothHingeCount(); hinge += 1u) {
+  let hingeRange = clothVertexHingeRange(sourceVertex);
+  for (
+    var hingeItem = hingeRange.begin;
+    hingeItem < hingeRange.end;
+    hingeItem += 1u
+  ) {
+    let hinge = clothRangeElement(hingeRange, hingeItem);
+    if (hinge >= clothHingeCount()) { continue; }
     let indices = clothHingeIndices(hinge);
     if (!clothHingeIndicesValid(indices)) {
       return jgs2_globalization_f32_max;
@@ -2083,11 +2585,14 @@ fn vertexImplicitEnergyAt(positionOffset: u32, vertex: u32) -> f32 {
   // Give each cloth element one deterministic vertex owner. Candidate
   // triangle records carry geometry only, so this is the sole assembled
   // membrane/bending energy contribution and remains valid for pinned owners.
+  let triangleRange = clothVertexTriangleRange(vertex);
   for (
-    var triangle = 0u;
-    triangle < clothTriangleCount();
-    triangle += 1u
+    var triangleItem = triangleRange.begin;
+    triangleItem < triangleRange.end;
+    triangleItem += 1u
   ) {
+    let triangle = clothRangeElement(triangleRange, triangleItem);
+    if (triangle >= clothTriangleCount()) { continue; }
     let indices = clothTriangleIndices(triangle);
     if (!clothTriangleIndicesValid(indices)) {
       return jgs2_globalization_f32_max;
@@ -2115,7 +2620,14 @@ fn vertexImplicitEnergyAt(positionOffset: u32, vertex: u32) -> f32 {
       vec3f(0.0),
     ).energy;
   }
-  for (var hinge = 0u; hinge < clothHingeCount(); hinge += 1u) {
+  let hingeRange = clothVertexHingeRange(vertex);
+  for (
+    var hingeItem = hingeRange.begin;
+    hingeItem < hingeRange.end;
+    hingeItem += 1u
+  ) {
+    let hinge = clothRangeElement(hingeRange, hingeItem);
+    if (hinge >= clothHingeCount()) { continue; }
     let indices = clothHingeIndices(hinge);
     if (!clothHingeIndicesValid(indices)) {
       return jgs2_globalization_f32_max;
@@ -2180,10 +2692,37 @@ fn predict(@builtin(global_invocation_id) globalId: vec3u) {
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
+fn promoteAcceptedContactCache(@builtin(global_invocation_id) globalId: vec3u) {
+  let candidate = globalId.x;
+  if (candidate >= ipcCandidateCount()) { return; }
+  // A failed exact contact validation writes alpha zero and the second apply
+  // pass restores the source pose. Material feasibility may still accept that
+  // restored pose, but the target cache describes the rejected pre-restore
+  // pose and must never replace the still-correct source cache.
+  let contactAlpha = dynamicData[ipcContactBase()].w;
+  if (
+    dynamicData[params.offsets4.x + 1u].x == 1.0 &&
+    jgs2_globalization_finite_scalar(contactAlpha) &&
+    contactAlpha > 0.0
+  ) {
+    ipcPromoteTargetContactToSource(candidate);
+  }
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE)
 fn lagContact(@builtin(global_invocation_id) globalId: vec3u) {
   let candidate = globalId.x;
   if (candidate >= ipcCandidateCount()) { return; }
-  let contactData = ipcContactAt(candidate, params.offsets0.x);
+  // Separated candidates outside the barrier only need a conservative AABB
+  // lower bound. Candidates whose lower bound is inside the wider active reach
+  // are still retained; restricted trials recover exact geometry if motion can
+  // carry them into the barrier during this iteration.
+  let contactData = ipcContactAtThreshold(
+    candidate,
+    params.offsets0.x,
+    ipcBarrierBroadPhaseThreshold(),
+  );
+  ipcStoreCachedContact(candidate, false, contactData);
   var normalForce = vec4f(0.0);
   var weights = vec4f(0.0);
   if (contactData.valid != 0u && contactData.distance > ipcParameters().x) {
@@ -2205,6 +2744,47 @@ fn lagContact(@builtin(global_invocation_id) globalId: vec3u) {
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
+fn buildActiveContactRows(@builtin(global_invocation_id) globalId: vec3u) {
+  let vertex = globalId.x;
+  if (vertex >= params.counts.x) { return; }
+  let incidenceLayout = ipcIncidenceLayout();
+  if (incidenceLayout.valid == 0u) { return; }
+  let first = adjacency[incidenceLayout.rows + vertex];
+  let last = adjacency[incidenceLayout.rows + vertex + 1u];
+  if (last < first || last > incidenceLayout.incidenceCount) { return; }
+
+  var activeCount = 0u;
+  let boundedStep = params.time.w > 0.0;
+  let activationReach = ipcActiveContactReach();
+  for (var incidence = first; incidence < last; incidence += 1u) {
+    let candidate = adjacency[incidenceLayout.candidateIds + incidence];
+    if (candidate >= ipcCandidateCount()) { continue; }
+    let contactData = ipcCachedContact(candidate, false);
+    let lagged = ipcLaggedNormalForce(candidate);
+    let frictionActive = ipcParameters().y > 0.0 && lagged.w > 0.0;
+    // Stable nonpinned updates are bounded by maxStep. Pinned vertices snap
+    // to rest, so a deliberately deformed initial pin can exceed that bound.
+    // Keep every affected candidate active for that iteration rather than
+    // applying the narrow-band proof to an unbounded pinned displacement.
+    let unboundedPinnedMotion = ipcCandidatePinnedMotionExceedsBound(
+      candidate,
+      params.offsets1.w,
+      max(params.time.w, 0.0),
+    );
+    let includeCandidate = contactData.valid == 0u || !boundedStep ||
+      contactData.distance <= activationReach || frictionActive ||
+      unboundedPinnedMotion;
+    if (includeCandidate) {
+      adjacency[
+        incidenceLayout.activeCandidateIds + first + activeCount
+      ] = candidate;
+      activeCount += 1u;
+    }
+  }
+  adjacency[incidenceLayout.activeCounts + vertex] = activeCount;
+}
+
+@compute @workgroup_size(WORKGROUP_SIZE)
 fn candidateContactStep(@builtin(global_invocation_id) globalId: vec3u) {
   let candidate = globalId.x;
   if (candidate >= ipcCandidateCount()) { return; }
@@ -2214,8 +2794,6 @@ fn candidateContactStep(@builtin(global_invocation_id) globalId: vec3u) {
   }
   let indices = ipcCandidateIndices(candidate);
   let candidateMeta = ipcCandidateMeta(candidate);
-  let sourceContact = ipcContactAt(candidate, params.offsets1.w);
-  let trialContact = ipcContactAt(candidate, params.offsets2.x);
   let displacement0 = loadPosition(params.offsets2.x, indices.x) -
     loadPosition(params.offsets1.w, indices.x);
   let displacement1 = loadPosition(params.offsets2.x, indices.y) -
@@ -2234,25 +2812,40 @@ fn candidateContactStep(@builtin(global_invocation_id) globalId: vec3u) {
     lipschitzBound = max(length(displacement0), length(displacement1)) +
       max(length(displacement2), length(displacement3));
   }
-  let valid = sourceContact.valid != 0u && trialContact.valid != 0u &&
+  var sourceContact = ipcCachedContact(candidate, false);
+  var fullStepSafe = sourceContact.valid != 0u &&
+    jgs2_ipc_finite_scalar(lipschitzBound) &&
+    sourceContact.distance - lipschitzBound > ipcParameters().x;
+  if (!fullStepSafe) {
+    sourceContact = ipcExactContactAt(candidate, params.offsets1.w);
+    fullStepSafe = sourceContact.valid != 0u &&
+      jgs2_ipc_finite_scalar(lipschitzBound) &&
+      sourceContact.distance - lipschitzBound > ipcParameters().x;
+  }
+  let trialValid = ipcCandidateRecordValid(indices, candidateMeta) &&
+    jgs2_ipc_finite_vec3(displacement0) &&
+    jgs2_ipc_finite_vec3(displacement1) &&
+    jgs2_ipc_finite_vec3(displacement2) &&
+    jgs2_ipc_finite_vec3(displacement3);
+  let valid = sourceContact.valid != 0u && trialValid &&
     sourceContact.distance > ipcParameters().x &&
     jgs2_ipc_finite_scalar(lipschitzBound);
-  let alpha = select(
-    0.0,
-    jgs2_ipc_candidate_safe_step_cap(
+  var alpha = 0.0;
+  if (valid) {
+    alpha = jgs2_ipc_candidate_safe_step_cap(
       sourceContact.distance,
       ipcParameters().x,
       lipschitzBound,
       ipcParameters().w,
-    ),
-    valid,
-  );
+    );
+    if (fullStepSafe) { alpha = 1.0; }
+  }
   ipcStoreCandidateScratch(
     candidate,
     vec4f(
       alpha,
       select(0.0, sourceContact.distance, sourceContact.valid != 0u),
-      select(0.0, trialContact.distance, trialContact.valid != 0u),
+      select(0.0, sourceContact.distance, trialValid),
       select(0.0, 1.0, valid),
     ),
   );
@@ -2262,7 +2855,15 @@ fn candidateContactStep(@builtin(global_invocation_id) globalId: vec3u) {
 fn validateContactStep(@builtin(global_invocation_id) globalId: vec3u) {
   let candidate = globalId.x;
   if (candidate >= ipcCandidateCount()) { return; }
-  let contactData = ipcContactAt(candidate, params.offsets2.x);
+  // Exact validation is needed only when the target AABBs are close enough for
+  // barrier energy. A separated lower bound remains conservative, and the next
+  // active-row build retains it whenever another bounded step can reach it.
+  let contactData = ipcContactAtThreshold(
+    candidate,
+    params.offsets2.x,
+    ipcBarrierBroadPhaseThreshold(),
+  );
+  ipcStoreCachedContact(candidate, true, contactData);
   let valid = contactData.valid != 0u &&
     jgs2_ipc_finite_scalar(contactData.distance) &&
     contactData.distance > ipcParameters().x;
@@ -2432,7 +3033,7 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
         0u,
         LOCAL_STATUS_PINNED,
       );
-      storeAssembledVertexEnergy(vertex);
+      if (!ipcEnabled()) { storeAssembledVertexEnergy(vertex); }
     }
     return;
   }
@@ -2475,7 +3076,7 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
           acceptedMinimumValid,
         ),
       );
-      storeAssembledVertexEnergy(vertex);
+      if (!ipcEnabled()) { storeAssembledVertexEnergy(vertex); }
       return;
     }
   }
@@ -2509,14 +3110,18 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
     }
   }
 
-  // The compact cloth demo scans the static topology directly. Membrane uses
-  // the exact local StVK diagonal block; bending uses the standard positive
-  // Gauss-Newton block k L (d theta/dx_i)(d theta/dx_i)^T.
+  // The incidence CSR restricts this work to the vertex one-ring. Legacy or
+  // malformed tails safely recover the exact global topology scan. Membrane
+  // uses the exact local StVK diagonal block; bending uses the standard
+  // positive Gauss-Newton block k L (d theta/dx_i)(d theta/dx_i)^T.
+  let triangleRange = clothVertexTriangleRange(vertex);
   for (
-    var triangle = 0u;
-    triangle < clothTriangleCount();
-    triangle += 1u
+    var triangleItem = triangleRange.begin;
+    triangleItem < triangleRange.end;
+    triangleItem += 1u
   ) {
+    let triangle = clothRangeElement(triangleRange, triangleItem);
+    if (triangle >= clothTriangleCount()) { continue; }
     let indices = clothTriangleIndices(triangle);
     if (!clothTriangleIndicesValid(indices)) {
       gradient += vec3f(jgs2_globalization_f32_max);
@@ -2538,7 +3143,14 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
       );
     }
   }
-  for (var hinge = 0u; hinge < clothHingeCount(); hinge += 1u) {
+  let hingeRange = clothVertexHingeRange(vertex);
+  for (
+    var hingeItem = hingeRange.begin;
+    hingeItem < hingeRange.end;
+    hingeItem += 1u
+  ) {
+    let hinge = clothRangeElement(hingeRange, hingeItem);
+    if (hinge >= clothHingeCount()) { continue; }
     let indices = clothHingeIndices(hinge);
     if (!clothHingeIndicesValid(indices)) {
       gradient += vec3f(jgs2_globalization_f32_max);
@@ -2712,6 +3324,12 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
       !belowPositionResolution
     ) {
       var trialAlpha = 1.0;
+      let directionLength = jgs2_globalization_scaled_length3(
+        directionResult.direction,
+      );
+      if (params.time.w > 0.0 && directionLength > params.time.w) {
+        trialAlpha = params.time.w / directionLength;
+      }
       for (
         var backtrack = 0u;
         backtrack <= jgs2_globalization_max_backtracks;
@@ -2736,6 +3354,13 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
         let trialLength = jgs2_globalization_scaled_length3(
           trialDisplacement,
         );
+        if (params.time.w > 0.0 && trialLength > params.time.w) {
+          // Rounded f32 position addition can make the stored displacement a
+          // few ulps longer than the nominal capped direction. Backtrack so
+          // the max-step bound used by IPC active-row culling remains exact.
+          trialAlpha *= jgs2_globalization_backtrack_factor;
+          continue;
+        }
         if (trialLength <= positionResolution) {
           // Further halving cannot produce a useful stored update. This is a
           // deliberate numerical zero, not a successful Armijo step.
@@ -2840,7 +3465,10 @@ fn jgs2Solve(@builtin(global_invocation_id) globalId: vec3u) {
       energyEvaluationCount,
       localStatus,
     );
-    storeAssembledVertexEnergy(vertex);
+    // Contact safe-step scaling changes the target after this dispatch. The
+    // explicit post-scaling pass records the only energy pair that reduction
+    // can consume, so avoid computing and immediately overwriting this one.
+    if (!ipcEnabled()) { storeAssembledVertexEnergy(vertex); }
     return;
   }
 
@@ -3399,11 +4027,14 @@ fn convergenceGradient(@builtin(global_invocation_id) globalId: vec3u) {
       )[slot];
     }
   }
+  let triangleRange = clothVertexTriangleRange(vertex);
   for (
-    var triangle = 0u;
-    triangle < clothTriangleCount();
-    triangle += 1u
+    var triangleItem = triangleRange.begin;
+    triangleItem < triangleRange.end;
+    triangleItem += 1u
   ) {
+    let triangle = clothRangeElement(triangleRange, triangleItem);
+    if (triangle >= clothTriangleCount()) { continue; }
     let indices = clothTriangleIndices(triangle);
     if (!clothTriangleIndicesValid(indices)) {
       material += vec3f(jgs2_globalization_f32_max);
@@ -3419,7 +4050,14 @@ fn convergenceGradient(@builtin(global_invocation_id) globalId: vec3u) {
       ).gradients[slot];
     }
   }
-  for (var hinge = 0u; hinge < clothHingeCount(); hinge += 1u) {
+  let hingeRange = clothVertexHingeRange(vertex);
+  for (
+    var hingeItem = hingeRange.begin;
+    hingeItem < hingeRange.end;
+    hingeItem += 1u
+  ) {
+    let hinge = clothRangeElement(hingeRange, hingeItem);
+    if (hinge >= clothHingeCount()) { continue; }
     let indices = clothHingeIndices(hinge);
     if (!clothHingeIndicesValid(indices)) {
       material += vec3f(jgs2_globalization_f32_max);

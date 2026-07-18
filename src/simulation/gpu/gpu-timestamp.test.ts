@@ -263,7 +263,8 @@ describe("GPU timestamp measurement", () => {
     expect(profiler.featureSupported).toBe(false);
     expect(profiler.available).toBe(false);
     expect(profiler.reason).toMatch(/does not have/);
-    expect(profiler.beginFrame()).toBeNull();
+    expect(() => profiler.beginFrame(0)).toThrow(/positive safe integer/);
+    expect(profiler.beginFrame(1)).toBeNull();
     expect(profiler.timestampMapCount).toBe(0);
     expect(allocations).toBe(0);
     profiler.destroy();
@@ -320,7 +321,7 @@ describe("GPU timestamp measurement", () => {
     try {
       const profiler = new GpuTimestampLiveProfiler(device, "live", 2);
       expect(querySetCount).toBe(LIVE_GPU_TIMESTAMP_SLOT_COUNT);
-      const first = profiler.beginFrame()!;
+      const first = profiler.beginFrame(1)!;
       expect([
         first.writes.simulation.startWriteIndex,
         first.writes.simulation.endWriteIndex,
@@ -330,7 +331,7 @@ describe("GPU timestamp measurement", () => {
       expect(first.resolveAfterRender).toBeNull();
       profiler.finishFrame(first);
 
-      const second = profiler.beginFrame()!;
+      const second = profiler.beginFrame(3)!;
       expect([
         second.writes.simulation.startWriteIndex,
         second.writes.simulation.endWriteIndex,
@@ -355,6 +356,7 @@ describe("GPU timestamp measurement", () => {
       ]);
       expect(batches[0]!.gpuRenderMilliseconds).toEqual([0.00004, 0.00005]);
       expect(batches[0]!.gpuFrameMilliseconds).toEqual([0.00016, 0.00027]);
+      expect(batches[0]!.simulationStepCounts).toEqual([1, 3]);
       expect(profiler.consumeCompletedBatches()).toEqual([]);
       profiler.destroy();
       expect(destroyed).toHaveLength(LIVE_GPU_TIMESTAMP_SLOT_COUNT * 3);
@@ -401,12 +403,12 @@ describe("GPU timestamp measurement", () => {
     try {
       const profiler = new GpuTimestampLiveProfiler(device, "live-slots", 1);
       for (let slot = 0; slot < LIVE_GPU_TIMESTAMP_SLOT_COUNT; slot += 1) {
-        const plan = profiler.beginFrame();
+        const plan = profiler.beginFrame(slot + 1);
         expect(plan).not.toBeNull();
         profiler.finishFrame(plan!);
       }
       expect(releases).toHaveLength(LIVE_GPU_TIMESTAMP_SLOT_COUNT);
-      expect(profiler.beginFrame()).toBeNull();
+      expect(profiler.beginFrame(1)).toBeNull();
       expect(profiler.skippedFrameCount).toBe(1);
       profiler.resetMeasurementWindow();
       expect(profiler.skippedFrameCount).toBe(0);
@@ -415,7 +417,7 @@ describe("GPU timestamp measurement", () => {
       await Promise.resolve();
       await Promise.resolve();
       expect(profiler.consumeCompletedBatches()).toEqual([]);
-      const next = profiler.beginFrame();
+      const next = profiler.beginFrame(2);
       expect(next).not.toBeNull();
       profiler.finishFrame(next!);
       expect(profiler.timestampMapCount).toBe(
@@ -453,12 +455,12 @@ describe("GPU timestamp measurement", () => {
 
     try {
       const profiler = new GpuTimestampLiveProfiler(device, "live-abort", 2);
-      const plan = profiler.beginFrame()!;
+      const plan = profiler.beginFrame(1)!;
       profiler.abortFrame(plan, new Error("render submission failed"));
 
       expect(profiler.available).toBe(false);
       expect(profiler.reason).toMatch(/frame aborted.*render submission failed/i);
-      expect(profiler.beginFrame()).toBeNull();
+      expect(profiler.beginFrame(1)).toBeNull();
       expect(() => profiler.finishFrame(plan)).toThrow(/stale or unknown/);
       profiler.destroy();
     } finally {

@@ -44,7 +44,10 @@ import {
   type GpuTimestampIntervalWrites,
   type GpuTimestampMeasurement,
 } from "./gpu-timestamp";
-import { packIpcContactBuffer } from "./ipc-contact-layout";
+import {
+  packIpcContactBuffer,
+  packIpcIncidentCandidateAdjacency,
+} from "./ipc-contact-layout";
 import {
   JGS2_CLOTH_GLOBAL_WORDS,
   packJGS2GpuClothArena,
@@ -201,6 +204,12 @@ interface JGS2GpuBuffers {
   readonly objectives: GPUBuffer;
 }
 
+interface JGS2FrameTimestampWrites {
+  readonly querySet: GPUQuerySet;
+  readonly startWriteIndex?: number;
+  readonly endWriteIndex?: number;
+}
+
 interface JGS2Pipelines {
   readonly predict: GPUComputePipeline;
   readonly tetPolarRotation: GPUComputePipeline;
@@ -214,6 +223,8 @@ interface JGS2Pipelines {
   readonly convergenceGradient?: GPUComputePipeline;
   readonly reduceConvergence?: GPUComputePipeline;
   readonly lagContact?: GPUComputePipeline;
+  readonly buildActiveContactRows?: GPUComputePipeline;
+  readonly promoteAcceptedContactCache?: GPUComputePipeline;
   readonly candidateContactStep?: GPUComputePipeline;
   readonly validateContactStep?: GPUComputePipeline;
   readonly reduceContactStep?: GPUComputePipeline;
@@ -989,9 +1000,18 @@ export class JGS2GpuSolver {
         "Triangle cloth requires the stable Neo-Hookean production path.",
       );
     }
-    const packedContacts = packIpcContactBuffer(
-      input.contactCandidates ?? EMPTY_IPC_CONTACT_CANDIDATES,
+    const contactCandidates =
+      input.contactCandidates ?? EMPTY_IPC_CONTACT_CANDIDATES;
+    const packedContacts = packIpcContactBuffer(contactCandidates);
+    const packedContactIncidence = packIpcIncidentCandidateAdjacency(
+      input.vertexCount,
+      contactCandidates,
     );
+    const packedAdjacency = new Uint32Array(
+      input.adjacency.length + packedContactIncidence.words.length,
+    );
+    packedAdjacency.set(input.adjacency);
+    packedAdjacency.set(packedContactIncidence.words, input.adjacency.length);
     if (!globalizationEnabled && packedContacts.candidateCount !== 0) {
       throw new RangeError(
         "IPC contact candidates require the stable Neo-Hookean production path.",
@@ -1111,7 +1131,7 @@ export class JGS2GpuSolver {
       ["JGS2 vertex buffer", vertices.byteLength],
       ["JGS2 tetrahedron buffer", tets.byteLength],
       ["JGS2 stiffness buffer", input.tetRestStiffness.byteLength],
-      ["JGS2 adjacency buffer", Math.max(4, input.adjacency.byteLength)],
+      ["JGS2 adjacency buffer", Math.max(4, packedAdjacency.byteLength)],
       ["JGS2 cubature buffer", Math.max(4, cubature.byteLength)],
       ["JGS2 objective buffer", uploadedObjectives.byteLength],
     ];
@@ -1158,7 +1178,7 @@ export class JGS2GpuSolver {
           device,
           "jgs2-adjacency",
           GPUBufferUsage.STORAGE,
-          input.adjacency,
+          packedAdjacency,
           storageBuffers,
         ),
         cubature: createInitializedBuffer(
@@ -1184,7 +1204,17 @@ export class JGS2GpuSolver {
             visibility: GPUShaderStage.COMPUTE,
             buffer: { type: "storage" },
           },
-          ...[1, 2, 3, 4, 5, 6].map<GPUBindGroupLayoutEntry>((binding) => ({
+          ...[1, 2, 3].map<GPUBindGroupLayoutEntry>((binding) => ({
+            binding,
+            visibility: GPUShaderStage.COMPUTE,
+            buffer: { type: "read-only-storage" },
+          })),
+          {
+            binding: 4,
+            visibility: GPUShaderStage.COMPUTE,
+            buffer: { type: "storage" },
+          },
+          ...[5, 6].map<GPUBindGroupLayoutEntry>((binding) => ({
             binding,
             visibility: GPUShaderStage.COMPUTE,
             buffer: { type: "read-only-storage" },
@@ -1274,6 +1304,14 @@ export class JGS2GpuSolver {
           ? await Promise.all([
               createPipeline("lagContact", "jgs2-ipc-lag-contact-pipeline"),
               createPipeline(
+                "buildActiveContactRows",
+                "jgs2-ipc-build-active-contact-rows-pipeline",
+              ),
+              createPipeline(
+                "promoteAcceptedContactCache",
+                "jgs2-ipc-promote-accepted-contact-cache-pipeline",
+              ),
+              createPipeline(
                 "candidateContactStep",
                 "jgs2-ipc-candidate-step-pipeline",
               ),
@@ -1309,10 +1347,12 @@ export class JGS2GpuSolver {
         ...(contactPipelines
           ? {
               lagContact: contactPipelines[0],
-              candidateContactStep: contactPipelines[1],
-              validateContactStep: contactPipelines[2],
-              reduceContactStep: contactPipelines[3],
-              applyContactStep: contactPipelines[4],
+              buildActiveContactRows: contactPipelines[1],
+              promoteAcceptedContactCache: contactPipelines[2],
+              candidateContactStep: contactPipelines[3],
+              validateContactStep: contactPipelines[4],
+              reduceContactStep: contactPipelines[5],
+              applyContactStep: contactPipelines[6],
             }
           : {}),
         copyPosition,
@@ -1879,6 +1919,35 @@ export class JGS2GpuSolver {
     );
   }
 
+  /** Batched production steps measured as one GPU timestamp interval. */
+  stepFramesWithGpuTimestampWrites(
+    frameCount: number,
+    writes: GpuTimestampIntervalWrites,
+    overrides: Partial<JGS2StepSettings> = {},
+  ): void {
+    this.assertUsable();
+    validateFrameBatchCount(frameCount);
+    validateTimestampWrites(writes);
+    if (
+      overrides.timestep !== undefined &&
+      !jgs2TimestepsMatch(this.preprocessingTimestep, overrides.timestep)
+    ) {
+      throw new RangeError(
+        `JGS2 was precomputed for timestep ${this.preprocessingTimestep}, ` +
+          `but stepFramesWithGpuTimestampWrites() requested ${overrides.timestep}. ` +
+          "Regenerate the precomputation before changing timestep.",
+      );
+    }
+    const settings = this.resolveStepSettings(overrides);
+    this.submitFrames(
+      settings,
+      normalizeOddIterationCount(settings.iterations),
+      frameCount,
+      true,
+      writes,
+    );
+  }
+
   /** Exact-iteration variant used by parity/conservation benchmarks. */
   stepExactIterationsWithGpuTimestampWrites(
     iterations: number,
@@ -1945,13 +2014,13 @@ export class JGS2GpuSolver {
     writes: GpuTimestampIntervalWrites,
     stopAfterConvergence: boolean,
   ): void {
-    this.prepareFrame(settings, iterations, stopAfterConvergence);
-    const encoder = this.device.createCommandEncoder({
-      label: "jgs2-profiled-step-command-encoder",
-    });
-    this.encodeFrame(encoder, settings, iterations, writes);
-    this.device.queue.submit([encoder.finish()]);
-    this.markGlobalizationRecordsAvailable();
+    this.submitFrames(
+      settings,
+      iterations,
+      1,
+      stopAfterConvergence,
+      writes,
+    );
   }
 
   private submitFrames(
@@ -1959,6 +2028,7 @@ export class JGS2GpuSolver {
     iterations: number,
     frameCount: number,
     stopAfterConvergence: boolean,
+    timestampWrites?: GpuTimestampIntervalWrites,
   ): void {
     if (this.globalizationEnabled) {
       const substepsPerIteration =
@@ -1978,7 +2048,24 @@ export class JGS2GpuSolver {
           : "jgs2-batched-step-command-encoder",
     });
     for (let frame = 0; frame < frameCount; frame += 1) {
-      this.encodeFrame(encoder, settings, iterations);
+      const frameTimestampWrites: JGS2FrameTimestampWrites | undefined =
+        timestampWrites
+          ? {
+              querySet: timestampWrites.querySet,
+              ...(frame === 0
+                ? { startWriteIndex: timestampWrites.startWriteIndex }
+                : {}),
+              ...(frame === frameCount - 1
+                ? { endWriteIndex: timestampWrites.endWriteIndex }
+                : {}),
+            }
+          : undefined;
+      this.encodeFrame(
+        encoder,
+        settings,
+        iterations,
+        frameTimestampWrites,
+      );
     }
     this.device.queue.submit([encoder.finish()]);
     this.markGlobalizationRecordsAvailable();
@@ -2121,7 +2208,7 @@ export class JGS2GpuSolver {
     encoder: GPUCommandEncoder,
     settings: JGS2StepSettings,
     iterations: number,
-    timestampWrites?: GpuTimestampIntervalWrites,
+    timestampWrites?: JGS2FrameTimestampWrites,
   ): void {
     const contactEnabled =
       this.contactCandidateCount > 0 && settings.ipcBarrierStiffness > 0;
@@ -2131,13 +2218,13 @@ export class JGS2GpuSolver {
       this.uniforms.baseBindGroup,
       this.vertexCount,
       "jgs2-predict-pass",
-      timestampWrites
+      timestampWrites?.startWriteIndex !== undefined
         ? {
             querySet: timestampWrites.querySet,
             beginningOfPassWriteIndex: timestampWrites.startWriteIndex,
           }
         : undefined,
-      );
+    );
 
     if (contactEnabled) {
       encodeDispatch(
@@ -2176,6 +2263,15 @@ export class JGS2GpuSolver {
         iteration % 2 === 0
           ? this.uniforms.fromBToABindGroup
           : this.uniforms.fromAToBBindGroup;
+      if (contactEnabled) {
+        encodeDispatch(
+          encoder,
+          this.pipelines.buildActiveContactRows!,
+          bindGroup,
+          this.vertexCount,
+          `jgs2-ipc-build-active-contact-rows-pass-${iteration}`,
+        );
+      }
       if (settings.schedule === "graph-colored-gauss-seidel") {
         // Preserve the complete accepted sweep source for assembled
         // globalization, then update the target in place one conflict-free
@@ -2296,7 +2392,9 @@ export class JGS2GpuSolver {
           this.vertexCount,
           `jgs2-ipc-apply-validated-step-pass-${iteration}`,
         );
-        // jgs2Solve stored energy before the assembled safe-step scaling.
+        // Contact safe-step scaling happens after jgs2Solve. Evaluate the
+        // final source/candidate energy pair only after validation cached the
+        // scaled target pose.
         encodeDispatch(
           encoder,
           this.pipelines.assembledVertexEnergy!,
@@ -2327,6 +2425,15 @@ export class JGS2GpuSolver {
           this.vertexCount,
           `jgs2-apply-candidate-pass-${iteration}`,
         );
+        if (contactEnabled) {
+          encodeDispatch(
+            encoder,
+            this.pipelines.promoteAcceptedContactCache!,
+            bindGroup,
+            this.contactCandidateCount,
+            `jgs2-ipc-promote-accepted-contact-cache-pass-${iteration}`,
+          );
+        }
         encodeDispatch(
           encoder,
           this.pipelines.convergenceGradient!,
@@ -2377,7 +2484,7 @@ export class JGS2GpuSolver {
       this.uniforms.baseBindGroup,
       this.vertexCount,
       "jgs2-finalize-pass",
-      timestampWrites
+      timestampWrites?.endWriteIndex !== undefined
         ? {
             querySet: timestampWrites.querySet,
             endOfPassWriteIndex: timestampWrites.endWriteIndex,

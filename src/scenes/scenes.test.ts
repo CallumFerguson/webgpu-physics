@@ -454,7 +454,7 @@ describe("procedural demo scenes", () => {
     expect(cloth!.triangles).toHaveLength(32 * 3);
     expect(scene.settings).toMatchObject({
       timestep: 1 / 120,
-      solverIterations: 7,
+      solverIterations: 5,
       cubatureSamples: 4,
     });
 

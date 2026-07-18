@@ -12,6 +12,7 @@ export interface LiveGpuTimingBatch {
   readonly frameMilliseconds: readonly number[];
   readonly simulationStepMilliseconds: readonly number[];
   readonly renderMilliseconds: readonly number[];
+  readonly simulationStepCounts: readonly number[];
 }
 
 export interface LivePerformanceSnapshot {
@@ -65,7 +66,9 @@ export class LivePerformanceCollector {
   private readonly gpuFrames: number[] = [];
   private readonly gpuSimulationSteps: number[] = [];
   private readonly gpuRenders: number[] = [];
+  private readonly intervalSimulationStepCounts: number[] = [];
   private previousProducedFrameStartMilliseconds: number | null = null;
+  private previousProducedSimulationStepCount: number | null = null;
 
   constructor(
     private readonly timestepSeconds: number,
@@ -94,6 +97,7 @@ export class LivePerformanceCollector {
     frameStartMilliseconds: number,
     cpuSimulationSubmissionMilliseconds: number,
     cpuRenderSubmissionMilliseconds: number,
+    simulationStepCount = 1,
   ): void {
     validateDuration(frameStartMilliseconds, "frameStartMilliseconds");
     validateDuration(
@@ -104,6 +108,9 @@ export class LivePerformanceCollector {
       cpuRenderSubmissionMilliseconds,
       "cpuRenderSubmissionMilliseconds",
     );
+    if (!Number.isSafeInteger(simulationStepCount) || simulationStepCount < 1) {
+      throw new RangeError("simulationStepCount must be a positive safe integer.");
+    }
     if (
       this.previousProducedFrameStartMilliseconds !== null &&
       frameStartMilliseconds < this.previousProducedFrameStartMilliseconds
@@ -116,11 +123,20 @@ export class LivePerformanceCollector {
         [frameStartMilliseconds - this.previousProducedFrameStartMilliseconds],
         this.windowSize,
       );
+      appendRolling(
+        this.intervalSimulationStepCounts,
+        [this.previousProducedSimulationStepCount!],
+        this.windowSize,
+      );
     }
     this.previousProducedFrameStartMilliseconds = frameStartMilliseconds;
+    this.previousProducedSimulationStepCount = simulationStepCount;
     appendRolling(
       this.cpuSimulationSteps,
-      [cpuSimulationSubmissionMilliseconds],
+      Array.from(
+        { length: simulationStepCount },
+        () => cpuSimulationSubmissionMilliseconds / simulationStepCount,
+      ),
       this.windowSize,
     );
     appendRolling(
@@ -143,7 +159,8 @@ export class LivePerformanceCollector {
     if (
       sampleCount === 0 ||
       batch.simulationStepMilliseconds.length !== sampleCount ||
-      batch.renderMilliseconds.length !== sampleCount
+      batch.renderMilliseconds.length !== sampleCount ||
+      batch.simulationStepCounts.length !== sampleCount
     ) {
       throw new RangeError(
         "Live GPU timing batches must contain matching nonempty sample arrays.",
@@ -158,10 +175,24 @@ export class LivePerformanceCollector {
         validateDuration(sample, name);
       }
     }
+    const normalizedSimulationSteps: number[] = [];
+    for (let sample = 0; sample < sampleCount; sample += 1) {
+      const simulationStepCount = batch.simulationStepCounts[sample]!;
+      if (!Number.isSafeInteger(simulationStepCount) || simulationStepCount < 1) {
+        throw new RangeError(
+          "Live GPU simulation step counts must be positive safe integers.",
+        );
+      }
+      const averageStepMilliseconds =
+        batch.simulationStepMilliseconds[sample]! / simulationStepCount;
+      for (let step = 0; step < simulationStepCount; step += 1) {
+        normalizedSimulationSteps.push(averageStepMilliseconds);
+      }
+    }
     appendRolling(this.gpuFrames, batch.frameMilliseconds, this.windowSize);
     appendRolling(
       this.gpuSimulationSteps,
-      batch.simulationStepMilliseconds,
+      normalizedSimulationSteps,
       this.windowSize,
     );
     appendRolling(this.gpuRenders, batch.renderMilliseconds, this.windowSize);
@@ -172,8 +203,19 @@ export class LivePerformanceCollector {
       this.frameIntervals.length > 0
         ? summarizeFrameTimes(this.frameIntervals)
         : null;
-    const averageFramesPerSecond =
-      frameInterval?.averageFramesPerSecond ?? null;
+    const totalFrameIntervalMilliseconds = this.frameIntervals.reduce(
+      (sum, interval) => sum + interval,
+      0,
+    );
+    const deliveredSimulationStepsPerSecond =
+      totalFrameIntervalMilliseconds > 0
+        ? (1000 *
+            this.intervalSimulationStepCounts.reduce(
+              (sum, count) => sum + count,
+              0,
+            )) /
+          totalFrameIntervalMilliseconds
+        : null;
     return {
       windowSize: this.windowSize,
       frameIntervalSampleCount: this.frameIntervals.length,
@@ -184,11 +226,11 @@ export class LivePerformanceCollector {
         this.frameIntervals.length >= this.onePercentLowMinimumSamples
           ? (frameInterval?.onePercentLowFramesPerSecond ?? null)
           : null,
-      deliveredSimulationStepsPerSecond: averageFramesPerSecond,
+      deliveredSimulationStepsPerSecond,
       simulationTimeRate:
-        averageFramesPerSecond === null
+        deliveredSimulationStepsPerSecond === null
           ? null
-          : averageFramesPerSecond * this.timestepSeconds,
+          : deliveredSimulationStepsPerSecond * this.timestepSeconds,
       cpuFrameSubmission: summarizeOrNull(this.cpuFrames),
       cpuSimulationSubmission: summarizeOrNull(this.cpuSimulationSteps),
       cpuRenderSubmission: summarizeOrNull(this.cpuRenders),
@@ -206,6 +248,8 @@ export class LivePerformanceCollector {
     this.gpuFrames.length = 0;
     this.gpuSimulationSteps.length = 0;
     this.gpuRenders.length = 0;
+    this.intervalSimulationStepCounts.length = 0;
     this.previousProducedFrameStartMilliseconds = null;
+    this.previousProducedSimulationStepCount = null;
   }
 }

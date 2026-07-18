@@ -6,6 +6,9 @@ import {
   JGS2_CLOTH_HINGE_REST_WORD_OFFSETS,
   JGS2_CLOTH_HINGE_VEC4_OFFSETS,
   JGS2_CLOTH_HINGE_WORDS,
+  JGS2_CLOTH_INCIDENCE_HEADER_WORDS,
+  JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS,
+  JGS2_CLOTH_INCIDENCE_MAGIC,
   JGS2_CLOTH_MATERIAL_WORD_OFFSETS,
   JGS2_CLOTH_TRIANGLE_AREA_WORD_OFFSETS,
   JGS2_CLOTH_TRIANGLE_BYTES,
@@ -50,7 +53,8 @@ describe("GPU cloth arena layout", () => {
     expect(packed.byteLength).toBe(
       JGS2_CLOTH_GLOBAL_BYTES +
         2 * JGS2_CLOTH_TRIANGLE_BYTES +
-        JGS2_CLOTH_HINGE_BYTES,
+        JGS2_CLOTH_HINGE_BYTES +
+        32 * 4,
     );
     expect([...packed.integers.subarray(0, JGS2_CLOTH_GLOBAL_WORDS)]).toEqual([
       2, 1, 0, ...floatBits(1, 320, 480, 0.125, 3.5),
@@ -105,16 +109,54 @@ describe("GPU cloth arena layout", () => {
         hingeRest + JGS2_CLOTH_HINGE_REST_WORD_OFFSETS.edgeLength
       ],
     ]).toEqual([-0.125, 1.5]);
-    expect(hinge + JGS2_CLOTH_HINGE_WORDS).toBe(packed.integers.length);
+    expect(hinge + JGS2_CLOTH_HINGE_WORDS).toBe(
+      packed.incidenceWordOffset,
+    );
     expect(
       packed.floats[
         JGS2_CLOTH_VEC4_WORDS +
           JGS2_CLOTH_MATERIAL_WORD_OFFSETS.bendingStiffness
       ],
     ).toBe(3.5);
+
+    const incidence = packed.incidenceWordOffset;
+    expect(packed.incidenceWordCount).toBe(32);
+    expect(
+      [...packed.integers.subarray(
+        incidence,
+        incidence + JGS2_CLOTH_INCIDENCE_HEADER_WORDS,
+      )],
+    ).toEqual([
+      JGS2_CLOTH_INCIDENCE_MAGIC,
+      5,
+      6,
+      4,
+      8,
+      14,
+      20,
+      32,
+    ]);
+    expect(
+      [...packed.integers.subarray(incidence + 8, incidence + 14)],
+    ).toEqual([0, 2, 4, 5, 6, 6]);
+    expect(
+      [...packed.integers.subarray(incidence + 14, incidence + 20)],
+    ).toEqual([0, 1, 0, 1, 0, 1]);
+    expect(
+      [...packed.integers.subarray(incidence + 20, incidence + 26)],
+    ).toEqual([0, 1, 2, 3, 4, 4]);
+    expect(
+      [...packed.integers.subarray(incidence + 26, incidence + 30)],
+    ).toEqual([0, 0, 0, 0]);
+    expect(
+      [...packed.integers.subarray(incidence + 30, incidence + 32)],
+    ).toEqual([0, 0]);
+    expect(incidence + packed.incidenceWordCount).toBe(
+      packed.integers.length,
+    );
   });
 
-  it("emits the two global vec4s for empty topology", () => {
+  it("emits empty CSR rows and aligned padding for empty topology", () => {
     const input = fixture();
     const packed = packJGS2GpuClothArena({
       ...input,
@@ -126,12 +168,40 @@ describe("GPU cloth arena layout", () => {
       hingeRestAngles: new Float32Array(),
       hingeRestEdgeLengths: new Float32Array(),
     });
-    expect(packed.byteLength).toBe(32);
+    expect(packed.byteLength).toBe(80);
     expect(packed.triangleCount).toBe(0);
     expect(packed.hingeCount).toBe(0);
     expect([...packed.integers.subarray(0, 4)]).toEqual([
       0, 0, 0, floatBits(1)[0],
     ]);
+    expect(packed.incidenceWordOffset).toBe(JGS2_CLOTH_GLOBAL_WORDS);
+    expect(packed.incidenceWordCount).toBe(12);
+    const incidence = packed.incidenceWordOffset;
+    expect(
+      [...packed.integers.subarray(
+        incidence,
+        incidence + JGS2_CLOTH_INCIDENCE_HEADER_WORDS,
+      )],
+    ).toEqual([
+      JGS2_CLOTH_INCIDENCE_MAGIC,
+      0,
+      0,
+      0,
+      JGS2_CLOTH_INCIDENCE_HEADER_WORDS,
+      JGS2_CLOTH_INCIDENCE_HEADER_WORDS + 1,
+      JGS2_CLOTH_INCIDENCE_HEADER_WORDS + 1,
+      12,
+    ]);
+    expect(
+      packed.integers[
+        incidence + JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.wordCount
+      ],
+    ).toBe(12);
+    expect(
+      [...packed.integers.subarray(
+        incidence + JGS2_CLOTH_INCIDENCE_HEADER_WORDS,
+      )],
+    ).toEqual([0, 0, 0, 0]);
   });
 
   it("rejects count, index, rest-data, and material violations", () => {

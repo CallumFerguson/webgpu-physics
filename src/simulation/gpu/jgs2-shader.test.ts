@@ -571,6 +571,67 @@ describe("JGS2 stable globalization shader contract", () => {
     expect(hinges).toContain("available / CLOTH_HINGE_WORDS");
   });
 
+  it("validates the cloth incidence suffix and preserves the legacy schedule base", () => {
+    const incidence = functionBody("clothIncidenceTailAvailable");
+    expect(incidence).toContain("cubatureWords[base] != CLOTH_INCIDENCE_MAGIC");
+    expect(incidence).toContain(
+      "cubatureWords[base + CLOTH_INCIDENCE_VERTEX_COUNT_OFFSET] != vertexCount",
+    );
+    expect(incidence).toContain("packedWordCount != expectedWordCount");
+    expect(incidence).toContain(
+      "cubatureWords[base + triangleRows + vertexCount] ==",
+    );
+    expect(incidence).toContain(
+      "cubatureWords[base + hingeRows + vertexCount] == hingeIncidenceCount",
+    );
+
+    const scheduleBase = functionBody("scheduleArenaBase");
+    expect(scheduleBase).toContain(
+      "if (!clothIncidenceTailAvailable()) { return legacyEnd; }",
+    );
+    expect(scheduleBase).toContain(
+      "legacyEnd + CLOTH_INCIDENCE_WORD_COUNT_OFFSET",
+    );
+  });
+
+  it("uses per-vertex cloth CSR ranges with a safe global-scan fallback", () => {
+    const triangles = functionBody("clothVertexTriangleRange");
+    expect(triangles).toContain(
+      "let fallback = clothGlobalElementRange(triangleCount)",
+    );
+    expect(triangles).toContain("if (begin > end || end > incidenceCount)");
+    expect(triangles).toContain(
+      "if (cubatureWords[elements + item] >= triangleCount) { return fallback; }",
+    );
+    const hinges = functionBody("clothVertexHingeRange");
+    expect(hinges).toContain(
+      "let fallback = clothGlobalElementRange(hingeCount)",
+    );
+    expect(hinges).toContain(
+      "if (cubatureWords[elements + item] >= hingeCount) { return fallback; }",
+    );
+
+    for (const name of [
+      "jgs2Solve",
+      "restrictedEnergyDelta",
+      "vertexImplicitEnergyAt",
+      "convergenceGradient",
+    ]) {
+      const body = functionBody(name);
+      expect(body, name).toContain("clothVertexTriangleRange(");
+      expect(body, name).toContain("clothVertexHingeRange(");
+      expect(body, name).toContain("clothRangeElement(");
+      expect(body, name).not.toContain("var triangle = 0u");
+      expect(body, name).not.toContain("var hinge = 0u");
+    }
+    const geometry = functionBody(
+      "restrictedMinimumDeformationDeterminant",
+    );
+    expect(geometry).toContain("clothVertexTriangleRange(sourceVertex)");
+    expect(geometry).toContain("clothRangeElement(");
+    expect(geometry).not.toContain("var triangle = 0u");
+  });
+
   it("uses analytic StVK membrane derivatives and an exact local diagonal block", () => {
     const membrane = functionBody("clothMembraneEvaluationAt");
     expect(membrane).toContain(
@@ -614,7 +675,7 @@ describe("JGS2 stable globalization shader contract", () => {
     const geometry = functionBody(
       "restrictedMinimumDeformationDeterminant",
     );
-    expect(geometry).toContain("triangle < clothTriangleCount()");
+    expect(geometry).toContain("clothVertexTriangleRange(sourceVertex)");
     expect(geometry).toContain("dot(sourceNormal, trialNormal) > 0.0");
     expect(geometry).toContain("min(sourceStretch, trialStretch)");
 
@@ -649,5 +710,100 @@ describe("JGS2 stable globalization shader contract", () => {
     expect(reduction).toContain(
       "tet < params.counts.y + clothTriangleCount()",
     );
+  });
+});
+
+describe("JGS2 IPC contact performance contract", () => {
+  it("uses the mutable incident-candidate CSR for vertex-local contact work", () => {
+    const range = functionBody("ipcVertexCandidateRange");
+    expect(range).toContain("incidenceLayout.activeCounts + vertex");
+    expect(range).toContain("incidenceLayout.activeCandidateIds + first");
+    expect(jgs2Shader).not.toContain("fn ipcStaticVertexCandidateRange(");
+
+    for (const name of [
+      "ipcOwnedEnergy",
+      "ipcLocalContribution",
+      "restrictedMinimumDeformationDeterminant",
+      "restrictedEnergyDelta",
+    ]) {
+      const body = functionBody(name);
+      expect(body, name).toContain("ipcVertexCandidateRange(");
+      expect(body, name).not.toContain("candidate < ipcCandidateCount()");
+    }
+  });
+
+  it("builds one conservative active row from cached source distances", () => {
+    const builder = functionBody("buildActiveContactRows");
+    expect(builder).toContain("incidenceLayout.candidateIds + incidence");
+    expect(builder).toContain("ipcCachedContact(candidate, false)");
+    expect(builder).toContain("let activationReach = ipcActiveContactReach()");
+    expect(builder).toContain("incidenceLayout.activeCandidateIds + first + activeCount");
+    expect(builder).toContain("incidenceLayout.activeCounts + vertex");
+    expect(builder).toContain("ipcCandidatePinnedMotionExceedsBound(");
+  });
+
+  it("broad-phases full candidate passes outside the barrier distance", () => {
+    const threshold = functionBody("ipcBarrierBroadPhaseThreshold");
+    expect(threshold).toContain(
+      "params.contact.z + ipcContactRoundingReach()",
+    );
+    const reach = functionBody("ipcActiveContactReach");
+    expect(reach).toContain("params.contact.z +");
+    expect(reach).toContain(
+      "2.0 * (max(params.time.w, 0.0) + roundingReach)",
+    );
+    for (const name of ["lagContact", "validateContactStep"]) {
+      const body = functionBody(name);
+      expect(body, name).toContain("ipcContactAtThreshold(");
+      expect(body, name).toContain("ipcBarrierBroadPhaseThreshold()");
+    }
+  });
+
+  it("does not promote a rejected exact-contact target cache", () => {
+    const promotion = functionBody("promoteAcceptedContactCache");
+    expect(promotion).toContain("let contactAlpha = dynamicData[ipcContactBase()].w");
+    expect(promotion).toContain("contactAlpha > 0.0");
+    expect(promotion).toContain("ipcPromoteTargetContactToSource(candidate)");
+  });
+
+  it("keeps candidates active when a pinned snap exceeds maxStep", () => {
+    const bound = functionBody("ipcCandidatePinnedMotionExceedsBound");
+    expect(bound).toContain("vertexData[vertex].info.z == 0u");
+    expect(bound).toContain("vertexData[vertex].restMass.xyz");
+    expect(bound).toContain("displacementLength > displacementBound");
+    expect(bound).toContain("return true");
+  });
+
+  it("enforces the max-step bound used by conservative contact culling", () => {
+    const solve = functionBody("jgs2Solve");
+    const directionLength = solve.indexOf(
+      "let directionLength = jgs2_globalization_scaled_length3(",
+    );
+    const clamp = solve.indexOf("trialAlpha = params.time.w / directionLength");
+    const trialLoop = solve.indexOf("for (\n        var backtrack = 0u");
+    expect(directionLength).toBeGreaterThanOrEqual(0);
+    expect(clamp).toBeGreaterThan(directionLength);
+    expect(trialLoop).toBeGreaterThan(clamp);
+    expect(solve).toContain(
+      "if (params.time.w > 0.0 && trialLength > params.time.w)",
+    );
+  });
+
+  it("refreshes in-place colored-GS contact geometry instead of using stale caches", () => {
+    for (const name of [
+      "ipcLocalContribution",
+      "restrictedMinimumDeformationDeterminant",
+      "restrictedEnergyDelta",
+    ]) {
+      const body = functionBody(name);
+      expect(body, name).toContain("if (coloredScheduleEnabled())");
+      expect(body, name).toContain("ipcContactAt(candidate,");
+    }
+  });
+
+  it("defers IPC assembled-energy storage until after contact scaling", () => {
+    const solve = functionBody("jgs2Solve");
+    expect(solve.match(/if \(!ipcEnabled\(\)\) \{ storeAssembledVertexEnergy\(vertex\); \}/g))
+      .not.toBeNull();
   });
 });

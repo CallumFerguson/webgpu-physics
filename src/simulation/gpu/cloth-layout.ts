@@ -16,6 +16,22 @@ export const JGS2_CLOTH_TRIANGLE_BYTES =
 export const JGS2_CLOTH_HINGE_BYTES =
   JGS2_CLOTH_HINGE_WORDS * JGS2_CLOTH_WORD_BYTES;
 
+/** "CSR2" in little-endian ASCII. */
+export const JGS2_CLOTH_INCIDENCE_MAGIC = 0x3252_5343;
+export const JGS2_CLOTH_INCIDENCE_HEADER_WORDS = 8;
+
+/** u32 fields in the validated incidence suffix header. */
+export const JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS = {
+  magic: 0,
+  vertexCount: 1,
+  triangleIncidenceCount: 2,
+  hingeIncidenceCount: 3,
+  triangleRows: 4,
+  triangleElements: 5,
+  hingeRows: 6,
+  wordCount: 7,
+} as const;
+
 /** Mixed u32/f32 fields in the first global vec4. */
 export const JGS2_CLOTH_CONTROL_WORD_OFFSETS = {
   triangleCount: 0,
@@ -89,6 +105,9 @@ export interface PackedJGS2GpuClothArena {
   readonly byteLength: number;
   readonly triangleCount: number;
   readonly hingeCount: number;
+  /** Word offset of the validated vertex-to-element CSR suffix. */
+  readonly incidenceWordOffset: number;
+  readonly incidenceWordCount: number;
   readonly planeStressLambda: number;
   readonly mu: number;
 }
@@ -150,6 +169,41 @@ function validateElementIndices(
       throw new RangeError(`${label} ${element} must reference ${width} distinct vertices.`);
     }
   }
+}
+
+function alignTo4Words(wordCount: number): number {
+  return Math.ceil(wordCount / JGS2_CLOTH_VEC4_WORDS) * JGS2_CLOTH_VEC4_WORDS;
+}
+
+interface IncidentElementCsr {
+  readonly rows: Uint32Array;
+  readonly elements: Uint32Array;
+}
+
+function buildIncidentElementCsr(
+  vertexCount: number,
+  elementIndices: Uint32Array,
+  elementWidth: number,
+): IncidentElementCsr {
+  const elementCount = elementIndices.length / elementWidth;
+  const rows = new Uint32Array(vertexCount + 1);
+  for (let index = 0; index < elementIndices.length; index += 1) {
+    rows[elementIndices[index]! + 1] += 1;
+  }
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    rows[vertex + 1] += rows[vertex]!;
+  }
+
+  const elements = new Uint32Array(elementIndices.length);
+  const cursors = rows.slice(0, vertexCount);
+  for (let element = 0; element < elementCount; element += 1) {
+    for (let lane = 0; lane < elementWidth; lane += 1) {
+      const vertex = elementIndices[element * elementWidth + lane]!;
+      elements[cursors[vertex]!] = element;
+      cursors[vertex] += 1;
+    }
+  }
+  return { rows, elements };
 }
 
 /** Validate the static cloth topology/rest data before crossing the GPU ABI. */
@@ -244,8 +298,9 @@ export function validateJGS2GpuClothInput(input: JGS2GpuClothInput): void {
 }
 
 /**
- * Pack two global vec4s, then four vec4s per triangle and two per hinge.
- * Integer indices and floating-point rest data share one storage-buffer arena.
+ * Pack two global vec4s, then four vec4s per triangle, two per hinge, and a
+ * validated vertex-to-triangle/hinge CSR suffix. Integer indices and
+ * floating-point rest data share one storage-buffer arena.
  */
 export function packJGS2GpuClothArena(
   input: JGS2GpuClothInput,
@@ -253,10 +308,32 @@ export function packJGS2GpuClothArena(
   validateJGS2GpuClothInput(input);
   const triangleCount = input.triangleIndices.length / 3;
   const hingeCount = input.hingeIndices.length / 4;
+  const triangleCsr = buildIncidentElementCsr(
+    input.vertexCount,
+    input.triangleIndices,
+    3,
+  );
+  const hingeCsr = buildIncidentElementCsr(
+    input.vertexCount,
+    input.hingeIndices,
+    4,
+  );
+  const incidenceWordOffset =
+    JGS2_CLOTH_GLOBAL_WORDS +
+    triangleCount * JGS2_CLOTH_TRIANGLE_WORDS +
+    hingeCount * JGS2_CLOTH_HINGE_WORDS;
+  const triangleRowsOffset = JGS2_CLOTH_INCIDENCE_HEADER_WORDS;
+  const triangleElementsOffset = triangleRowsOffset + triangleCsr.rows.length;
+  const hingeRowsOffset = triangleElementsOffset + triangleCsr.elements.length;
+  const hingeElementsOffset = hingeRowsOffset + hingeCsr.rows.length;
+  const incidenceWordCount = alignTo4Words(
+    hingeElementsOffset + hingeCsr.elements.length,
+  );
+  if (!Number.isSafeInteger(incidenceWordCount) || incidenceWordCount > MAX_U32) {
+    throw new RangeError("Cloth incidence suffix exceeds unsigned 32-bit storage.");
+  }
   const byteLength =
-    JGS2_CLOTH_GLOBAL_BYTES +
-    triangleCount * JGS2_CLOTH_TRIANGLE_BYTES +
-    hingeCount * JGS2_CLOTH_HINGE_BYTES;
+    (incidenceWordOffset + incidenceWordCount) * JGS2_CLOTH_WORD_BYTES;
   const buffer = new ArrayBuffer(byteLength);
   const integers = new Uint32Array(buffer);
   const floats = new Float32Array(buffer);
@@ -325,6 +402,39 @@ export function packJGS2GpuClothArena(
       input.hingeRestEdgeLengths[hinge]!;
   }
 
+  const incidenceHeader = incidenceWordOffset;
+  integers[
+    incidenceHeader + JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.magic
+  ] = JGS2_CLOTH_INCIDENCE_MAGIC;
+  integers[
+    incidenceHeader + JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.vertexCount
+  ] = input.vertexCount;
+  integers[
+    incidenceHeader +
+      JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.triangleIncidenceCount
+  ] = triangleCsr.elements.length;
+  integers[
+    incidenceHeader +
+      JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.hingeIncidenceCount
+  ] = hingeCsr.elements.length;
+  integers[
+    incidenceHeader + JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.triangleRows
+  ] = triangleRowsOffset;
+  integers[
+    incidenceHeader +
+      JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.triangleElements
+  ] = triangleElementsOffset;
+  integers[
+    incidenceHeader + JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.hingeRows
+  ] = hingeRowsOffset;
+  integers[
+    incidenceHeader + JGS2_CLOTH_INCIDENCE_HEADER_WORD_OFFSETS.wordCount
+  ] = incidenceWordCount;
+  integers.set(triangleCsr.rows, incidenceHeader + triangleRowsOffset);
+  integers.set(triangleCsr.elements, incidenceHeader + triangleElementsOffset);
+  integers.set(hingeCsr.rows, incidenceHeader + hingeRowsOffset);
+  integers.set(hingeCsr.elements, incidenceHeader + hingeElementsOffset);
+
   return {
     buffer,
     integers,
@@ -332,6 +442,8 @@ export function packJGS2GpuClothArena(
     byteLength,
     triangleCount,
     hingeCount,
+    incidenceWordOffset,
+    incidenceWordCount,
     planeStressLambda: floats[
       materialBase + JGS2_CLOTH_MATERIAL_WORD_OFFSETS.planeStressLambda
     ]!,

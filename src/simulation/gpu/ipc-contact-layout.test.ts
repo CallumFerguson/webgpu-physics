@@ -7,11 +7,14 @@ import {
   IPC_CONTACT_CANDIDATE_WORDS,
   IPC_CONTACT_GLOBAL_BYTES,
   IPC_CONTACT_GLOBAL_WORDS,
+  IPC_CONTACT_INCIDENCE_HEADER_WORDS,
+  IPC_CONTACT_INCIDENCE_MAGIC,
   IPC_CONTACT_META_WORD_OFFSETS,
   IPC_CONTACT_SCRATCH_WORD_OFFSETS,
   IPC_CONTACT_TYPE_EDGE_EDGE,
   IPC_CONTACT_TYPE_VERTEX_TRIANGLE,
   IPC_CONTACT_VEC4_WORDS,
+  packIpcIncidentCandidateAdjacency,
   packIpcContactBuffer,
   validateIpcContactCandidatesForGpu,
 } from "./ipc-contact-layout";
@@ -86,7 +89,63 @@ describe("IPC GPU contact buffer layout", () => {
           scratchBase + IPC_CONTACT_SCRATCH_WORD_OFFSETS.valid
         ],
       ).toBe(0);
+      for (const offset of [
+        IPC_CONTACT_CANDIDATE_VEC4_OFFSETS.sourceContact,
+        IPC_CONTACT_CANDIDATE_VEC4_OFFSETS.targetContact,
+      ]) {
+        expect(
+          packed.floats[base + offset * IPC_CONTACT_VEC4_WORDS + 3],
+        ).toBe(-1);
+      }
     }
+  });
+
+  it("packs deterministic static and mutable vertex-candidate CSR rows", () => {
+    const packed = packIpcIncidentCandidateAdjacency(14, mixedCandidates());
+    const rowsBase = IPC_CONTACT_INCIDENCE_HEADER_WORDS;
+    const rowOffsets = [0, 0, 0, 1, 2, 3, 3, 3, 4, 5, 6, 6, 6, 7, 8];
+    const candidateIdsBase = rowsBase + rowOffsets.length;
+    const activeCountsBase = candidateIdsBase + packed.incidenceCount;
+    const activeCandidateIdsBase = activeCountsBase + packed.vertexCount;
+
+    expect([...packed.words.subarray(0, rowsBase)]).toEqual([
+      IPC_CONTACT_INCIDENCE_MAGIC,
+      14,
+      2,
+      8,
+    ]);
+    expect([...packed.words.subarray(rowsBase, candidateIdsBase)]).toEqual(
+      rowOffsets,
+    );
+    expect(
+      [...packed.words.subarray(candidateIdsBase, activeCountsBase)],
+    ).toEqual([0, 0, 0, 0, 1, 1, 1, 1]);
+    expect(
+      [...packed.words.subarray(activeCountsBase, activeCandidateIdsBase)],
+    ).toEqual(new Array(14).fill(0));
+    expect([...packed.words.subarray(activeCandidateIdsBase)]).toEqual(
+      new Array(8).fill(0),
+    );
+    expect(packed.words).toHaveLength(49);
+  });
+
+  it("omits an empty suffix and rejects candidate vertices outside the mesh", () => {
+    const emptyCandidates: StaticIpcContactCandidates = {
+      vertexTriangleCandidates: [],
+      edgeEdgeCandidates: [],
+      packedIndices: new Uint32Array(),
+      vertexTriangleCount: 0,
+      edgeEdgeCount: 0,
+    };
+    expect(packIpcIncidentCandidateAdjacency(14, emptyCandidates)).toEqual({
+      words: new Uint32Array(),
+      vertexCount: 14,
+      candidateCount: 0,
+      incidenceCount: 0,
+    });
+    expect(() =>
+      packIpcIncidentCandidateAdjacency(13, mixedCandidates()),
+    ).toThrow(/references vertex 13.*vertexCount is 13/i);
   });
 
   it("always emits the 32-byte global records for an empty candidate set", () => {

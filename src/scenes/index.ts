@@ -556,7 +556,7 @@ function clothDefinition(): SceneDefinition {
       timestep: 1 / 120,
       gravity: [0, -9.81, 0],
       floorY: 0,
-      solverIterations: 7,
+      solverIterations: 5,
       cubatureSamples: 4,
     },
     camera: {
