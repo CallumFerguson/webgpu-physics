@@ -20,10 +20,13 @@ import {
   MINIMAL_SCRIPTED_TARGET_VERTEX,
   PUBLIC_SCENE_IDS,
   SCENE_IDS,
+  TROUGH_DEFAULT_BOX_COUNT,
+  TROUGH_MAX_BOX_COUNT,
   buildForceFreeConservationScene,
   buildScene,
   buildSceneDefinition,
   generatePhase0ForceFreeInitialStateCorpus,
+  normalizeTroughBoxCount,
   toForceFreeConservationGpuInput,
   toJGS2GpuInput,
   type SceneId,
@@ -36,6 +39,7 @@ describe("procedural demo scenes", () => {
       "stiffness",
       "drop",
       "contact",
+      "trough",
       "cloth",
       "stress",
     ]);
@@ -43,6 +47,7 @@ describe("procedural demo scenes", () => {
     expect(PUBLIC_SCENE_IDS).toEqual([
       "minimal",
       "contact",
+      "trough",
       "cloth",
       "stress",
     ]);
@@ -325,6 +330,7 @@ describe("procedural demo scenes", () => {
       stiffness: 2,
       drop: 1,
       contact: 4,
+      trough: 11,
       cloth: 2,
       stress: 6,
     };
@@ -333,6 +339,7 @@ describe("procedural demo scenes", () => {
       stiffness: 2,
       drop: 0,
       contact: 2,
+      trough: 1,
       cloth: 2,
       stress: 0,
     };
@@ -442,6 +449,83 @@ describe("procedural demo scenes", () => {
       candidate.every((vertex) => scene.mesh.bodyIds[vertex] === 3),
     );
     expect(selfContactCandidates.length).toBeGreaterThan(0);
+  }, 20_000);
+
+  it("builds a configurable, initially feasible IPC box trough", () => {
+    expect(normalizeTroughBoxCount(undefined)).toBe(
+      TROUGH_DEFAULT_BOX_COUNT,
+    );
+    expect(normalizeTroughBoxCount(Number.NaN)).toBe(
+      TROUGH_DEFAULT_BOX_COUNT,
+    );
+    expect(normalizeTroughBoxCount(0)).toBe(TROUGH_DEFAULT_BOX_COUNT);
+    expect(normalizeTroughBoxCount(2.5)).toBe(TROUGH_DEFAULT_BOX_COUNT);
+    expect(normalizeTroughBoxCount(TROUGH_MAX_BOX_COUNT + 1)).toBe(
+      TROUGH_DEFAULT_BOX_COUNT,
+    );
+    expect(normalizeTroughBoxCount(3)).toBe(3);
+
+    const definition = buildSceneDefinition("trough");
+    const repeated = buildSceneDefinition("trough");
+    const maximum = buildSceneDefinition("trough", {
+      troughBoxCount: TROUGH_MAX_BOX_COUNT,
+    });
+    expect([...definition.mesh.positions]).toEqual([
+      ...repeated.mesh.positions,
+    ]);
+    expect([...definition.mesh.tetrahedra]).toEqual([
+      ...repeated.mesh.tetrahedra,
+    ]);
+    expect(getVertexCount(definition.mesh)).toBe(
+      12 + 8 * TROUGH_DEFAULT_BOX_COUNT,
+    );
+    expect(getTetrahedronCount(definition.mesh)).toBe(
+      12 + 6 * TROUGH_DEFAULT_BOX_COUNT,
+    );
+    expect(getVertexCount(maximum.mesh)).toBe(
+      12 + 8 * TROUGH_MAX_BOX_COUNT,
+    );
+    expect(getTetrahedronCount(maximum.mesh)).toBe(
+      12 + 6 * TROUGH_MAX_BOX_COUNT,
+    );
+
+    const scene = buildScene("trough");
+    const input = toJGS2GpuInput(scene);
+    expect(
+      scene.materials.every(
+        (material) => material.model === "stable-neo-hookean",
+      ),
+    ).toBe(true);
+    expect(scene.settings).toMatchObject({
+      timestep: 1 / 60,
+      solverIterations: 3,
+      cubatureSamples: 6,
+    });
+
+    const fixedVertices: number[] = [];
+    const bodyIds = new Set<number>();
+    for (let vertex = 0; vertex < input.vertexCount; vertex += 1) {
+      const bodyId = scene.mesh.bodyIds[vertex]!;
+      bodyIds.add(bodyId);
+      expect(scene.mesh.fixed[vertex] !== 0).toBe(bodyId === 0);
+      if (scene.mesh.fixed[vertex] !== 0) fixedVertices.push(vertex);
+    }
+    expect(fixedVertices).toHaveLength(12);
+    expect([...bodyIds].sort((left, right) => left - right)).toEqual(
+      Array.from(
+        { length: TROUGH_DEFAULT_BOX_COUNT + 1 },
+        (_unused, bodyId) => bodyId,
+      ),
+    );
+
+    const candidates = input.contactCandidates;
+    expect(candidates).toBeDefined();
+    expect(candidates!.vertexTriangleCount).toBe(11_728);
+    expect(candidates!.edgeEdgeCount).toBe(20_073);
+    expect(candidates!.packedIndices).toHaveLength(31_801 * 4);
+    expect(
+      minimumStaticIpcContactDistance(input.positions, candidates!, 4),
+    ).toBeGreaterThan(0.08);
   }, 20_000);
 
   it("builds a two-point-pinned triangle cloth with consistent areal mass", () => {

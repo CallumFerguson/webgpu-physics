@@ -195,7 +195,7 @@ a {
   color: var(--cyan);
 }
 
-.schedule-control {
+.rail-select-control {
   display: grid;
   gap: 7px;
   margin-top: 20px;
@@ -203,14 +203,20 @@ a {
   border-top: 1px solid var(--line);
 }
 
-.schedule-control span {
+.rail-select-control + .rail-select-control {
+  margin-top: 10px;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.rail-select-control span {
   color: #657782;
   font: 500 0.57rem "DM Mono", monospace;
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
-.schedule-control select {
+.rail-select-control select {
   width: 100%;
   padding: 8px 9px;
   border: 1px solid rgb(151 184 198 / 18%);
@@ -221,7 +227,7 @@ a {
   font: 400 0.61rem "DM Mono", monospace;
 }
 
-.schedule-control select:focus-visible {
+.rail-select-control select:focus-visible {
   border-color: rgb(86 224 209 / 55%);
   outline: 2px solid rgb(86 224 209 / 16%);
   outline-offset: 2px;
@@ -674,7 +680,7 @@ canvas {
   }
 
   .scene-rail nav {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     margin-top: 8px;
   }
 
@@ -688,7 +694,7 @@ canvas {
     display: none;
   }
 
-  .schedule-control {
+  .rail-select-control {
     grid-template-columns: auto minmax(170px, 230px);
     align-items: center;
     justify-content: end;
@@ -735,7 +741,7 @@ canvas {
   }
 
   .scene-rail nav {
-    min-width: 520px;
+    min-width: 650px;
   }
 
   .content {

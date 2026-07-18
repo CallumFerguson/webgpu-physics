@@ -23,12 +23,17 @@ import {
   PHASE0_FORCE_FREE_ITERATIONS,
   PUBLIC_SCENE_IDS,
   SCENE_IDS,
+  TROUGH_DEFAULT_BOX_COUNT,
+  TROUGH_MAX_BOX_COUNT,
+  TROUGH_MIN_BOX_COUNT,
   buildForceFreeConservationDefinition,
   buildForceFreeConservationScene,
   buildScene,
   buildSceneDefinition,
   generatePhase0ForceFreeInitialStateCorpus,
+  isIpcSceneId,
   minimalScriptedTargetAtFrame,
+  normalizeTroughBoxCount,
   toForceFreeConservationGpuInput,
   toJGS2GpuInput,
   type MinimalScriptedTargetState,
@@ -253,9 +258,15 @@ const sceneLabels: Record<SceneId, string> = {
   stiffness: "Soft / stiff",
   drop: "Floor impact",
   contact: "IPC contact",
+  trough: "IPC trough",
   cloth: "Pinned cloth",
   stress: "Stress test",
 };
+
+const troughBoxCountOptions = Array.from(
+  { length: TROUGH_MAX_BOX_COUNT - TROUGH_MIN_BOX_COUNT + 1 },
+  (_unused, index) => TROUGH_MIN_BOX_COUNT + index,
+);
 
 function requestedSceneId(): SceneId {
   const requested = new URLSearchParams(window.location.search).get("scene");
@@ -271,10 +282,27 @@ function requestedSchedule(): JGS2Schedule {
     : "jacobi";
 }
 
-function sceneHref(sceneId: SceneId, schedule: JGS2Schedule): string {
+function requestedTroughBoxCount(): number {
+  const requested = Number(
+    new URLSearchParams(window.location.search).get("boxes"),
+  );
+  return normalizeTroughBoxCount(requested);
+}
+
+function sceneHref(
+  sceneId: SceneId,
+  schedule: JGS2Schedule,
+  troughBoxCount = TROUGH_DEFAULT_BOX_COUNT,
+): string {
   const parameters = new URLSearchParams({ scene: sceneId });
   if (schedule === "graph-colored-gauss-seidel") {
     parameters.set("schedule", schedule);
+  }
+  if (
+    sceneId === "trough" &&
+    troughBoxCount !== TROUGH_DEFAULT_BOX_COUNT
+  ) {
+    parameters.set("boxes", String(troughBoxCount));
   }
   return `?${parameters.toString()}`;
 }
@@ -285,6 +313,18 @@ function selectSchedule(schedule: JGS2Schedule): void {
     parameters.set("schedule", schedule);
   } else {
     parameters.delete("schedule");
+  }
+  window.location.search = parameters.toString();
+}
+
+function selectTroughBoxCount(boxCount: number): void {
+  const parameters = new URLSearchParams(window.location.search);
+  const normalized = normalizeTroughBoxCount(boxCount);
+  parameters.set("scene", "trough");
+  if (normalized === TROUGH_DEFAULT_BOX_COUNT) {
+    parameters.delete("boxes");
+  } else {
+    parameters.set("boxes", String(normalized));
   }
   window.location.search = parameters.toString();
 }
@@ -370,6 +410,7 @@ export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sceneId = useMemo(requestedSceneId, []);
   const schedule = useMemo(requestedSchedule, []);
+  const troughBoxCount = useMemo(requestedTroughBoxCount, []);
   const testMode = useMemo(
     () => new URLSearchParams(window.location.search).get("test") === "1",
     [],
@@ -385,8 +426,8 @@ export function App() {
     () =>
       conservationFixture
         ? buildForceFreeConservationDefinition()
-        : buildSceneDefinition(sceneId),
-    [conservationFixture, sceneId],
+        : buildSceneDefinition(sceneId, { troughBoxCount }),
+    [conservationFixture, sceneId, troughBoxCount],
   );
   const parityMode = useMemo(
     () =>
@@ -460,7 +501,7 @@ export function App() {
       const precomputeStart = performance.now();
       const scene = conservationFixture
         ? buildForceFreeConservationScene()
-        : buildScene(sceneId);
+        : buildScene(sceneId, { troughBoxCount });
       const gpuInput = conservationFixture
         ? toForceFreeConservationGpuInput(scene)
         : toJGS2GpuInput(scene);
@@ -477,7 +518,7 @@ export function App() {
         return;
       }
       const format = gpu.getPreferredCanvasFormat();
-      const ipcContactScene = scene.id === "contact" || scene.id === "cloth";
+      const ipcContactScene = isIpcSceneId(scene.id);
       const searchParams = new URLSearchParams(window.location.search);
       const ipcFrictionEnabled =
         searchParams.get("friction") !== "0";
@@ -505,7 +546,7 @@ export function App() {
           ? normalizeOddIterationCount(requestedIterations)
           : scene.settings.solverIterations;
       const ipcFrictionCoefficient =
-        scene.id === "contact" ? 0.45 : scene.id === "cloth" ? 0.3 : 0;
+        scene.id === "cloth" ? 0.3 : ipcContactScene ? 0.45 : 0;
       const solverSettings = {
         schedule,
         timestep: scene.settings.timestep,
@@ -1778,7 +1819,14 @@ export function App() {
       solver?.destroy();
       gpuDevice?.destroy();
     };
-  }, [conservationFixture, parityMode, sceneId, schedule, testMode]);
+  }, [
+    conservationFixture,
+    parityMode,
+    sceneId,
+    schedule,
+    testMode,
+    troughBoxCount,
+  ]);
 
   const liveSnapshot = livePerformance.snapshot;
   const displayedMaterial =
@@ -1839,7 +1887,7 @@ export function App() {
             {PUBLIC_SCENE_IDS.map((id, index) => (
               <a
                 className={id === sceneId ? "scene-link scene-link--active" : "scene-link"}
-                href={sceneHref(id, schedule)}
+                href={sceneHref(id, schedule, troughBoxCount)}
                 key={id}
                 aria-current={id === sceneId ? "page" : undefined}
               >
@@ -1849,7 +1897,27 @@ export function App() {
             ))}
           </nav>
 
-          <label className="schedule-control">
+          {sceneId === "trough" && (
+            <label className="rail-select-control">
+              <span>Falling boxes</span>
+              <select
+                aria-label="Number of falling boxes"
+                data-testid="trough-box-count"
+                value={troughBoxCount}
+                onChange={(event) =>
+                  selectTroughBoxCount(Number(event.currentTarget.value))
+                }
+              >
+                {troughBoxCountOptions.map((boxCount) => (
+                  <option value={boxCount} key={boxCount}>
+                    {boxCount}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          <label className="rail-select-control">
             <span>Update schedule</span>
             <select
               aria-label="Solver update schedule"

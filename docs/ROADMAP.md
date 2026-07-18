@@ -276,7 +276,8 @@ interactively on this machine; no formal universal FPS promise is required.
   Item 1-5 capability run (5 tests); production auto-start/live-HUD hardware
   check (1 test); `npm run build`; final full Vitest (327 tests).
 - Actual time: About 1 hour including visual review and hardware integration.
-- Notes/blockers: The public rail now contains only minimal, contact, cloth,
+- Notes/blockers: At item completion, the public rail contained only minimal,
+  contact, cloth,
   and stress; stiffness/drop remain addressable regression fixtures. Minimal
   visibly combines a steady external force with the scripted soft target. The
   integrated hardware smoke advances 60/24/48/60 frames respectively, uses an
@@ -285,6 +286,42 @@ interactively on this machine; no formal universal FPS promise is required.
   The focused tests retain the detailed feasibility checks. The target
   Chrome/NVIDIA adapter also populated FPS, 1% low,
   CPU timing, and GPU timestamp-query fields. No universal FPS claim is made.
+
+## Post-roadmap extension - Configurable IPC box trough
+
+**Implementation**
+
+Add a public `trough` scene that reuses the mesh IPC path with a configurable
+`boxes` query/UI control. The default is ten deformable boxes; accepted values
+are bounded to 1-20. A single connected pinned solid is warped into a V so the
+apex shares topology and cannot create an infeasible zero-distance fixed/fixed
+candidate pair.
+
+**Definition of done**
+
+- [x] The default ten boxes fall and form a finite pile in the V-trough.
+- [x] Box count is selectable in the public rail and preserved in the URL.
+- [x] The initial static IPC superset is feasible above the activation band.
+- [x] A hardware trajectory stays above `dmin`, retains every box, and keeps
+      the trough pinned through the pile-up checkpoint.
+- [x] The default scene sustains realtime production cadence on the target GPU.
+
+**Work record**
+
+- Status: Completed
+- Started: 2026-07-17
+- Completed: 2026-07-18
+- Commit: `feat: add configurable IPC box trough`
+- Tests/commands run: focused scene and manifest Vitest; default ten-box
+  hardware feasibility trajectory; five-scene hardware capability smoke;
+  opt-in serialized and production performance profiles; full unit suite;
+  production build.
+- Notes: The default scene has 92 vertices, 72 tetrahedra, and 31,801 static
+  VT/EE candidates. Three JGS2 iterations preserve the tested IPC feasibility
+  while averaging 11.831 ms GPU simulation time after a 96-frame pile-up
+  pre-roll and 10.910 ms in the production HUD, sustaining 60 FPS and 1.00x
+  simulated realtime on the target Chrome/NVIDIA adapter. These are
+  machine-specific averages, not universal performance guarantees.
 
 ## Paper capability checklist
 

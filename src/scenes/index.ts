@@ -74,6 +74,7 @@ export const SCENE_IDS = [
   "stiffness",
   "drop",
   "contact",
+  "trough",
   "cloth",
   "stress",
 ] as const;
@@ -83,10 +84,35 @@ export const DEFAULT_SCENE_ID: SceneId = "minimal";
 export const PUBLIC_SCENE_IDS = [
   "minimal",
   "contact",
+  "trough",
   "cloth",
   "stress",
 ] as const satisfies readonly SceneId[];
 export type PublicSceneId = (typeof PUBLIC_SCENE_IDS)[number];
+
+export const TROUGH_DEFAULT_BOX_COUNT = 10;
+export const TROUGH_MIN_BOX_COUNT = 1;
+export const TROUGH_MAX_BOX_COUNT = 20;
+
+export interface SceneBuildOptions {
+  readonly troughBoxCount?: number;
+}
+
+/** Normalize untrusted UI/query input without allowing an oversized scene. */
+export function normalizeTroughBoxCount(
+  value: number | undefined,
+): number {
+  return Number.isSafeInteger(value) &&
+    value !== undefined &&
+    value >= TROUGH_MIN_BOX_COUNT &&
+    value <= TROUGH_MAX_BOX_COUNT
+    ? value
+    : TROUGH_DEFAULT_BOX_COUNT;
+}
+
+export function isIpcSceneId(id: string): boolean {
+  return id === "contact" || id === "trough" || id === "cloth";
+}
 
 /**
  * Test-only scene identifier. It is deliberately excluded from SCENE_IDS so
@@ -161,6 +187,42 @@ const CONTACT_SELF_MATERIAL: LinearMaterial = {
   poissonRatio: 0.35,
   color: [0.72, 0.38, 0.92, 1],
 };
+
+const TROUGH_MATERIAL: LinearMaterial = {
+  name: "pinned V-trough",
+  model: "stable-neo-hookean",
+  density: 1_000,
+  youngModulus: 120_000,
+  poissonRatio: 0.34,
+  color: [0.3, 0.37, 0.46, 1],
+};
+
+const TROUGH_BOX_MATERIALS: readonly LinearMaterial[] = [
+  {
+    name: "teal trough box",
+    model: "stable-neo-hookean",
+    density: 850,
+    youngModulus: 70_000,
+    poissonRatio: 0.35,
+    color: [0.12, 0.78, 0.7, 1],
+  },
+  {
+    name: "orange trough box",
+    model: "stable-neo-hookean",
+    density: 850,
+    youngModulus: 70_000,
+    poissonRatio: 0.35,
+    color: [0.96, 0.47, 0.18, 1],
+  },
+  {
+    name: "violet trough box",
+    model: "stable-neo-hookean",
+    density: 850,
+    youngModulus: 70_000,
+    poissonRatio: 0.35,
+    color: [0.69, 0.38, 0.91, 1],
+  },
+];
 
 const CLOTH_COLLIDER_MATERIAL: LinearMaterial = {
   name: "cloth collider",
@@ -486,6 +548,87 @@ function contactDefinition(): SceneDefinition {
   };
 }
 
+function troughMesh(): TetrahedralMesh {
+  const mesh = generateRegularCuboidMesh({
+    cells: [2, 1, 1],
+    origin: [-2.2, 0, -1.5],
+    size: [4.4, 1, 3],
+    materialId: 0,
+    bodyId: 0,
+    fixed: () => true,
+  });
+  const positions = mesh.positions.slice();
+  for (let vertex = 0; vertex < getVertexCount(mesh); vertex += 1) {
+    const offset = vertex * 3;
+    const x = positions[offset]!;
+    const layer = positions[offset + 1]!;
+    // One connected two-cell solid is warped into a V. Keeping the center
+    // column shared makes the apex topologically adjacent, so the static IPC
+    // superset cannot contain a zero-distance pair between separate walls.
+    positions[offset + 1] =
+      0.05 + 0.65 * Math.abs(x) - 0.18 * (1 - layer);
+  }
+  return { ...mesh, positions };
+}
+
+function troughBox(boxIndex: number): TetrahedralMesh {
+  const slot = boxIndex % 4;
+  const layer = Math.floor(boxIndex / 4);
+  const centered = generateRegularCuboidMesh({
+    cells: [1, 1, 1],
+    origin: [-0.23, -0.23, -0.23],
+    size: [0.46, 0.46, 0.46],
+    materialId: 1 + (boxIndex % TROUGH_BOX_MATERIALS.length),
+    bodyId: boxIndex + 1,
+  });
+  return transformTetrahedralMesh(centered, {
+    translation: [
+      slot % 2 === 0 ? -0.37 : 0.37,
+      2.15 + 0.72 * layer,
+      slot < 2 ? -0.38 : 0.38,
+    ],
+    rotationEuler: [
+      ((boxIndex % 3) - 1) * 0.04,
+      ((boxIndex % 5) - 2) * 0.035,
+      (boxIndex % 2 === 0 ? -1 : 1) * 0.055,
+    ],
+  });
+}
+
+function troughDefinition(boxCount: number): SceneDefinition {
+  const trough = troughMesh();
+  const boxes = Array.from(
+    { length: boxCount },
+    (_unused, boxIndex) => troughBox(boxIndex),
+  );
+  return {
+    id: "trough",
+    title: "IPC box trough",
+    description:
+      `${boxCount} deformable boxes fall, collide, and pile up inside a pinned V-shaped trough using mesh IPC and lagged friction.`,
+    mesh: appendTetrahedralMeshes([trough, ...boxes]),
+    materials: [TROUGH_MATERIAL, ...TROUGH_BOX_MATERIALS],
+    settings: {
+      timestep: 1 / 60,
+      gravity: [0, -9.81, 0],
+      floorY: -0.18,
+      solverIterations: 3,
+      cubatureSamples: 6,
+    },
+    camera: {
+      eye: [5.1, 3.8, 7.2],
+      target: [0, 1.7, 0],
+      up: [0, 1, 0],
+      fovYRadians: Math.PI / 4,
+    },
+    landmark: {
+      vertex: getVertexCount(trough),
+      label: "first falling box corner",
+      expectedMotion: [0, -1, 0],
+    },
+  };
+}
+
 function clothDefinition(): SceneDefinition {
   const collider = generateRegularCuboidMesh({
     cells: [1, 1, 1],
@@ -630,7 +773,10 @@ export function buildForceFreeConservationDefinition(): SceneDefinition {
   return buildPhase0ForceFreeDefinition();
 }
 
-export function buildSceneDefinition(id: SceneId): SceneDefinition {
+export function buildSceneDefinition(
+  id: SceneId,
+  options: SceneBuildOptions = {},
+): SceneDefinition {
   switch (id) {
     case "minimal":
       return minimalDefinition();
@@ -640,6 +786,10 @@ export function buildSceneDefinition(id: SceneId): SceneDefinition {
       return dropDefinition();
     case "contact":
       return contactDefinition();
+    case "trough":
+      return troughDefinition(
+        normalizeTroughBoxCount(options.troughBoxCount),
+      );
     case "cloth":
       return clothDefinition();
     case "stress":
@@ -647,8 +797,11 @@ export function buildSceneDefinition(id: SceneId): SceneDefinition {
   }
 }
 
-export function buildScene(id: SceneId = DEFAULT_SCENE_ID): PrecomputedScene {
-  return buildPrecomputedScene(buildSceneDefinition(id));
+export function buildScene(
+  id: SceneId = DEFAULT_SCENE_ID,
+  options: SceneBuildOptions = {},
+): PrecomputedScene {
+  return buildPrecomputedScene(buildSceneDefinition(id, options));
 }
 
 export function buildForceFreeConservationScene(): PrecomputedScene {
@@ -942,7 +1095,7 @@ function packJGS2GpuInput(
     cubatureWeights,
     cubatureBasis,
     ...(scene.cloth ? { cloth: buildJGS2GpuClothInput(scene)! } : {}),
-    ...(scene.id === "contact" || scene.id === "cloth"
+    ...(isIpcSceneId(scene.id)
       ? {
           contactCandidates: buildStaticIpcContactCandidates(
             vertexCount,

@@ -230,6 +230,80 @@
       ]
     },
     {
+      "id": "baseline.trough",
+      "phase": 0,
+      "kind": "baseline-scene",
+      "purpose": "Configurable multi-body IPC pile-up inside a connected pinned V-shaped trough.",
+      "runtimeSceneId": "trough",
+      "generator": {
+        "id": "connected-v-trough-with-box-array",
+        "version": "1",
+        "seed": 0,
+        "parameters": {
+          "defaultBoxCount": 10,
+          "boxCountRange": [1, 20],
+          "trough": {
+            "cells": [2, 1, 1],
+            "origin": [-2.2, 0, -1.5],
+            "size": [4.4, 1, 3],
+            "warp": "y = 0.05 + 0.65 * abs(x) - 0.18 * (1 - sourceY)",
+            "materialId": 0,
+            "bodyId": 0,
+            "fixed": true
+          },
+          "boxes": {
+            "cells": [1, 1, 1],
+            "size": [0.46, 0.46, 0.46],
+            "slotsPerLayer": 4,
+            "slotX": [-0.37, 0.37],
+            "slotZ": [-0.38, 0.38],
+            "firstLayerY": 2.15,
+            "layerSpacing": 0.72,
+            "bodyIds": "dense 1..boxCount",
+            "materialIds": "cycle 1..3"
+          },
+          "staticCandidateMode": "all-topology-filtered-vt-ee"
+        }
+      },
+      "materials": [
+        { "id": "pinned-v-trough", "density": 1000, "youngModulus": 120000, "poissonRatio": 0.34, "color": [0.3, 0.37, 0.46, 1] },
+        { "id": "teal-trough-box", "density": 850, "youngModulus": 70000, "poissonRatio": 0.35, "color": [0.12, 0.78, 0.7, 1] },
+        { "id": "orange-trough-box", "density": 850, "youngModulus": 70000, "poissonRatio": 0.35, "color": [0.96, 0.47, 0.18, 1] },
+        { "id": "violet-trough-box", "density": 850, "youngModulus": 70000, "poissonRatio": 0.35, "color": [0.69, 0.38, 0.91, 1] }
+      ],
+      "simulation": {
+        "timestep": 0.016666666666666666,
+        "gravity": [0, -9.81, 0],
+        "floorY": -0.18,
+        "parityMode": false
+      },
+      "solver": {
+        "iterations": 3,
+        "schedule": "jacobi",
+        "cubature": { "mode": "selected", "samplesPerSubproblem": 6 }
+      },
+      "initialState": {
+        "position": "deterministic layered box array above a feasible connected V-trough",
+        "linearVelocity": [0, 0, 0]
+      },
+      "sampledFrames": [
+        { "id": "start", "frame": 0, "simulatedSeconds": 0, "artifacts": ["diagnostics", "screenshot"] },
+        { "id": "pile-up", "frame": 90, "simulatedSeconds": 1.5, "artifacts": ["diagnostics", "screenshot"] }
+      ],
+      "camera": {
+        "eye": [5.1, 3.8, 7.2],
+        "target": [0, 1.7, 0],
+        "up": [0, 1, 0],
+        "fovYRadians": 0.7853981633974483
+      },
+      "expectedMetrics": [
+        { "id": "finite-state", "operator": "equals", "value": true, "normalization": "boolean" },
+        { "id": "pinned-max-error", "operator": "<=", "value": 0.00002, "normalization": "world units" },
+        { "id": "minimum-ipc-distance", "operator": ">", "value": 0.003, "normalization": "world units" },
+        { "id": "boxes-retained", "operator": "equals", "value": true, "normalization": "all dynamic body minima above trough apex" }
+      ]
+    },
+    {
       "id": "baseline.cloth",
       "phase": 0,
       "kind": "baseline-scene",

@@ -23,13 +23,14 @@ Current scene URLs are:
 
 - `/?scene=minimal`
 - `/?scene=contact`
+- `/?scene=trough` (use `&boxes=1` through `&boxes=20`; default `10`)
 - `/?scene=cloth`
 - `/?scene=stress`
 
 Append `&schedule=graph-colored-gauss-seidel` to compare the paper's
 CPU-colored GGS2 update schedule with the default parallel Jacobi schedule.
 The older `stiffness` and `drop` URLs remain available as regression fixtures
-but are intentionally hidden from the four-scene capability rail.
+but are intentionally hidden from the five-scene capability rail.
 
 ## Useful commands
 
@@ -59,8 +60,8 @@ precomputation remains in TypeScript on the CPU. WebAssembly is intentionally
 not used because it would not improve the GPU-resident hot loop for these fixed
 small scenes.
 
-The contact and cloth demos use the mesh IPC path; the analytic penalty plane
-remains only for the small non-IPC comparison scenes.
+The contact, trough, and cloth demos use the mesh IPC path; the analytic
+penalty plane remains only for the small non-IPC comparison scenes.
 
 ## Capability demos
 
@@ -68,14 +69,16 @@ remains only for the small non-IPC comparison scenes.
 | --- | --- | --- |
 | `minimal` | A forced stable-Neo-Hookean cantilever follows and releases a scripted soft target. | Variational implicit Euler, full-coordinate JGS2 bases, nonnegative Cubature, nonlinear globalization, force/target objectives, Jacobi/GGS2 selection |
 | `contact` | Deformable blocks collide and slide while a same-body pair exercises self-contact. | VT/EE candidates, IPC barrier and collision-safe step, lagged friction |
+| `trough` | A configurable set of deformable boxes falls and piles up in a connected pinned V-trough. | Multi-body VT/EE IPC, collision-safe stepping, lagged friction, GPU-local candidate rows |
 | `cloth` | A pinned pre-folded sheet drapes over a fixed collider without crossing itself. | StVK triangle stretching, quadratic-dihedral bending, IPC and friction |
 | `stress` | Six alternating soft/stiff bodies fall in parallel. | Co-rotated subspaces, mixed materials/body IDs, Jacobi/GGS2 scheduling, live CPU/GPU performance HUD |
 
 ## Scope and limitations
 
 - Scene preprocessing and greedy schedule coloring are CPU-side and static.
-- IPC uses a topology-filtered all-pairs candidate superset suitable for these
-  small fixed demos; there is no dynamic broad phase or GPU BVH.
+- IPC uses a topology-filtered static candidate superset with GPU AABB culling,
+  suitable for these small fixed demos; there is no dynamic candidate
+  generation or GPU BVH.
 - The colored schedule is deliberately bounded and unoptimized, not a general
   dynamic scheduler for million-element meshes.
 - The app targets hardware WebGPU in current Chrome. GPU timing fields report

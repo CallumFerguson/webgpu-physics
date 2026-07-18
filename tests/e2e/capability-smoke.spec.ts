@@ -1,7 +1,12 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
 type Vec3 = readonly [number, number, number];
-type CapabilitySceneId = "minimal" | "contact" | "cloth" | "stress";
+type CapabilitySceneId =
+  | "minimal"
+  | "contact"
+  | "trough"
+  | "cloth"
+  | "stress";
 
 interface CapabilityDiagnostics {
   readonly frame: number;
@@ -45,6 +50,12 @@ const CAPABILITY_CASES: readonly CapabilityCase[] = [
     scene: "contact",
     frameCount: 24,
     expectedDirection: [1, -1, 0],
+    minimumProjectedMotion: 0.01,
+  },
+  {
+    scene: "trough",
+    frameCount: 24,
+    expectedDirection: [0, -1, 0],
     minimumProjectedMotion: 0.01,
   },
   {

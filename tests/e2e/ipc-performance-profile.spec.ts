@@ -8,6 +8,7 @@ const PROFILE_OPTIONS = {
 
 const PRODUCTION_CASES = [
   { id: "contact", scene: "contact", timestep: 1 / 60, minimumSamples: 120 },
+  { id: "trough", scene: "trough", timestep: 1 / 60, minimumSamples: 120 },
   { id: "cloth", scene: "cloth", timestep: 1 / 120, minimumSamples: 240 },
   {
     id: "cloth-60hz-batched",
@@ -35,6 +36,16 @@ const PROFILE_CASES = [
   {
     id: "contact-narrow-band",
     query: "scene=contact&activation=0.004&friction=0",
+  },
+  {
+    id: "trough-friction",
+    query: "scene=trough",
+    preprofileFrames: 96,
+    expectedConfiguration: {
+      ipcActivationDistance: 0.08,
+      maxStep: 0.075,
+      lastStepIterations: 3,
+    },
   },
   {
     id: "cloth-friction",
@@ -215,6 +226,7 @@ test.describe("opt-in IPC performance diagnosis", () => {
         );
         if (
           profileCase.id === "contact-friction" ||
+          profileCase.id === "trough-friction" ||
           profileCase.id === "cloth-friction" ||
           profileCase.id === "cloth-settled"
         ) {
